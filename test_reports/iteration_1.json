@@ -1,0 +1,31 @@
+{
+  "summary": "First-run testing of AdsCopilot. All 10 backend pytest cases pass (auth, campaigns CRUD, analytics, ai/adcopy, ai/keywords, chat SSE + history). Frontend end-to-end flow verified: register/login, dashboard metrics, 5-step Create Campaign wizard, campaign detail, list with toggle+delete, Ad Copy Studio (Claude generation), Keyword Lab, Analytics, Copilot streaming, toggle-copilot, logout+re-login. One real UI overlay bug: Copilot send button is intercepted by the 'Made with Emergent' floating badge; submission still works via Enter key.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CopilotPanel", "issue": "The 'Made with Emergent' floating badge (fixed at bottom-right of the viewport) covers the copilot send button so Playwright/user cannot click it. Enter-to-submit works, so streaming and persistence are functional, but the visible send button is not clickable. Reproduces at 1920x1080 on the /campaigns route (and any route where the badge is present).", "selector": "[data-testid=\"copilot-send-btn\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Overview & Analytics charts", "issues": ["Recharts prints repeated console warning: 'The width(-1) and height(-1) of chart should be greater than 0'. Occurs on first mount before ResponsiveContainer measures parent. Cosmetic (charts render correctly), but noisy in console."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Raise the CopilotPanel input row above the Emergent badge — e.g. add bottom padding/margin to the panel input container (mb-12 / pb-14) or reposition the panel form so the send button clears the fixed badge in bottom-right at 1920x1080.",
+    "Optional: fix Recharts 'width(-1)/height(-1)' warnings by giving ResponsiveContainer parents explicit min-height or setting aspect ratios."
+  ],
+  "critical_code_review_comments": [
+    "server.py is a single 471-line module — acceptable for MVP but consider splitting (auth, campaigns, ai, chat) as it grows past ~700 lines.",
+    "_llm_json falls back to {\"_raw\": text} on JSON parse failure. Frontend AdCopyStudio/KeywordLab should defensively handle this shape (currently relies on model returning valid JSON — it did in all tests, but a bad LLM response would break the UI silently).",
+    "CORS allow_origins defaults to '*' with allow_credentials=True — browsers ignore credentials with '*' so this is fine here, but flag it for prod hardening.",
+    "chat_stream persists the assistant message only inside event_gen after StreamDone; if the client disconnects mid-stream the partial assistant reply is lost (no partial-persistence). Acceptable for MVP."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "95%"},
+  "test_credentials": "demo@adscopilot.io / demo1234 (JWT, seeded).",
+  "seed_data_creation": "Test run created a couple of TEST_ and 'UI Test *' campaigns on the demo user via backend + UI. Backend CRUD test cleans up its own campaign; UI-created 'UI Test' campaign remains on the demo account.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend pytest suite at /app/backend/tests/backend_test.py — reuse with `pytest backend/tests/backend_test.py -v`. All API contracts verified. Only remaining known UI issue is the Copilot send button being overlapped by the Emergent badge (bottom-right); after fix, re-verify by clicking [data-testid=copilot-send-btn] and confirming streaming into [data-testid=copilot-messages]."
+}
