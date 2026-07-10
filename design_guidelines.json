@@ -1,0 +1,87 @@
+{
+  "theme": "light",
+  "design_archetype": "Swiss Brutalist (ARCHETYPE 4)",
+  "typography": {
+    "headings": {
+      "font_family": "Cabinet Grotesk",
+      "style_instructions": "Use for all H1-H4. Heavy weights (Bold/Black) for emphasis. Tight tracking (`tracking-tighter`). Do not center-align."
+    },
+    "body": {
+      "font_family": "IBM Plex Sans",
+      "style_instructions": "Use for paragraphs, chat messages, and descriptive text. Left-aligned, readable."
+    },
+    "data_and_code": {
+      "font_family": "IBM Plex Mono",
+      "style_instructions": "Crucial for this app. Use for all financial metrics (Spend, CPC, CTR), ad copy character counts, and labels."
+    }
+  },
+  "colors": {
+    "backgrounds": {
+      "page": "#F4F4F0",
+      "container": "#FFFFFF"
+    },
+    "text": {
+      "primary": "#111111",
+      "secondary": "#555555",
+      "placeholder": "#888888"
+    },
+    "borders": {
+      "default": "#111111",
+      "light": "#E5E5E5"
+    },
+    "accents": {
+      "primary": "#002FA7",
+      "destructive": "#FF3B30",
+      "warning": "#FFCC00",
+      "success": "#00C853"
+    }
+  },
+  "surface_strategies": {
+    "containers": "Grid Borders (The Technical Look). Exposed skeletons, zero border radius (`rounded-none`). Solid backgrounds. Use 1px or 2px solid black borders for cards and sections.",
+    "shadows": "Hard drop shadows (`shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]`) for interactive elements like buttons and modals. No soft blurry shadows.",
+    "hover_states": "Invert colors on hover, or translate up and left with increased hard shadow."
+  },
+  "layouts": {
+    "dashboard": "High Density Grid (Mode B). Dense data presentation. Use strict bento-style grids for campaign metrics.",
+    "chat_interface": "Instead of a generic floating widget, use a rigid, dedicated right-hand column (`w-[350px]` or `w-[400px] border-l-2 border-black h-screen`). The chat should feel like an integrated terminal.",
+    "spacing": "Generous inner padding (`p-6` or `p-8`) for containers to prevent text collision with hard borders."
+  },
+  "components": {
+    "buttons": "Sharp corners, heavy text. Use `rounded-none`, high contrast colors.",
+    "inputs": "2px solid border, 0px border radius, stark focus rings (`focus:ring-2 focus:ring-black`).",
+    "charts": "Recharts. Strip out default tooltips and grids. Use monospaced fonts for axes. Use primary accent (#002FA7) for main data lines.",
+    "toasts": "Sonner (located in /app/frontend/src/components/ui/sonner.js). Customize to have solid black borders and monospace font."
+  },
+  "media": {
+    "image_urls": {
+      "login_background": {
+        "url": "https://images.unsplash.com/photo-1738844153732-a485f0e78382?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MDZ8MHwxfHNlYXJjaHwyfHxtaW5pbWFsaXN0JTIwZ2VvbWV0cmljJTIwYXJ0JTIwYXJjaGl0ZWN0dXJlfGVufDB8fHx8MTc4MzY4ODU5MHww&ixlib=rb-4.1.0&q=85",
+        "description": "Minimalist geometric building in black and white. Use for the login/register split screen."
+      },
+      "user_avatar": {
+        "url": "https://images.unsplash.com/photo-1566753323558-f4e0952af115?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwzfHxwcm9mZXNzaW9uYWwlMjBtYXJrZXRlciUyMHBvcnRyYWl0fGVufDB8fHx8MTc4MzY4ODU5MHww&ixlib=rb-4.1.0&q=85",
+        "description": "Professional marketer portrait for the top nav user avatar."
+      }
+    }
+  },
+  "accessibility": {
+    "contrast": "Ensure all text passes WCAG AA. Black text on white/grey backgrounds, white text on black/blue backgrounds.",
+    "focus": "Prominent focus rings required for keyboard navigation.",
+    "testing": "All interactive elements MUST include `data-testid` (e.g., `data-testid=\"chat-input-field\"`)."
+  },
+  "instructions_to_main_agent": [
+    "Implement a strict Light theme to fit the Swiss Brutalist archetype.",
+    "Use raw HTML/Tailwind for structural layout and Shadcn UI for complex interactive parts (Inputs, Selects, Dialogs). Customize Shadcn components to remove rounding (`rounded-none`) and add strong borders.",
+    "Create the AI Copilot as a fixed right-side panel, NOT a floating chat bubble, to reinforce the 'Ops tool' narrative.",
+    "In the Campaign Dashboard, use `IBM Plex Mono` for all numbers, CPC, CTR, and budgets.",
+    "Avoid generic SaaS blue and purple gradients entirely.",
+    "For the Create Campaign wizard, use a bold, step-by-step full-screen or large modal approach with clear typography."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "Do not apply `transition: all`. Use specific transitions (e.g., `transition-colors`, `transition-transform`).",
+    "Do not center-align the app container (`.App { text-align: center; }`). Keep text reading flow natural.",
+    "Never use emoji characters like 🤖 or 💡 as icons. Use Lucide React icons instead.",
+    "Prioritize pre-existing components in `frontend/src/components/ui`.",
+    "Use Sonner for toasts."
+  ]
+}
