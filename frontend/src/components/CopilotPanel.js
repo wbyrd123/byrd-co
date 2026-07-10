@@ -156,7 +156,7 @@ export default function CopilotPanel() {
           e.preventDefault();
           send();
         }}
-        className="border-t-2 border-black p-3 flex gap-2"
+        className="border-t-2 border-black p-3 pb-6 flex gap-2 mr-24"
       >
         <input
           value={input}
