@@ -28,7 +28,7 @@ export default function CampaignDetail() {
     if (!window.confirm("Delete this campaign?")) return;
     await api.delete(`/campaigns/${id}`);
     toast.success("Deleted");
-    nav("/campaigns");
+    nav("/adscopilot/campaigns");
   };
 
   return (

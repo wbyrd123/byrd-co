@@ -16,11 +16,11 @@ import {
 import CopilotPanel from "@/components/CopilotPanel";
 
 const NAV = [
-  { to: "/", label: "Overview", icon: LayoutGrid, end: true, testId: "nav-overview" },
-  { to: "/campaigns", label: "Campaigns", icon: Megaphone, testId: "nav-campaigns" },
-  { to: "/ad-copy", label: "Ad Copy Studio", icon: Type, testId: "nav-adcopy" },
-  { to: "/keywords", label: "Keyword Lab", icon: Search, testId: "nav-keywords" },
-  { to: "/analytics", label: "Analytics", icon: BarChart3, testId: "nav-analytics" },
+  { to: "/adscopilot", label: "Overview", icon: LayoutGrid, end: true, testId: "nav-overview" },
+  { to: "/adscopilot/campaigns", label: "Campaigns", icon: Megaphone, testId: "nav-campaigns" },
+  { to: "/adscopilot/ad-copy", label: "Ad Copy Studio", icon: Type, testId: "nav-adcopy" },
+  { to: "/adscopilot/keywords", label: "Keyword Lab", icon: Search, testId: "nav-keywords" },
+  { to: "/adscopilot/analytics", label: "Analytics", icon: BarChart3, testId: "nav-analytics" },
 ];
 
 export default function DashboardLayout() {
@@ -60,7 +60,7 @@ export default function DashboardLayout() {
         <div className="p-3 border-t-2 border-black">
           <button
             data-testid="new-campaign-btn"
-            onClick={() => nav("/campaigns/new")}
+            onClick={() => nav("/adscopilot/campaigns/new")}
             className="w-full h-11 bg-[#002FA7] text-white font-mono uppercase text-xs hard-shadow-sm press-effect flex items-center justify-center gap-2"
           >
             <Plus size={14} /> New Campaign
@@ -75,7 +75,7 @@ export default function DashboardLayout() {
             <div className="text-[11px] font-mono text-[#555] truncate">{user?.email}</div>
           </div>
           <button
-            onClick={() => { logout(); nav("/auth"); }}
+            onClick={() => { logout(); nav("/portal/login"); }}
             data-testid="logout-btn"
             title="Log out"
             className="w-9 h-9 border-2 border-black grid place-items-center hover:bg-black hover:text-white transition-colors"

@@ -4,31 +4,32 @@
 
 @layer base {
   :root {
-    --background: 60 12% 95%;      /* #F4F4F0 */
-    --foreground: 0 0% 7%;         /* #111 */
+    /* Byrd & CO — warm ivory + gold + charcoal */
+    --background: 40 33% 97%;          /* #FBF8F1 */
+    --foreground: 0 0% 10%;            /* #1A1A1A */
     --card: 0 0% 100%;
-    --card-foreground: 0 0% 7%;
+    --card-foreground: 0 0% 10%;
     --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 7%;
-    --primary: 0 0% 7%;
+    --popover-foreground: 0 0% 10%;
+    --primary: 0 0% 10%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 0 0% 96%;
-    --secondary-foreground: 0 0% 7%;
-    --muted: 0 0% 96%;
-    --muted-foreground: 0 0% 33%;
-    --accent: 224 100% 33%;        /* #002FA7 */
-    --accent-foreground: 0 0% 100%;
-    --destructive: 3 100% 60%;
+    --secondary: 40 25% 92%;
+    --secondary-foreground: 0 0% 10%;
+    --muted: 40 22% 92%;
+    --muted-foreground: 0 0% 32%;
+    --accent: 37 60% 49%;               /* #C89434 */
+    --accent-foreground: 0 0% 10%;
+    --destructive: 0 74% 42%;
     --destructive-foreground: 0 0% 100%;
-    --border: 0 0% 7%;
-    --input: 0 0% 90%;
-    --ring: 0 0% 7%;
-    --radius: 0rem;
-    --chart-1: 224 100% 33%;
-    --chart-2: 3 100% 60%;
-    --chart-3: 51 100% 50%;
-    --chart-4: 148 100% 39%;
-    --chart-5: 0 0% 7%;
+    --border: 40 20% 85%;
+    --input: 40 20% 88%;
+    --ring: 37 60% 49%;
+    --radius: 0.375rem;
+    --chart-1: 37 60% 49%;
+    --chart-2: 0 0% 25%;
+    --chart-3: 220 15% 45%;
+    --chart-4: 148 40% 40%;
+    --chart-5: 0 60% 55%;
   }
 }
 

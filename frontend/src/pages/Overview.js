@@ -28,7 +28,7 @@ export default function Overview() {
         title="Command Center."
         action={
           <button
-            onClick={() => nav("/campaigns/new")}
+            onClick={() => nav("/adscopilot/campaigns/new")}
             data-testid="overview-new-campaign"
             className="h-11 px-4 bg-black text-white font-mono uppercase text-xs hard-shadow-sm press-effect flex items-center gap-2"
           >
@@ -47,7 +47,7 @@ export default function Overview() {
             Draft targeting, keywords and ad copy in minutes. AdsCopilot fills in the boring parts.
           </p>
           <button
-            onClick={() => nav("/campaigns/new")}
+            onClick={() => nav("/adscopilot/campaigns/new")}
             data-testid="empty-new-campaign-btn"
             className="mt-6 h-11 px-4 bg-[#002FA7] text-white font-mono uppercase text-xs hard-shadow press-effect inline-flex items-center gap-2"
           >
@@ -97,7 +97,7 @@ export default function Overview() {
                   <div
                     key={c.id}
                     className="border-2 border-black p-3 cursor-pointer hover:translate-x-[-2px] hover:translate-y-[-2px] hover:hard-shadow-sm transition-transform"
-                    onClick={() => nav(`/campaigns/${c.id}`)}
+                    onClick={() => nav(`/adscopilot/campaigns/${c.id}`)}
                     data-testid={`top-campaign-${c.id}`}
                   >
                     <div className="flex items-center justify-between">

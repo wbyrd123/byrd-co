@@ -35,7 +35,7 @@ export default function Campaigns() {
         title="All Campaigns."
         action={
           <button
-            onClick={() => nav("/campaigns/new")}
+            onClick={() => nav("/adscopilot/campaigns/new")}
             data-testid="campaigns-new-btn"
             className="h-11 px-4 bg-black text-white font-mono uppercase text-xs hard-shadow-sm press-effect flex items-center gap-2"
           >
@@ -57,7 +57,7 @@ export default function Campaigns() {
             <div className="font-mono text-xs uppercase text-[#555]">// empty</div>
             <p className="mt-2">No campaigns yet.</p>
             <button
-              onClick={() => nav("/campaigns/new")}
+              onClick={() => nav("/adscopilot/campaigns/new")}
               className="mt-4 h-10 px-4 bg-[#002FA7] text-white font-mono uppercase text-xs hard-shadow-sm press-effect"
               data-testid="campaigns-empty-new"
             >
@@ -73,7 +73,7 @@ export default function Campaigns() {
             >
               <div className="p-3 min-w-0">
                 <button
-                  onClick={() => nav(`/campaigns/${c.id}`)}
+                  onClick={() => nav(`/adscopilot/campaigns/${c.id}`)}
                   className="text-left font-semibold hover:underline underline-offset-4 truncate block w-full"
                   data-testid={`campaign-name-${c.id}`}
                 >

@@ -1,96 +1,129 @@
-/* AdsCopilot — Swiss Brutalist */
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+/* Byrd & CO — global styles + AdsCopilot (Swiss Brutalist) styles */
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700;800&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 
+/* ---------- Byrd & CO tokens ---------- */
 :root {
-  --bg: #F4F4F0;
-  --surface: #FFFFFF;
-  --ink: #111111;
-  --ink-2: #555555;
-  --placeholder: #888888;
-  --border: #111111;
-  --border-light: #E5E5E5;
-  --accent: #002FA7;
-  --accent-warn: #FFCC00;
-  --accent-danger: #FF3B30;
-  --accent-success: #00C853;
+  --byrd-gold: #C89434;
+  --byrd-gold-light: #E5B968;
+  --byrd-gold-dark: #A87A24;
+  --byrd-ink: #1A1A1A;
+  --byrd-ink-soft: #2A2A2A;
+  --byrd-ivory: #FBF8F1;
+  --byrd-cream: #F3EEE0;
+  --byrd-line: #E4DFD1;
+  --byrd-muted: #6B6558;
 }
 
-html, body, #root {
-  height: 100%;
-}
+html, body, #root { height: 100%; }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--ink);
-  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--byrd-ivory);
+  color: var(--byrd-ink);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-.font-display { font-family: 'Space Grotesk', 'Cabinet Grotesk', 'IBM Plex Sans', sans-serif; letter-spacing: -0.02em; }
-.font-mono    { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
-
 .App { min-height: 100vh; }
 
-/* Brutalist hard shadow utility */
-.hard-shadow { box-shadow: 4px 4px 0 0 rgba(0,0,0,1); }
-.hard-shadow-sm { box-shadow: 2px 2px 0 0 rgba(0,0,0,1); }
-.hard-shadow-lg { box-shadow: 6px 6px 0 0 rgba(0,0,0,1); }
+.font-serif   { font-family: 'Playfair Display', Georgia, serif; letter-spacing: -0.01em; }
+.font-mono    { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+.font-display { font-family: 'Playfair Display', Georgia, serif; letter-spacing: -0.02em; }
 
-.press-effect {
-  transition: transform 120ms ease, box-shadow 120ms ease;
+/* Byrd button styles */
+.byrd-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 0 20px; height: 44px; font-weight: 600; font-size: 14px;
+  border: 1px solid var(--byrd-ink);
+  transition: background-color 180ms ease, color 180ms ease, transform 120ms ease;
+  border-radius: 4px;
 }
-.press-effect:hover { transform: translate(-2px,-2px); box-shadow: 6px 6px 0 0 rgba(0,0,0,1); }
-.press-effect:active { transform: translate(2px,2px); box-shadow: 0 0 0 0 rgba(0,0,0,1); }
+.byrd-btn-primary { background: var(--byrd-gold); color: var(--byrd-ink); border-color: var(--byrd-gold); }
+.byrd-btn-primary:hover { background: var(--byrd-gold-dark); border-color: var(--byrd-gold-dark); color: #fff; }
+.byrd-btn-dark    { background: var(--byrd-ink); color: #fff; border-color: var(--byrd-ink); }
+.byrd-btn-dark:hover { background: var(--byrd-gold); color: var(--byrd-ink); border-color: var(--byrd-gold); }
+.byrd-btn-outline { background: transparent; color: var(--byrd-ink); border-color: var(--byrd-ink); }
+.byrd-btn-outline:hover { background: var(--byrd-ink); color: #fff; }
+.byrd-btn-ghost { background: transparent; color: var(--byrd-ink); border-color: transparent; }
+.byrd-btn-ghost:hover { color: var(--byrd-gold-dark); }
+.byrd-btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
-/* Grid background for hero */
-.grid-bg {
+/* Card */
+.byrd-card {
+  background: #fff; border: 1px solid var(--byrd-line); border-radius: 6px;
+  transition: box-shadow 180ms ease, transform 180ms ease;
+}
+.byrd-card-hover:hover { box-shadow: 0 8px 24px rgba(26,26,26,0.08); transform: translateY(-2px); }
+
+/* Chip / pill */
+.byrd-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+  background: var(--byrd-cream); color: var(--byrd-ink); border: 1px solid var(--byrd-line);
+}
+.byrd-chip-gold { background: #FBEFD3; border-color: var(--byrd-gold-light); color: #7A5410; }
+.byrd-chip-green { background: #E4F4E4; border-color: #8DBE8F; color: #245C25; }
+.byrd-chip-red   { background: #FADCDA; border-color: #E38380; color: #8A1F1A; }
+.byrd-chip-blue  { background: #E4EBF5; border-color: #A6B7D2; color: #23446E; }
+
+/* Section separator */
+.byrd-rule { border: 0; border-top: 1px solid var(--byrd-line); margin: 0; }
+
+/* Grid pattern used sparingly */
+.byrd-grid-bg {
+  background-color: var(--byrd-ivory);
   background-image:
-    linear-gradient(to right, rgba(0,0,0,0.06) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(0,0,0,0.06) 1px, transparent 1px);
-  background-size: 32px 32px;
+    radial-gradient(circle at 1px 1px, rgba(26,26,26,0.06) 1px, transparent 0);
+  background-size: 24px 24px;
 }
 
-/* Blinking caret for AI copilot */
-@keyframes caret-blink { 0%,100% { opacity:1 } 50% { opacity:0 } }
-.caret { display:inline-block; width:8px; height:14px; background:#111; margin-left:2px; vertical-align:middle; animation: caret-blink 900ms steps(1) infinite; }
+/* Hero background */
+.byrd-hero {
+  background:
+    radial-gradient(1200px 500px at 80% -10%, rgba(200,148,52,0.18), transparent 60%),
+    radial-gradient(700px 400px at 10% 30%, rgba(26,26,26,0.05), transparent 60%),
+    var(--byrd-ivory);
+}
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #111; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb { background: #C9C1AF; border-radius: 999px; }
 
-/* Selection */
-::selection { background: #002FA7; color: #fff; }
+::selection { background: var(--byrd-gold); color: var(--byrd-ink); }
 
-/* Kill rounded corners globally on cards/inputs where we want brutalist */
-.brutal, .brutal * { border-radius: 0 !important; }
+/* Fade animations */
+@keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.fade-up { animation: fadeUp 320ms ease-out both; }
+.fade-up-1 { animation: fadeUp 320ms ease-out 60ms both; }
+.fade-up-2 { animation: fadeUp 320ms ease-out 120ms both; }
+.fade-up-3 { animation: fadeUp 320ms ease-out 180ms both; }
 
-/* Chart tweaks */
-.recharts-cartesian-axis-tick text { font-family: 'IBM Plex Mono', monospace; font-size: 11px; fill: #111; }
-.recharts-tooltip-wrapper .recharts-default-tooltip {
-  background: #fff !important;
-  border: 2px solid #111 !important;
-  border-radius: 0 !important;
-  font-family: 'IBM Plex Mono', monospace !important;
-  box-shadow: 4px 4px 0 0 #111;
-}
+/* ---------- AdsCopilot (Swiss Brutalist) ---------- */
+.adscopilot-scope { background: #F4F4F0; color: #111; font-family: 'IBM Plex Sans', sans-serif; }
+.adscopilot-scope .font-mono { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+.adscopilot-scope .font-display { font-family: 'IBM Plex Sans', sans-serif; letter-spacing: -0.02em; }
 
-/* Fade-in for pages */
-@keyframes fadeUp { from { opacity:0; transform: translateY(6px); } to { opacity:1; transform: none; } }
-.fade-up { animation: fadeUp 240ms ease-out both; }
-
-/* Sidebar nav */
-.nav-link {
+.adscopilot-scope .hard-shadow { box-shadow: 4px 4px 0 0 rgba(0,0,0,1); }
+.adscopilot-scope .hard-shadow-sm { box-shadow: 2px 2px 0 0 rgba(0,0,0,1); }
+.adscopilot-scope .press-effect { transition: transform 120ms ease, box-shadow 120ms ease; }
+.adscopilot-scope .press-effect:hover { transform: translate(-2px,-2px); box-shadow: 6px 6px 0 0 rgba(0,0,0,1); }
+.adscopilot-scope .press-effect:active { transform: translate(2px,2px); box-shadow: 0 0 0 0 rgba(0,0,0,1); }
+@keyframes caret-blink { 0%,100% { opacity:1 } 50% { opacity:0 } }
+.adscopilot-scope .caret { display:inline-block; width:8px; height:14px; background:#111; margin-left:2px; vertical-align:middle; animation: caret-blink 900ms steps(1) infinite; }
+.adscopilot-scope .nav-link {
   display:flex; align-items:center; gap:10px;
   padding: 10px 12px; border: 2px solid transparent;
   font-family: 'IBM Plex Mono', monospace; font-size: 13px; text-transform: uppercase;
   color: #111;
   transition: background-color 120ms, border-color 120ms, color 120ms;
 }
-.nav-link:hover { background:#111; color:#fff; }
-.nav-link.active { background:#111; color:#fff; }
-
-/* Marquee-like ticker */
-.ticker { border-top: 2px solid #111; border-bottom: 2px solid #111; overflow:hidden; }
+.adscopilot-scope .nav-link:hover { background:#111; color:#fff; }
+.adscopilot-scope .nav-link.active { background:#111; color:#fff; }
+.adscopilot-scope .recharts-cartesian-axis-tick text { font-family: 'IBM Plex Mono', monospace; font-size: 11px; fill: #111; }
+.adscopilot-scope .recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: #fff !important; border: 2px solid #111 !important; border-radius: 0 !important;
+  font-family: 'IBM Plex Mono', monospace !important; box-shadow: 4px 4px 0 0 #111;
+}

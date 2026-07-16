@@ -80,7 +80,7 @@ export default function CreateCampaign() {
     try {
       const res = await api.post("/campaigns", form);
       toast.success("Campaign created");
-      nav(`/campaigns/${res.data.id}`);
+      nav(`/adscopilot/campaigns/${res.data.id}`);
     } catch (e) {
       toast.error("Failed to create campaign");
     }
