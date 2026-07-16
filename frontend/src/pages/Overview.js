@@ -44,7 +44,7 @@ export default function Overview() {
             Spin up your first campaign.
           </h3>
           <p className="text-sm mt-2 max-w-md mx-auto text-[#555]">
-            Draft targeting, keywords and ad copy in minutes. AdsCopilot fills in the boring parts.
+            Draft targeting, keywords and ad copy in minutes. Byrd &amp; CO's Google Ads Portal fills in the boring parts.
           </p>
           <button
             onClick={() => nav("/adscopilot/campaigns/new")}

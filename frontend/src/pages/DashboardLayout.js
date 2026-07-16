@@ -37,10 +37,10 @@ export default function DashboardLayout() {
             <div className="w-8 h-8 bg-black text-white grid place-items-center hard-shadow-sm">
               <Sparkles size={16} />
             </div>
-            AdsCopilot
+            Google Ads Portal
           </div>
           <div className="font-mono text-[10px] uppercase mt-2 text-[#555]">
-            v1.0 // demo mode
+            Byrd &amp; CO // demo mode
           </div>
         </div>
         <nav className="p-3 space-y-1 flex-1">
@@ -90,7 +90,7 @@ export default function DashboardLayout() {
         {/* Top bar */}
         <header className="h-14 border-b-2 border-black px-6 flex items-center justify-between bg-white">
           <div className="font-mono text-xs uppercase text-[#555]">
-            <span className="text-black font-semibold">ADSCOPILOT</span> / management console
+            <span className="text-black font-semibold">BYRD &amp; CO</span> / google ads portal
           </div>
           <div className="flex items-center gap-3">
             <div className="font-mono text-[11px] uppercase px-2 py-1 border-2 border-black">

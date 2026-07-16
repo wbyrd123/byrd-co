@@ -3,7 +3,7 @@ import { NavLink, Outlet, Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { LOGO_URL } from "@/byrd/data";
 import {
-  LayoutDashboard, Users, Inbox, Sparkles, ExternalLink, LogOut,
+  LayoutDashboard, Users, Inbox, Sparkles, LogOut,
 } from "lucide-react";
 
 const NAV = [
@@ -52,19 +52,11 @@ export default function AdminLayout() {
             </div>
             <button
               onClick={() => nav("/adscopilot")}
-              data-testid="admin-open-adscopilot"
+              data-testid="admin-open-google-ads-portal"
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm text-[#2A2A2A] hover:bg-[#F3EEE0]"
             >
-              <Sparkles size={16} /> AdsCopilot
-              <ExternalLink size={12} className="ml-auto text-[#6B6558]" />
+              <Sparkles size={16} /> Google Ads Portal
             </button>
-            <a
-              href="https://ads.google.com" target="_blank" rel="noopener noreferrer"
-              data-testid="admin-open-google-ads"
-              className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm text-[#2A2A2A] hover:bg-[#F3EEE0]"
-            >
-              <ExternalLink size={16} /> Google Ads Portal
-            </a>
           </div>
         </nav>
         <div className="p-3 border-t border-[#E4DFD1] flex items-center gap-3">
