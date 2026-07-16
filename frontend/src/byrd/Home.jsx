@@ -279,7 +279,7 @@ export default function Home() {
                   className="hidden sm:inline-flex items-center gap-2 bg-white/95 text-[#1A1A1A] px-3 py-2 rounded-md text-sm font-semibold hover:bg-[#C89434]"
                   data-testid="hero-call"
                 >
-                  <Phone size={14} /> Call Wayne
+                  <Phone size={14} /> Call Byrd &amp; CO
                 </a>
               </div>
             </div>
