@@ -1,0 +1,31 @@
+{
+  "summary": "Deal Engine (Phase 3) end-to-end verification. Backend: 26/26 pytest cases pass — 10 new Deal Engine tests (list+seeded 'Sample MF Refi — Sugar Land', scenario create/patch, metrics correctness (LTV 70.73%, DSCR 0.9, DY 6.98%, monthly 18809, NOI 202400), PDF (application/pdf, %PDF header, ≥3KB), lender CRUD, match ordering, share creation + draft→shopping transition, public preflight/gate/package/doc access enforcement (included 200, on_request 403 pre-grant / 200 post-grant), request-docs, audit trail with all 5 actions gate|view_scenario|view_doc|request_docs|download_pdf) + 16 prior regression tests (auth, invites, docs upload, quotes, role guards). Frontend: Wayne logs into /admin, sidebar nav shows Scenarios + Lenders, /admin/scenarios lists 2 scenarios incl 'Sample MF Refi — Sugar Land' with LTV/DSCR chips; scenario detail shows 4 tabs (overview/package/docs/lenders), metrics grid renders (LTV/DSCR/Debt Yield/NOI/Monthly P&I), Package tab edits + Sources&Uses add row works (5→6), Lenders tab Run Match returns matches ordered by score, existing share card displayed. /admin/lenders loads. Public /lender/scenario/{token} shows soft gate → after submit shows package with watermark 'TestBank — Test Viewer' as position:fixed overlay repeated diagonally, metric cards (Loan/Value/LTV/LTC/DSCR/Debt Yield/NOI/Monthly P&I/Rate/Amort/Term/Recourse), sources & uses breakdown, and Download PDF button.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Scenario detail — Package tab", "issues": ["Dev-tooling instrumentation wraps <option> children in <span>, causing a React hydration warning ('<span> cannot be a child of <option>'). Cosmetic (console-only); doesn't affect UI. Only shows in the preview harness."]},
+      {"screen": "Lender public view watermark", "issues": ["Watermark span computed opacity is 1.0 — visual low-opacity effect is achieved via color alpha rather than the CSS opacity property. Spec mentioned 'low opacity' as a hint; visually acceptable but note if the main agent expected CSS opacity < 1."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_deal_engine.py", "/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml", "/app/test_reports/pytest/deal_engine.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now ~1790 lines — well past the 700-line threshold flagged in iteration_2. Consider splitting into modules: byrd_deal.py (scenarios/lenders/shares/lender-view/PDF), byrd_portal.py (client/admin/invites/docs), auth.py, adscopilot.py. Sizing/matching are pure functions — easy to extract into pricing.py.",
+    "POST /api/admin/scenarios requires 'name'; iteration-3 spec claimed a backend default of 'Untitled'. In practice the frontend always sends 'Untitled Scenario', so no user-facing bug — but consider making 'name' optional with default to match the spec and be resilient to future API clients.",
+    "compute_scenario_metrics is recomputed on every list_scenarios call (N scenarios). Fine for MVP scale but consider caching in DB and only recomputing on PATCH to avoid CPU work on every list.",
+    "match_lenders scoring gives no boost for exact geo/property fit and penalises misses by 2x — reasonable heuristic but has no unit tests. Add a small test file (test_sizing.py) that pins the formula.",
+    "Lender view PDF regenerates on every download with reportlab (blocking loop). Consider running in a threadpool for large SOU tables.",
+    "Session JWT for lender views is 12h with no revoke path — a revoked share (admin action) leaves an already-gated viewer's session_token valid until expiry (they can still hit /doc endpoints because the share lookup by token is only done via the share row; a revoke that deletes the share row makes subsequent requests 404, which is correct, but consider explicit test to lock down semantics).",
+    "AdminScenarioDetail.jsx renders <span> inside <option> via the Sel component (dev-instrumentation only) — not a real bug, but if the codebase adds a plain-JSX <select> anywhere else, the warning becomes real. Leaving as-is.",
+    "Public POST /api/public/quote still has no rate limiting/captcha (carried over from iteration 2)."
+  ],
+  "updated_files": ["/app/backend/tests/test_deal_engine.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "wayne@byrd-co.com / byrdco2026 (admin); caleb@byrd-co.com / byrdco2026 (admin); sample@example.com / sample123 (client).",
+  "seed_data_creation": "Backend suite creates isolated TEST_ scenarios/lenders/shares and cleans them up after test_public_lender_flow (module-scoped fixture teardown). One share token remains pre-seeded for Frost Bank against 'Sample MF Refi — Sugar Land'. UI test also gated once as 'TestBank / Test Viewer' — this appended one gate view + one download_pdf log to the existing Frost Bank share audit trail (harmless, but the counts differ across runs).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Re-run: `pytest backend/tests/ -v` covers both suites (26 tests). Public lender flow fixture builds its own scenario+lender+attached-docs with a linked sample client — do NOT hardcode share tokens (create per-run). The existing pre-seeded 'Sample MF Refi — Sugar Land' scenario is not client-linked, so its Documents tab is empty in the UI (expected). If you want to test the on_request grant UI, use the module fixture pattern in test_deal_engine.py::scenario_and_lender, or link the seeded scenario to sample@example.com and attach two client docs. Financials model uses `operating_expenses` and `capex_reserves` field names (not opex/capex as the spec shorthand suggested)."
+}

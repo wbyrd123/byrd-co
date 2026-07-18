@@ -563,6 +563,953 @@ async def admin_update_quote(qid: str, body: dict, admin=Depends(require_admin))
     return {"ok": True}
 
 
+# ================================================================
+# Deal Engine — Scenarios, Lenders, Lender Shares (Phase 1 + 2)
+# ================================================================
+from io import BytesIO
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
+)
+from reportlab.pdfgen import canvas as pdf_canvas
+
+BYRD_GOLD = colors.HexColor("#C89434")
+BYRD_INK = colors.HexColor("#1A1A1A")
+BYRD_IVORY = colors.HexColor("#FBF8F1")
+BYRD_MUTED = colors.HexColor("#6B6558")
+BYRD_LINE = colors.HexColor("#E4DFD1")
+
+
+# ---------- Models ----------
+class SponsorInfo(BaseModel):
+    name: Optional[str] = ""
+    entity: Optional[str] = ""
+    credit_score: Optional[int] = None
+    liquidity: Optional[float] = None
+    net_worth: Optional[float] = None
+
+
+class PropertyInfo(BaseModel):
+    address: Optional[str] = ""
+    city: Optional[str] = ""
+    state: Optional[str] = ""
+    zip: Optional[str] = ""
+    property_type: Optional[str] = ""
+    year_built: Optional[int] = None
+    units: Optional[int] = None
+    sqft: Optional[float] = None
+    purchase_price: Optional[float] = None
+    current_value: Optional[float] = None
+    occupancy_pct: Optional[float] = None
+
+
+class LoanRequest(BaseModel):
+    loan_amount: Optional[float] = None
+    loan_type: Optional[str] = ""            # Purchase / Refi / Cash-Out / Construction / Bridge / Portfolio
+    term_months: Optional[int] = None
+    amort_months: Optional[int] = None
+    requested_rate_pct: Optional[float] = None
+    recourse: Optional[str] = ""             # recourse / non-recourse / partial
+
+
+class Financials(BaseModel):
+    gross_income: Optional[float] = None
+    vacancy_pct: Optional[float] = None
+    operating_expenses: Optional[float] = None
+    capex_reserves: Optional[float] = None
+    override_noi: Optional[float] = None     # if borrower provides NOI directly
+
+
+class ConstructionBudget(BaseModel):
+    total_project_cost: Optional[float] = None
+    land_cost: Optional[float] = None
+    hard_costs: Optional[float] = None
+    soft_costs: Optional[float] = None
+    contingency: Optional[float] = None
+
+
+class SUItem(BaseModel):
+    label: str
+    amount: float
+    category: Literal["source", "use"]
+
+
+class AttachedDoc(BaseModel):
+    doc_id: str
+    visibility: Literal["included", "on_request"] = "on_request"
+
+
+class ScenarioCreate(BaseModel):
+    name: str
+    client_id: Optional[str] = None
+    sponsor: SponsorInfo = Field(default_factory=SponsorInfo)
+    property_info: PropertyInfo = Field(default_factory=PropertyInfo)
+    loan_request: LoanRequest = Field(default_factory=LoanRequest)
+    financials: Financials = Field(default_factory=Financials)
+    construction: Optional[ConstructionBudget] = None
+    sources_uses: List[SUItem] = Field(default_factory=list)
+    attached_docs: List[AttachedDoc] = Field(default_factory=list)
+    notes: Optional[str] = ""
+    business_plan: Optional[str] = ""
+
+
+class ScenarioUpdate(BaseModel):
+    name: Optional[str] = None
+    status: Optional[Literal["draft", "shopping", "term_sheet", "closed", "lost"]] = None
+    client_id: Optional[str] = None
+    sponsor: Optional[SponsorInfo] = None
+    property_info: Optional[PropertyInfo] = None
+    loan_request: Optional[LoanRequest] = None
+    financials: Optional[Financials] = None
+    construction: Optional[ConstructionBudget] = None
+    sources_uses: Optional[List[SUItem]] = None
+    attached_docs: Optional[List[AttachedDoc]] = None
+    notes: Optional[str] = None
+    business_plan: Optional[str] = None
+
+
+class LenderContact(BaseModel):
+    name: str
+    title: Optional[str] = ""
+    phone: Optional[str] = ""
+    email: Optional[str] = ""
+
+
+class LenderCreate(BaseModel):
+    name: str
+    institution_type: Optional[str] = "bank"   # bank / credit_union / private / agency / bridge / hard_money / other
+    contacts: List[LenderContact] = Field(default_factory=list)
+    property_types: List[str] = Field(default_factory=list)
+    min_loan: Optional[float] = None
+    max_loan: Optional[float] = None
+    max_ltv: Optional[float] = None
+    max_ltc: Optional[float] = None
+    min_dscr: Optional[float] = None
+    min_debt_yield: Optional[float] = None
+    geography: List[str] = Field(default_factory=list)   # states or "nationwide"
+    rate_min: Optional[float] = None
+    rate_max: Optional[float] = None
+    typical_term_months: Optional[int] = None
+    recourse_preference: Optional[str] = ""    # recourse / non-recourse / either
+    decision_speed_days: Optional[int] = None
+    typical_fees: Optional[str] = ""
+    notes: Optional[str] = ""
+    status: Optional[Literal["active", "passive", "dormant"]] = "active"
+
+
+class LenderUpdate(LenderCreate):
+    name: Optional[str] = None                 # allow partial updates
+    institution_type: Optional[str] = None
+
+
+class ShareCreate(BaseModel):
+    lender_id: Optional[str] = None
+    recipient_name: Optional[str] = ""         # if not from directory
+    recipient_email: Optional[EmailStr] = None
+    recipient_institution: Optional[str] = ""
+    note: Optional[str] = ""
+
+
+class LenderGate(BaseModel):
+    viewer_name: str = Field(min_length=1)
+    viewer_email: EmailStr
+    viewer_institution: str = Field(min_length=1)
+
+
+class LenderDocAccessAction(BaseModel):
+    action: Literal["approve", "revoke"]
+
+
+# ---------- Sizing engine ----------
+def _calc_noi(fin: dict) -> Optional[float]:
+    if not fin:
+        return None
+    if fin.get("override_noi") is not None:
+        return float(fin["override_noi"])
+    gross = fin.get("gross_income")
+    if gross is None:
+        return None
+    vac = float(fin.get("vacancy_pct") or 0) / 100.0
+    opex = float(fin.get("operating_expenses") or 0)
+    reserves = float(fin.get("capex_reserves") or 0)
+    return round(float(gross) * (1 - vac) - opex - reserves, 2)
+
+
+def _monthly_payment(loan_amount: float, annual_rate_pct: float, amort_months: int) -> Optional[float]:
+    if not loan_amount or not amort_months:
+        return None
+    r = (annual_rate_pct or 0) / 100.0 / 12.0
+    n = amort_months
+    if r == 0:
+        return round(loan_amount / n, 2)
+    pmt = loan_amount * r * (1 + r) ** n / ((1 + r) ** n - 1)
+    return round(pmt, 2)
+
+
+def _property_value(prop: dict) -> Optional[float]:
+    if not prop:
+        return None
+    pv = prop.get("purchase_price")
+    cv = prop.get("current_value")
+    if pv and cv:
+        return max(float(pv), float(cv))
+    return float(pv or cv or 0) or None
+
+
+def _total_project_cost(prop: dict, con: dict) -> Optional[float]:
+    if con:
+        tpc = con.get("total_project_cost")
+        if tpc:
+            return float(tpc)
+        parts = [con.get("land_cost"), con.get("hard_costs"), con.get("soft_costs"), con.get("contingency")]
+        if any(p is not None for p in parts):
+            return round(sum(float(p or 0) for p in parts), 2)
+    return _property_value(prop)
+
+
+def compute_scenario_metrics(scen: dict) -> dict:
+    prop = scen.get("property_info") or {}
+    loan = scen.get("loan_request") or {}
+    fin = scen.get("financials") or {}
+    con = scen.get("construction") or {}
+    su = scen.get("sources_uses") or []
+
+    loan_amount = float(loan.get("loan_amount") or 0) or None
+    rate = float(loan.get("requested_rate_pct") or 0) or None
+    amort = int(loan.get("amort_months") or 0) or None
+
+    property_value = _property_value(prop)
+    tpc = _total_project_cost(prop, con)
+    noi = _calc_noi(fin)
+    monthly_pmt = _monthly_payment(loan_amount, rate, amort) if (loan_amount and rate and amort) else None
+    annual_ds = round(monthly_pmt * 12, 2) if monthly_pmt else None
+
+    ltv = round(loan_amount / property_value * 100, 2) if (loan_amount and property_value) else None
+    ltc = round(loan_amount / tpc * 100, 2) if (loan_amount and tpc) else None
+    dscr = round(noi / annual_ds, 2) if (noi is not None and annual_ds) else None
+    debt_yield = round(noi / loan_amount * 100, 2) if (noi is not None and loan_amount) else None
+
+    sources_total = round(sum(float(x.get("amount") or 0) for x in su if x.get("category") == "source"), 2)
+    uses_total = round(sum(float(x.get("amount") or 0) for x in su if x.get("category") == "use"), 2)
+    su_balanced = abs(sources_total - uses_total) < 1.0
+
+    # Cash-on-cash: NOI - annual_ds divided by equity (uses_total - loan_amount) if available
+    equity = None
+    if uses_total and loan_amount:
+        equity = round(uses_total - loan_amount, 2)
+    coc = None
+    if noi is not None and annual_ds and equity and equity > 0:
+        annual_cf = noi - annual_ds
+        coc = round(annual_cf / equity * 100, 2)
+
+    return {
+        "property_value": property_value,
+        "total_project_cost": tpc,
+        "noi": noi,
+        "monthly_payment": monthly_pmt,
+        "annual_debt_service": annual_ds,
+        "ltv_pct": ltv,
+        "ltc_pct": ltc,
+        "dscr": dscr,
+        "debt_yield_pct": debt_yield,
+        "cash_on_cash_pct": coc,
+        "sources_total": sources_total,
+        "uses_total": uses_total,
+        "sources_uses_balanced": su_balanced,
+        "equity_required": equity,
+    }
+
+
+def match_lenders(scen: dict, lenders: List[dict]) -> List[dict]:
+    prop = scen.get("property_info") or {}
+    loan = scen.get("loan_request") or {}
+    metrics = compute_scenario_metrics(scen)
+    loan_amount = float(loan.get("loan_amount") or 0) or None
+    ptype = (prop.get("property_type") or "").lower()
+    state = (prop.get("state") or "").upper()
+    ltv = metrics.get("ltv_pct")
+    dscr = metrics.get("dscr")
+    dy = metrics.get("debt_yield_pct")
+
+    results = []
+    for l in lenders:
+        reasons_fit = []
+        reasons_miss = []
+        # property type
+        pt_list = [p.lower() for p in (l.get("property_types") or [])]
+        if pt_list and ptype:
+            if ptype in pt_list or "other" in pt_list:
+                reasons_fit.append(f"lends on {ptype}")
+            else:
+                reasons_miss.append(f"doesn't lend on {ptype}")
+        # size
+        if loan_amount:
+            mn, mx = l.get("min_loan"), l.get("max_loan")
+            if mn and loan_amount < mn:
+                reasons_miss.append(f"below min ${int(mn):,}")
+            elif mx and loan_amount > mx:
+                reasons_miss.append(f"above max ${int(mx):,}")
+            elif mn or mx:
+                reasons_fit.append("size fits")
+        # LTV
+        if ltv is not None and l.get("max_ltv") is not None:
+            if ltv <= l["max_ltv"]:
+                reasons_fit.append(f"LTV {ltv}% ≤ {l['max_ltv']}%")
+            else:
+                reasons_miss.append(f"LTV {ltv}% > {l['max_ltv']}%")
+        # DSCR
+        if dscr is not None and l.get("min_dscr") is not None:
+            if dscr >= l["min_dscr"]:
+                reasons_fit.append(f"DSCR {dscr} ≥ {l['min_dscr']}")
+            else:
+                reasons_miss.append(f"DSCR {dscr} < {l['min_dscr']}")
+        # Debt yield
+        if dy is not None and l.get("min_debt_yield") is not None:
+            if dy >= l["min_debt_yield"]:
+                reasons_fit.append(f"DY {dy}% ≥ {l['min_debt_yield']}%")
+            else:
+                reasons_miss.append(f"DY {dy}% < {l['min_debt_yield']}%")
+        # geography
+        geo = [g.upper() for g in (l.get("geography") or [])]
+        if geo and state:
+            if state in geo or "NATIONWIDE" in geo:
+                reasons_fit.append(f"lends in {state}")
+            else:
+                reasons_miss.append(f"not in {state}")
+
+        score = len(reasons_fit) - len(reasons_miss) * 2
+        results.append({
+            "lender": l,
+            "score": score,
+            "fits": reasons_fit,
+            "misses": reasons_miss,
+            "verdict": "fit" if len(reasons_miss) == 0 and reasons_fit else ("partial" if reasons_fit else "miss"),
+        })
+    results.sort(key=lambda x: (-x["score"], x["lender"].get("name", "")))
+    return results
+
+
+# ---------- PDF generation ----------
+def _watermark_canvas(watermark_text: str):
+    """Returns a function suitable for onPage callback."""
+    def draw(canv: pdf_canvas.Canvas, doc):
+        if not watermark_text:
+            return
+        canv.saveState()
+        canv.translate(4.25 * inch, 5.5 * inch)
+        canv.rotate(30)
+        canv.setFillColor(colors.Color(0.75, 0.55, 0.15, alpha=0.10))
+        canv.setFont("Helvetica-Bold", 60)
+        canv.drawCentredString(0, 0, watermark_text.upper())
+        canv.restoreState()
+
+        # Footer stamp
+        canv.saveState()
+        canv.setFillColor(BYRD_MUTED)
+        canv.setFont("Helvetica", 8)
+        canv.drawString(0.75 * inch, 0.5 * inch,
+                        f"Confidential — prepared for {watermark_text} · Byrd & CO Commercial RE Lending")
+        canv.drawRightString(letter[0] - 0.75 * inch, 0.5 * inch, f"Page {doc.page}")
+        canv.restoreState()
+    return draw
+
+
+def _fmt_money(v):
+    if v is None or v == "":
+        return "—"
+    try:
+        return f"${float(v):,.0f}"
+    except Exception:
+        return str(v)
+
+
+def _fmt_pct(v, digits=2):
+    if v is None or v == "":
+        return "—"
+    return f"{float(v):.{digits}f}%"
+
+
+def _fmt_num(v):
+    if v is None or v == "":
+        return "—"
+    return f"{v}"
+
+
+def render_scenario_pdf(scen: dict, client: Optional[dict], metrics: dict, watermark_text: str = "") -> bytes:
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter,
+                            leftMargin=0.75 * inch, rightMargin=0.75 * inch,
+                            topMargin=0.85 * inch, bottomMargin=0.85 * inch,
+                            title=f"Byrd & CO — {scen.get('name', 'Loan Package')}")
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="Helvetica-Bold",
+                        fontSize=22, leading=26, textColor=BYRD_INK, spaceAfter=6)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="Helvetica-Bold",
+                        fontSize=13, leading=16, textColor=BYRD_INK, spaceBefore=12, spaceAfter=4)
+    body = ParagraphStyle("body", parent=styles["BodyText"], fontName="Helvetica",
+                          fontSize=10, leading=14, textColor=BYRD_INK)
+    small = ParagraphStyle("small", parent=styles["BodyText"], fontName="Helvetica",
+                           fontSize=8, leading=11, textColor=BYRD_MUTED)
+
+    elements = []
+    # Header block
+    elements.append(Paragraph("BYRD &amp; CO", ParagraphStyle("brand", fontName="Helvetica-Bold",
+                                                              fontSize=10, textColor=BYRD_GOLD, spaceAfter=2)))
+    elements.append(Paragraph("Commercial Real Estate Lending", small))
+    elements.append(Spacer(1, 14))
+    elements.append(Paragraph(scen.get("name") or "Loan Package", h1))
+    prop = scen.get("property_info") or {}
+    loan = scen.get("loan_request") or {}
+    addr_bits = [prop.get("address"), prop.get("city"), prop.get("state"), prop.get("zip")]
+    addr = ", ".join([b for b in addr_bits if b])
+    if addr:
+        elements.append(Paragraph(addr, body))
+    if loan.get("loan_type") or loan.get("loan_amount"):
+        elements.append(Paragraph(
+            f"<b>{loan.get('loan_type') or 'Loan'}</b> · {_fmt_money(loan.get('loan_amount'))} requested",
+            body,
+        ))
+
+    # Executive Numbers
+    elements.append(Paragraph("Executive Summary", h2))
+    def cell(label, val):
+        return [Paragraph(f"<font color='#6B6558' size=8>{label}</font>", small),
+                Paragraph(f"<b>{val}</b>", body)]
+    grid = [
+        [Paragraph("<b>Loan Amount</b>", body), _fmt_money(loan.get("loan_amount")),
+         Paragraph("<b>Property Value</b>", body), _fmt_money(metrics.get("property_value"))],
+        [Paragraph("<b>LTV</b>", body), _fmt_pct(metrics.get("ltv_pct")),
+         Paragraph("<b>LTC</b>", body), _fmt_pct(metrics.get("ltc_pct"))],
+        [Paragraph("<b>NOI</b>", body), _fmt_money(metrics.get("noi")),
+         Paragraph("<b>Debt Yield</b>", body), _fmt_pct(metrics.get("debt_yield_pct"))],
+        [Paragraph("<b>DSCR</b>", body), _fmt_num(metrics.get("dscr")),
+         Paragraph("<b>Cash-on-Cash</b>", body), _fmt_pct(metrics.get("cash_on_cash_pct"))],
+        [Paragraph("<b>Monthly P&amp;I</b>", body), _fmt_money(metrics.get("monthly_payment")),
+         Paragraph("<b>Annual Debt Service</b>", body), _fmt_money(metrics.get("annual_debt_service"))],
+    ]
+    t = Table(grid, colWidths=[1.5 * inch, 1.6 * inch, 1.5 * inch, 1.6 * inch])
+    t.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+        ("BACKGROUND", (0, 0), (0, -1), BYRD_IVORY),
+        ("BACKGROUND", (2, 0), (2, -1), BYRD_IVORY),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(t)
+
+    # Property & Sponsor
+    elements.append(Paragraph("Property", h2))
+    prop_rows = [
+        ["Type", prop.get("property_type") or "—", "Year Built", _fmt_num(prop.get("year_built"))],
+        ["Units", _fmt_num(prop.get("units")), "Sq Ft", _fmt_num(prop.get("sqft"))],
+        ["Purchase Price", _fmt_money(prop.get("purchase_price")),
+         "Current Value", _fmt_money(prop.get("current_value"))],
+        ["Occupancy", _fmt_pct(prop.get("occupancy_pct"), 1), "", ""],
+    ]
+    t2 = Table(prop_rows, colWidths=[1.5 * inch, 1.6 * inch, 1.5 * inch, 1.6 * inch])
+    _kv_style = TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+        ("FONT", (0, 0), (-1, -1), "Helvetica", 10),
+        ("BACKGROUND", (0, 0), (0, -1), BYRD_IVORY),
+        ("BACKGROUND", (2, 0), (2, -1), BYRD_IVORY),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ])
+    t2.setStyle(_kv_style)
+    elements.append(t2)
+
+    sponsor = scen.get("sponsor") or {}
+    if any(sponsor.values()):
+        elements.append(Paragraph("Sponsor", h2))
+        sp_rows = [
+            ["Name", sponsor.get("name") or "—", "Entity", sponsor.get("entity") or "—"],
+            ["FICO", _fmt_num(sponsor.get("credit_score")), "Liquidity", _fmt_money(sponsor.get("liquidity"))],
+            ["Net Worth", _fmt_money(sponsor.get("net_worth")), "", ""],
+        ]
+        t3 = Table(sp_rows, colWidths=[1.5 * inch, 1.6 * inch, 1.5 * inch, 1.6 * inch])
+        t3.setStyle(_kv_style)
+        elements.append(t3)
+
+    # Loan Request detail
+    elements.append(Paragraph("Loan Request", h2))
+    lr_rows = [
+        ["Type", loan.get("loan_type") or "—", "Amount", _fmt_money(loan.get("loan_amount"))],
+        ["Requested Rate", _fmt_pct(loan.get("requested_rate_pct"), 3),
+         "Amortization", _fmt_num(loan.get("amort_months")) + (" mo" if loan.get("amort_months") else "")],
+        ["Term", _fmt_num(loan.get("term_months")) + (" mo" if loan.get("term_months") else ""),
+         "Recourse", loan.get("recourse") or "—"],
+    ]
+    t4 = Table(lr_rows, colWidths=[1.5 * inch, 1.6 * inch, 1.5 * inch, 1.6 * inch])
+    t4.setStyle(_kv_style)
+    elements.append(t4)
+
+    # Sources & Uses
+    su = scen.get("sources_uses") or []
+    if su:
+        elements.append(Paragraph("Sources &amp; Uses", h2))
+        sources = [x for x in su if x.get("category") == "source"]
+        uses = [x for x in su if x.get("category") == "use"]
+
+        def su_table(items, header):
+            rows = [[header, "Amount"]]
+            for it in items:
+                rows.append([it.get("label", ""), _fmt_money(it.get("amount"))])
+            total = sum(float(it.get("amount") or 0) for it in items)
+            rows.append(["Total", _fmt_money(total)])
+            tt = Table(rows, colWidths=[3.2 * inch, 3.0 * inch])
+            tt.setStyle(TableStyle([
+                ("FONT", (0, 0), (-1, -1), "Helvetica", 10),
+                ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 10),
+                ("FONT", (0, -1), (-1, -1), "Helvetica-Bold", 10),
+                ("BACKGROUND", (0, 0), (-1, 0), BYRD_INK),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("BACKGROUND", (0, -1), (-1, -1), BYRD_IVORY),
+                ("GRID", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]))
+            return tt
+
+        if sources:
+            elements.append(su_table(sources, "Sources"))
+            elements.append(Spacer(1, 6))
+        if uses:
+            elements.append(su_table(uses, "Uses"))
+
+    # Business plan / notes
+    if scen.get("business_plan"):
+        elements.append(Paragraph("Business Plan", h2))
+        elements.append(Paragraph(scen["business_plan"].replace("\n", "<br/>"), body))
+    if scen.get("notes"):
+        elements.append(Paragraph("Notes", h2))
+        elements.append(Paragraph(scen["notes"].replace("\n", "<br/>"), body))
+
+    doc.build(elements, onFirstPage=_watermark_canvas(watermark_text), onLaterPages=_watermark_canvas(watermark_text))
+    return buf.getvalue()
+
+
+# ---------- SCENARIOS: admin routes ----------
+def _clean_scenario(doc: dict) -> dict:
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/admin/scenarios")
+async def create_scenario(body: ScenarioCreate, admin=Depends(require_admin)):
+    if body.client_id:
+        client = await db.users.find_one({"id": body.client_id, "role": "client"})
+        if not client:
+            raise HTTPException(status_code=400, detail="Client not found")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "broker_id": admin["id"],
+        "status": "draft",
+        **body.model_dump(),
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.scenarios.insert_one(doc)
+    return _clean_scenario(doc)
+
+
+@api.get("/admin/scenarios")
+async def list_scenarios(admin=Depends(require_admin)):
+    docs = await db.scenarios.find({}, {"_id": 0}).sort("updated_at", -1).to_list(500)
+    for d in docs:
+        d["metrics"] = compute_scenario_metrics(d)
+        d["share_count"] = await db.scenario_shares.count_documents({"scenario_id": d["id"]})
+        if d.get("client_id"):
+            client = await db.users.find_one({"id": d["client_id"]}, {"_id": 0, "name": 1, "email": 1})
+            d["client"] = client
+    return docs
+
+
+@api.get("/admin/scenarios/{sid}")
+async def get_scenario(sid: str, admin=Depends(require_admin)):
+    d = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not d:
+        raise HTTPException(status_code=404, detail="Not found")
+    d["metrics"] = compute_scenario_metrics(d)
+    if d.get("client_id"):
+        client = await db.users.find_one({"id": d["client_id"]}, {"_id": 0, "password_hash": 0})
+        d["client"] = client
+        # attach client docs (for the picker)
+        client_docs = await db.client_docs.find({"client_id": d["client_id"]}, {"_id": 0}).sort("order", 1).to_list(500)
+        for cd in client_docs:
+            if cd.get("file_id"):
+                f = await db.client_files.find_one({"id": cd["file_id"]}, {"_id": 0, "data_b64": 0})
+                cd["file"] = f
+        d["client_docs"] = client_docs
+    else:
+        d["client_docs"] = []
+    d["shares"] = await db.scenario_shares.find({"scenario_id": sid}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return d
+
+
+@api.patch("/admin/scenarios/{sid}")
+async def update_scenario(sid: str, body: ScenarioUpdate, admin=Depends(require_admin)):
+    update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = now_iso()
+    res = await db.scenarios.update_one({"id": sid}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    d = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    d["metrics"] = compute_scenario_metrics(d)
+    return d
+
+
+@api.delete("/admin/scenarios/{sid}")
+async def delete_scenario(sid: str, admin=Depends(require_admin)):
+    res = await db.scenarios.delete_one({"id": sid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    await db.scenario_shares.delete_many({"scenario_id": sid})
+    await db.share_views.delete_many({"scenario_id": sid})
+    return {"ok": True}
+
+
+@api.get("/admin/scenarios/{sid}/pdf")
+async def scenario_pdf(sid: str, admin=Depends(require_admin)):
+    d = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not d:
+        raise HTTPException(status_code=404, detail="Not found")
+    metrics = compute_scenario_metrics(d)
+    client = None
+    if d.get("client_id"):
+        client = await db.users.find_one({"id": d["client_id"]}, {"_id": 0, "password_hash": 0})
+    pdf_bytes = render_scenario_pdf(d, client, metrics, watermark_text="Byrd & CO — Internal Copy")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="byrd-scenario-{sid[:8]}.pdf"'},
+    )
+
+
+@api.get("/admin/scenarios/{sid}/match")
+async def match(sid: str, admin=Depends(require_admin)):
+    d = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not d:
+        raise HTTPException(status_code=404, detail="Not found")
+    lenders = await db.lenders.find({}, {"_id": 0}).to_list(500)
+    return match_lenders(d, lenders)
+
+
+# ---------- LENDERS: admin routes ----------
+@api.post("/admin/lenders")
+async def create_lender(body: LenderCreate, admin=Depends(require_admin)):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "broker_id": admin["id"],
+        **body.model_dump(),
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.lenders.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/admin/lenders")
+async def list_lenders(admin=Depends(require_admin)):
+    return await db.lenders.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+
+
+@api.get("/admin/lenders/{lid}")
+async def get_lender(lid: str, admin=Depends(require_admin)):
+    d = await db.lenders.find_one({"id": lid}, {"_id": 0})
+    if not d:
+        raise HTTPException(status_code=404, detail="Not found")
+    return d
+
+
+@api.patch("/admin/lenders/{lid}")
+async def update_lender(lid: str, body: LenderUpdate, admin=Depends(require_admin)):
+    update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = now_iso()
+    res = await db.lenders.update_one({"id": lid}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    d = await db.lenders.find_one({"id": lid}, {"_id": 0})
+    return d
+
+
+@api.delete("/admin/lenders/{lid}")
+async def delete_lender(lid: str, admin=Depends(require_admin)):
+    res = await db.lenders.delete_one({"id": lid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+
+# ---------- SCENARIO SHARES ----------
+@api.post("/admin/scenarios/{sid}/shares")
+async def create_share(sid: str, body: ShareCreate, admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    lender = None
+    if body.lender_id:
+        lender = await db.lenders.find_one({"id": body.lender_id}, {"_id": 0})
+        if not lender:
+            raise HTTPException(status_code=400, detail="Lender not found")
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    now = now_iso()
+    share = {
+        "id": str(uuid.uuid4()),
+        "scenario_id": sid,
+        "token": token,
+        "lender_id": body.lender_id,
+        "lender_name": (lender or {}).get("name") or body.recipient_institution or "Lender",
+        "recipient_name": body.recipient_name or ((lender or {}).get("contacts") or [{}])[0].get("name", ""),
+        "recipient_email": body.recipient_email or ((lender or {}).get("contacts") or [{}])[0].get("email", ""),
+        "recipient_institution": body.recipient_institution or (lender or {}).get("name", ""),
+        "note": body.note or "",
+        "doc_grants": [],
+        "requested_at": None,
+        "created_at": now,
+    }
+    if scen.get("status") == "draft":
+        await db.scenarios.update_one({"id": sid}, {"$set": {"status": "shopping", "updated_at": now}})
+    await db.scenario_shares.insert_one(share)
+    share.pop("_id", None)
+    return share
+
+
+@api.get("/admin/scenarios/{sid}/shares/{share_id}/views")
+async def share_views(sid: str, share_id: str, admin=Depends(require_admin)):
+    views = await db.share_views.find(
+        {"scenario_id": sid, "share_id": share_id}, {"_id": 0}
+    ).sort("viewed_at", -1).to_list(200)
+    return views
+
+
+@api.post("/admin/scenarios/{sid}/shares/{share_id}/grant/{doc_id}")
+async def grant_doc_access(sid: str, share_id: str, doc_id: str, admin=Depends(require_admin)):
+    share = await db.scenario_shares.find_one({"id": share_id, "scenario_id": sid})
+    if not share:
+        raise HTTPException(status_code=404, detail="Share not found")
+    grants = set(share.get("doc_grants") or [])
+    grants.add(doc_id)
+    await db.scenario_shares.update_one({"id": share_id}, {"$set": {"doc_grants": list(grants)}})
+    return {"ok": True, "doc_grants": list(grants)}
+
+
+@api.delete("/admin/scenarios/{sid}/shares/{share_id}/grant/{doc_id}")
+async def revoke_doc_access(sid: str, share_id: str, doc_id: str, admin=Depends(require_admin)):
+    share = await db.scenario_shares.find_one({"id": share_id, "scenario_id": sid})
+    if not share:
+        raise HTTPException(status_code=404, detail="Share not found")
+    grants = [g for g in (share.get("doc_grants") or []) if g != doc_id]
+    await db.scenario_shares.update_one({"id": share_id}, {"$set": {"doc_grants": grants}})
+    return {"ok": True, "doc_grants": grants}
+
+
+@api.delete("/admin/scenarios/{sid}/shares/{share_id}")
+async def revoke_share(sid: str, share_id: str, admin=Depends(require_admin)):
+    res = await db.scenario_shares.delete_one({"id": share_id, "scenario_id": sid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+
+# ---------- Public lender-view endpoints (token-gated, no login) ----------
+def _make_view_session(share_id: str, viewer: dict) -> str:
+    payload = {
+        "share_id": share_id,
+        "viewer_name": viewer["viewer_name"],
+        "viewer_email": viewer["viewer_email"],
+        "viewer_institution": viewer["viewer_institution"],
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=12),
+        "aud": "lender-view",
+    }
+    return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+
+def _decode_view_session(token: Optional[str]) -> Optional[dict]:
+    if not token:
+        return None
+    try:
+        return pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO], audience="lender-view")
+    except pyjwt.PyJWTError:
+        return None
+
+
+async def _log_view(scenario_id: str, share_id: str, session: dict, action: str, extra: Optional[dict] = None):
+    await db.share_views.insert_one({
+        "id": str(uuid.uuid4()),
+        "scenario_id": scenario_id,
+        "share_id": share_id,
+        "action": action,
+        "viewer_name": session.get("viewer_name"),
+        "viewer_email": session.get("viewer_email"),
+        "viewer_institution": session.get("viewer_institution"),
+        "extra": extra or {},
+        "viewed_at": now_iso(),
+    })
+
+
+@api.get("/lender-view/{token}/preflight")
+async def lender_preflight(token: str):
+    """Check if a token is valid before the lender enters the gate."""
+    share = await db.scenario_shares.find_one({"token": token}, {"_id": 0})
+    if not share:
+        raise HTTPException(status_code=404, detail="Link not found or revoked")
+    scen = await db.scenarios.find_one({"id": share["scenario_id"]}, {"_id": 0, "name": 1})
+    return {"ok": True, "scenario_name": scen.get("name") if scen else "Loan Package",
+            "recipient_institution": share.get("recipient_institution", "")}
+
+
+@api.post("/lender-view/{token}/gate")
+async def lender_gate(token: str, body: LenderGate):
+    share = await db.scenario_shares.find_one({"token": token})
+    if not share:
+        raise HTTPException(status_code=404, detail="Link not found or revoked")
+    session_token = _make_view_session(share["id"], body.model_dump())
+    await _log_view(share["scenario_id"], share["id"], body.model_dump(), "gate")
+    return {"session_token": session_token, "share_id": share["id"]}
+
+
+async def _require_view_session(token: str, session_token: Optional[str]):
+    share = await db.scenario_shares.find_one({"token": token})
+    if not share:
+        raise HTTPException(status_code=404, detail="Link not found or revoked")
+    session = _decode_view_session(session_token)
+    if not session or session.get("share_id") != share["id"]:
+        raise HTTPException(status_code=401, detail="Please enter your details to view this package")
+    return share, session
+
+
+@api.get("/lender-view/{token}")
+async def lender_get_package(token: str, session_token: Optional[str] = None):
+    share, session = await _require_view_session(token, session_token)
+    scen = await db.scenarios.find_one({"id": share["scenario_id"]}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    metrics = compute_scenario_metrics(scen)
+
+    # Filter docs into included vs on-request
+    attached = scen.get("attached_docs") or []
+    doc_map = {d["doc_id"]: d for d in attached}
+    client_docs = []
+    if scen.get("client_id"):
+        client_docs = await db.client_docs.find(
+            {"client_id": scen["client_id"], "id": {"$in": list(doc_map.keys())}}, {"_id": 0}
+        ).to_list(500)
+
+    grants = set(share.get("doc_grants") or [])
+    docs_out = []
+    for cd in client_docs:
+        v = doc_map[cd["id"]]["visibility"]
+        has_file = bool(cd.get("file_id"))
+        # A doc becomes viewable if included OR grant was given per this share
+        viewable = has_file and (v == "included" or cd["id"] in grants)
+        docs_out.append({
+            "id": cd["id"],
+            "label": cd["label"],
+            "category": cd.get("category"),
+            "visibility": v,
+            "has_file": has_file,
+            "viewable": viewable,
+            "requires_request": v == "on_request" and cd["id"] not in grants,
+        })
+
+    await _log_view(scen["id"], share["id"], session, "view_scenario")
+
+    # Strip client PII from the outer payload
+    watermark = f"{session.get('viewer_institution')} — {session.get('viewer_name')}"
+
+    return {
+        "name": scen.get("name"),
+        "status": scen.get("status"),
+        "sponsor": scen.get("sponsor"),
+        "property_info": scen.get("property_info"),
+        "loan_request": scen.get("loan_request"),
+        "financials": scen.get("financials"),
+        "construction": scen.get("construction"),
+        "sources_uses": scen.get("sources_uses"),
+        "notes": scen.get("notes"),
+        "business_plan": scen.get("business_plan"),
+        "metrics": metrics,
+        "docs": docs_out,
+        "watermark": watermark,
+        "share_note": share.get("note"),
+    }
+
+
+@api.get("/lender-view/{token}/doc/{doc_id}")
+async def lender_get_doc(token: str, doc_id: str, session_token: Optional[str] = None):
+    share, session = await _require_view_session(token, session_token)
+    scen = await db.scenarios.find_one({"id": share["scenario_id"]})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    # Confirm doc is attached to scenario
+    attached = scen.get("attached_docs") or []
+    attach_map = {d["doc_id"]: d for d in attached}
+    if doc_id not in attach_map:
+        raise HTTPException(status_code=404, detail="Doc not part of this package")
+    v = attach_map[doc_id]["visibility"]
+    grants = set(share.get("doc_grants") or [])
+    if v == "on_request" and doc_id not in grants:
+        raise HTTPException(status_code=403, detail="Access not granted for this document yet")
+    # Fetch file
+    cd = await db.client_docs.find_one({"id": doc_id})
+    if not cd or not cd.get("file_id"):
+        raise HTTPException(status_code=404, detail="Document not uploaded")
+    f = await db.client_files.find_one({"id": cd["file_id"]})
+    if not f:
+        raise HTTPException(status_code=404, detail="File missing")
+    await _log_view(scen["id"], share["id"], session, "view_doc",
+                    extra={"doc_id": doc_id, "doc_label": cd.get("label")})
+    raw = base64.b64decode(f["data_b64"])
+    return Response(
+        content=raw,
+        media_type=f.get("content_type", "application/octet-stream"),
+        headers={"Content-Disposition": f'inline; filename="{f["filename"]}"'},
+    )
+
+
+@api.post("/lender-view/{token}/request-docs")
+async def lender_request_docs(token: str, session_token: Optional[str] = None):
+    share, session = await _require_view_session(token, session_token)
+    await db.scenario_shares.update_one({"id": share["id"]}, {"$set": {"requested_at": now_iso()}})
+    await _log_view(share["scenario_id"], share["id"], session, "request_docs")
+    return {"ok": True}
+
+
+@api.get("/lender-view/{token}/pdf")
+async def lender_get_pdf(token: str, session_token: Optional[str] = None):
+    share, session = await _require_view_session(token, session_token)
+    scen = await db.scenarios.find_one({"id": share["scenario_id"]}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    metrics = compute_scenario_metrics(scen)
+    watermark = f"{session.get('viewer_institution')} — {session.get('viewer_name')}"
+    pdf_bytes = render_scenario_pdf(scen, None, metrics, watermark_text=watermark)
+    await _log_view(scen["id"], share["id"], session, "download_pdf")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="byrd-package-{share["id"][:8]}.pdf"'},
+    )
+
+
+
 # ================ AdsCopilot (existing internal tool) ================
 class CampaignCreate(BaseModel):
     name: str

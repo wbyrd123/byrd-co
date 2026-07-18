@@ -14,6 +14,10 @@ import AdminDashboard from "@/byrd/AdminDashboard";
 import AdminClients from "@/byrd/AdminClients";
 import AdminClientDetail from "@/byrd/AdminClientDetail";
 import AdminQuotes from "@/byrd/AdminQuotes";
+import AdminScenarios from "@/byrd/AdminScenarios";
+import AdminScenarioDetail from "@/byrd/AdminScenarioDetail";
+import AdminLenders from "@/byrd/AdminLenders";
+import LenderView from "@/byrd/LenderView";
 
 // AdsCopilot (staff-only)
 import DashboardLayout from "@/pages/DashboardLayout";
@@ -64,6 +68,9 @@ function App() {
             <Route path="/portal/login" element={<PortalLogin />} />
             <Route path="/portal/invite/:token" element={<PortalInvite />} />
 
+            {/* Public lender view (token-gated) */}
+            <Route path="/lender/scenario/:token" element={<LenderView />} />
+
             {/* Client portal (role=client) */}
             <Route
               path="/portal"
@@ -87,6 +94,9 @@ function App() {
               <Route path="clients" element={<AdminClients />} />
               <Route path="clients/:id" element={<AdminClientDetail />} />
               <Route path="quotes" element={<AdminQuotes />} />
+              <Route path="scenarios" element={<AdminScenarios />} />
+              <Route path="scenarios/:id" element={<AdminScenarioDetail />} />
+              <Route path="lenders" element={<AdminLenders />} />
             </Route>
 
             {/* AdsCopilot (admin only) */}

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="2" failures="2" skipped="0" tests="10" time="2.962" timestamp="2026-07-18T14:14:37.038353+00:00" hostname="agent-env-06a4def0-ae15-4609-bf1b-81227abb9a4c"><testcase classname="tests.test_deal_engine" name="test_list_scenarios_has_seeded_sample" time="0.531" /><testcase classname="tests.test_deal_engine" name="test_create_scenario_defaults" time="0.103"><failure message="AssertionError: {&quot;detail&quot;:[{&quot;type&quot;:&quot;missing&quot;,&quot;loc&quot;:[&quot;body&quot;,&quot;name&quot;],&quot;msg&quot;:&quot;Field required&quot;,&quot;input&quot;:{},&quot;url&quot;:&quot;https://errors.pydantic.dev/2.13/v/missing&quot;}]}&#10;assert 422 in (200, 201)&#10; +  where 422 = &lt;Response [422]&gt;.status_code">backend/tests/test_deal_engine.py:61: in test_create_scenario_defaults
+    assert r.status_code in (200, 201), r.text
+E   AssertionError: {"detail":[{"type":"missing","loc":["body","name"],"msg":"Field required","input":{},"url":"https://errors.pydantic.dev/2.13/v/missing"}]}
+E   assert 422 in (200, 201)
+E    +  where 422 = &lt;Response [422]&gt;.status_code</failure></testcase><testcase classname="tests.test_deal_engine" name="test_patch_scenario_recomputes_metrics" time="0.210"><failure message="assert 183000.0 &lt; 1&#10; +  where 183000.0 = abs((385400.0 - 202400))">backend/tests/test_deal_engine.py:85: in test_patch_scenario_recomputes_metrics
+    assert abs(m["noi"] - 202400) &lt; 1
+E   assert 183000.0 &lt; 1
+E    +  where 183000.0 = abs((385400.0 - 202400))</failure></testcase><testcase classname="tests.test_deal_engine" name="test_scenario_pdf" time="0.238" /><testcase classname="tests.test_deal_engine" name="test_lender_crud" time="0.490" /><testcase classname="tests.test_deal_engine" name="test_scenario_match_ordered" time="0.272" /><testcase classname="tests.test_deal_engine" name="test_create_share_and_status_transition" time="0.464"><error message="failed on setup with &quot;KeyError: 0&quot;">backend/tests/test_deal_engine.py:152: in scenario_and_lender
+    target = docs[0]
+             ^^^^^^^
+E   KeyError: 0</error></testcase><testcase classname="tests.test_deal_engine" name="test_public_lender_flow" time="0.000"><error message="failed on setup with &quot;KeyError: 0&quot;">backend/tests/test_deal_engine.py:152: in scenario_and_lender
+    target = docs[0]
+             ^^^^^^^
+E   KeyError: 0</error></testcase><testcase classname="tests.test_deal_engine" name="test_public_quote_still_works" time="0.117" /><testcase classname="tests.test_deal_engine" name="test_admin_quotes_inbox" time="0.100" /></testsuite></testsuites>

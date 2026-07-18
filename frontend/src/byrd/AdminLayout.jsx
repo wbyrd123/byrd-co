@@ -3,12 +3,14 @@ import { NavLink, Outlet, Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { LOGO_URL } from "@/byrd/data";
 import {
-  LayoutDashboard, Users, Inbox, Sparkles, LogOut,
+  LayoutDashboard, Users, Inbox, Sparkles, LogOut, FileText, Building2,
 } from "lucide-react";
 
 const NAV = [
   { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true, testId: "admin-nav-overview" },
   { to: "/admin/clients", label: "Clients", icon: Users, testId: "admin-nav-clients" },
+  { to: "/admin/scenarios", label: "Scenarios", icon: FileText, testId: "admin-nav-scenarios" },
+  { to: "/admin/lenders", label: "Lenders", icon: Building2, testId: "admin-nav-lenders" },
   { to: "/admin/quotes", label: "Quote Inbox", icon: Inbox, testId: "admin-nav-quotes" },
 ];
 
