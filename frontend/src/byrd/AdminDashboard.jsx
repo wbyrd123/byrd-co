@@ -91,7 +91,7 @@ export default function AdminDashboard() {
               <h2 className="font-serif text-2xl font-bold mt-1">Client roster</h2>
             </div>
             <Link to="/admin/clients" className="byrd-btn byrd-btn-outline h-9 px-3 text-xs">
-              <Plus size={12} /> Invite
+              <Plus size={12} /> Add
             </Link>
           </div>
           {recentClients.length === 0 ? (

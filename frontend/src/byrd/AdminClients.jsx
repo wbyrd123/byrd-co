@@ -24,7 +24,7 @@ const InviteDialog = ({ open, onClose, onCreated }) => {
       const res = await api.post("/admin/invites", form);
       setResult(res.data);
       onCreated?.();
-      toast.success("Invite created — copy the link below");
+      toast.success("Client added — invite link ready to copy");
     } catch (err) {
       toast.error(err?.response?.data?.detail || "Failed");
     } finally {
@@ -49,7 +49,7 @@ const InviteDialog = ({ open, onClose, onCreated }) => {
         <div className="flex items-center justify-between">
           <div>
             <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// New Client</div>
-            <h2 className="font-serif text-2xl font-bold mt-1">Create Invite</h2>
+            <h2 className="font-serif text-2xl font-bold mt-1">Add Client</h2>
           </div>
           <button onClick={onClose} className="w-9 h-9 grid place-items-center rounded-md border border-[#E4DFD1]" data-testid="invite-close">
             <X size={16} />
@@ -96,18 +96,21 @@ const InviteDialog = ({ open, onClose, onCreated }) => {
               </div>
             </div>
             <div className="text-xs text-[#6B6558]">
+              This adds the client to your roster and generates a portal invite link.
               A default document checklist (personal + business 3-yr tax returns, resume, entity docs, etc.)
-              will be attached. You can add/remove items after creating.
+              is attached automatically — you can edit it after. Send the invite link now or later from the client&apos;s page.
             </div>
             <button type="submit" disabled={busy} className="byrd-btn byrd-btn-dark w-full" data-testid="invite-submit">
-              {busy ? "Creating…" : "Create Invite"}
+              {busy ? "Adding…" : "Add Client"}
             </button>
           </form>
         ) : (
           <div className="mt-6 space-y-4" data-testid="invite-result">
-            <div className="byrd-chip byrd-chip-green"><Check size={12} /> Invite ready</div>
+            <div className="byrd-chip byrd-chip-green"><Check size={12} /> Client added</div>
             <p className="text-sm text-[#2A2A2A]">
-              Share this link with <span className="font-semibold">{result.user.name}</span>. They&apos;ll set a password and log in.
+              <span className="font-semibold">{result.user.name}</span> is now in your roster. Share this
+              invite link whenever you&apos;re ready — they&apos;ll set a password and land in their portal.
+              You can also copy this link later from their client page.
             </p>
             <div className="flex items-center gap-2">
               <input readOnly value={url} className="flex-1 h-11 px-3 rounded-md border border-[#E4DFD1] bg-[#FBF8F1] font-mono text-xs"
@@ -147,7 +150,7 @@ export default function AdminClients() {
           <h1 className="font-serif text-4xl md:text-5xl font-bold mt-2">Client Roster.</h1>
         </div>
         <button onClick={() => setOpen(true)} className="byrd-btn byrd-btn-dark" data-testid="new-invite-btn">
-          <Plus size={14} /> Invite Client
+          <Plus size={14} /> Add Client
         </button>
       </div>
 
@@ -160,10 +163,10 @@ export default function AdminClients() {
           </div>
           <h3 className="font-serif text-2xl font-bold mt-4">No clients yet.</h3>
           <p className="text-[#6B6558] mt-2 max-w-md mx-auto">
-            Create your first invite. A shareable link is generated — send it to your client to activate.
+            Add your first client. You&apos;ll get a shareable portal invite link you can send now or later.
           </p>
           <button onClick={() => setOpen(true)} className="byrd-btn byrd-btn-primary mt-5">
-            Create First Invite <Plus size={14} />
+            Add First Client <Plus size={14} />
           </button>
         </div>
       ) : (
