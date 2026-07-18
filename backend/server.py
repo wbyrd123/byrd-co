@@ -22,7 +22,7 @@ import bcrypt
 import jwt as pyjwt
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict
 from datetime import datetime, timezone, timedelta
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
@@ -723,6 +723,13 @@ class ShareCreate(BaseModel):
     recipient_email: Optional[EmailStr] = None
     recipient_institution: Optional[str] = ""
     note: Optional[str] = ""
+    # Per-doc visibility override for this specific share, keyed by doc_id.
+    # Falls back to scenario-level visibility if omitted.
+    doc_overrides: Optional[Dict[str, Literal["include", "on_request", "hidden"]]] = None
+
+
+class ShareOverridesUpdate(BaseModel):
+    doc_overrides: Dict[str, Literal["include", "on_request", "hidden"]]
 
 
 class LenderGate(BaseModel):
@@ -1210,6 +1217,53 @@ async def scenario_pdf(sid: str, admin=Depends(require_admin)):
     )
 
 
+@api.get("/admin/scenarios/{sid}/docs.zip")
+async def admin_scenario_docs_zip(sid: str, admin=Depends(require_admin)):
+    """Bundle every attached document (that has an uploaded file) into a single ZIP."""
+    import zipfile
+    from io import BytesIO
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    attached = scen.get("attached_docs") or []
+    doc_ids = [a["doc_id"] for a in attached]
+    if not doc_ids:
+        raise HTTPException(status_code=404, detail="No documents attached")
+    docs = await db.client_docs.find({"id": {"$in": doc_ids}}, {"_id": 0}).to_list(500)
+    if not docs:
+        raise HTTPException(status_code=404, detail="No documents found")
+    buf = BytesIO()
+    used_names = set()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for cd in docs:
+            if not cd.get("file_id"):
+                continue
+            f = await db.client_files.find_one({"id": cd["file_id"]})
+            if not f:
+                continue
+            raw = base64.b64decode(f["data_b64"])
+            # Prefix filename with the checklist label so lenders see logical names
+            label = (cd.get("label") or "document").replace("/", "-").replace("\\", "-").strip()
+            base_name = f["filename"] or "file"
+            name = f"{label} - {base_name}"
+            # Deduplicate
+            n, i = name, 1
+            while n in used_names:
+                stem, dot, ext = name.rpartition(".")
+                n = f"{stem} ({i}).{ext}" if dot else f"{name} ({i})"
+                i += 1
+            used_names.add(n)
+            zf.writestr(n, raw)
+    buf.seek(0)
+    safe_name = "".join(c if ord(c) < 128 and c not in '\\/:*?"<>|' else "_" for c in (scen.get('name') or 'scenario'))
+    fname = f"byrd-{safe_name.replace(' ', '_')}-{sid[:8]}.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @api.get("/admin/scenarios/{sid}/match")
 async def match(sid: str, admin=Depends(require_admin)):
     d = await db.scenarios.find_one({"id": sid}, {"_id": 0})
@@ -1292,6 +1346,7 @@ async def create_share(sid: str, body: ShareCreate, admin=Depends(require_admin)
         "recipient_institution": body.recipient_institution or (lender or {}).get("name", ""),
         "note": body.note or "",
         "doc_grants": [],
+        "doc_overrides": body.doc_overrides or {},
         "requested_at": None,
         "created_at": now,
     }
@@ -1329,6 +1384,21 @@ async def revoke_doc_access(sid: str, share_id: str, doc_id: str, admin=Depends(
     grants = [g for g in (share.get("doc_grants") or []) if g != doc_id]
     await db.scenario_shares.update_one({"id": share_id}, {"$set": {"doc_grants": grants}})
     return {"ok": True, "doc_grants": grants}
+
+
+@api.patch("/admin/scenarios/{sid}/shares/{share_id}/overrides")
+async def update_share_overrides(sid: str, share_id: str, body: ShareOverridesUpdate, admin=Depends(require_admin)):
+    """Set per-doc visibility overrides for a specific lender share.
+    Values: 'include' | 'on_request' | 'hidden'. Missing doc_ids fall back to scenario default."""
+    share = await db.scenario_shares.find_one({"id": share_id, "scenario_id": sid})
+    if not share:
+        raise HTTPException(status_code=404, detail="Share not found")
+    # Whenever overrides are updated we clear legacy per-doc grants to keep one source of truth
+    await db.scenario_shares.update_one(
+        {"id": share_id},
+        {"$set": {"doc_overrides": body.doc_overrides, "doc_grants": []}},
+    )
+    return {"ok": True, "doc_overrides": body.doc_overrides}
 
 
 @api.delete("/admin/scenarios/{sid}/shares/{share_id}")
@@ -1407,6 +1477,21 @@ async def _require_view_session(token: str, session_token: Optional[str]):
     return share, session
 
 
+def _effective_doc_visibility(share: dict, attach_map: dict, doc_id: str) -> str:
+    """Return effective visibility for a single doc on a specific share.
+    Returns one of: 'included', 'on_request', 'hidden'.
+    Priority: per-share override > legacy per-share grant > scenario default."""
+    overrides = share.get("doc_overrides") or {}
+    if doc_id in overrides:
+        v = overrides[doc_id]
+        return {"include": "included", "on_request": "on_request", "hidden": "hidden"}.get(v, "on_request")
+    grants = share.get("doc_grants") or []
+    if doc_id in grants:
+        return "included"
+    scen_v = (attach_map.get(doc_id) or {}).get("visibility", "on_request")
+    return "included" if scen_v == "included" else "on_request"
+
+
 @api.get("/lender-view/{token}")
 async def lender_get_package(token: str, session_token: Optional[str] = None):
     share, session = await _require_view_session(token, session_token)
@@ -1415,7 +1500,7 @@ async def lender_get_package(token: str, session_token: Optional[str] = None):
         raise HTTPException(status_code=404, detail="Scenario not found")
     metrics = compute_scenario_metrics(scen)
 
-    # Filter docs into included vs on-request
+    # Filter docs into included vs on-request vs hidden (per-share overrides applied)
     attached = scen.get("attached_docs") or []
     doc_map = {d["doc_id"]: d for d in attached}
     client_docs = []
@@ -1424,21 +1509,21 @@ async def lender_get_package(token: str, session_token: Optional[str] = None):
             {"client_id": scen["client_id"], "id": {"$in": list(doc_map.keys())}}, {"_id": 0}
         ).to_list(500)
 
-    grants = set(share.get("doc_grants") or [])
     docs_out = []
     for cd in client_docs:
-        v = doc_map[cd["id"]]["visibility"]
+        eff = _effective_doc_visibility(share, doc_map, cd["id"])
+        if eff == "hidden":
+            continue  # lender never learns this doc exists
         has_file = bool(cd.get("file_id"))
-        # A doc becomes viewable if included OR grant was given per this share
-        viewable = has_file and (v == "included" or cd["id"] in grants)
+        viewable = has_file and eff == "included"
         docs_out.append({
             "id": cd["id"],
             "label": cd["label"],
             "category": cd.get("category"),
-            "visibility": v,
+            "visibility": doc_map[cd["id"]].get("visibility", "on_request"),
             "has_file": has_file,
             "viewable": viewable,
-            "requires_request": v == "on_request" and cd["id"] not in grants,
+            "requires_request": eff == "on_request",
         })
 
     await _log_view(scen["id"], share["id"], session, "view_scenario")
@@ -1470,14 +1555,15 @@ async def lender_get_doc(token: str, doc_id: str, session_token: Optional[str] =
     scen = await db.scenarios.find_one({"id": share["scenario_id"]})
     if not scen:
         raise HTTPException(status_code=404, detail="Scenario not found")
-    # Confirm doc is attached to scenario
+    # Confirm doc is attached to scenario and effective visibility is 'included'
     attached = scen.get("attached_docs") or []
     attach_map = {d["doc_id"]: d for d in attached}
     if doc_id not in attach_map:
         raise HTTPException(status_code=404, detail="Doc not part of this package")
-    v = attach_map[doc_id]["visibility"]
-    grants = set(share.get("doc_grants") or [])
-    if v == "on_request" and doc_id not in grants:
+    eff = _effective_doc_visibility(share, attach_map, doc_id)
+    if eff == "hidden":
+        raise HTTPException(status_code=404, detail="Doc not part of this package")
+    if eff != "included":
         raise HTTPException(status_code=403, detail="Access not granted for this document yet")
     # Fetch file
     cd = await db.client_docs.find_one({"id": doc_id})
@@ -1523,6 +1609,62 @@ async def lender_get_pdf(token: str, session_token: Optional[str] = None):
         content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="byrd-package-{share["id"][:8]}.pdf"'},
+    )
+
+
+@api.get("/lender-view/{token}/docs.zip")
+async def lender_docs_zip(token: str, session_token: Optional[str] = None):
+    """Bundle every currently viewable document into a ZIP for the lender.
+    Respects per-share visibility overrides and logs the download in the audit trail."""
+    import zipfile
+    from io import BytesIO
+    share, session = await _require_view_session(token, session_token)
+    scen = await db.scenarios.find_one({"id": share["scenario_id"]})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    attached = scen.get("attached_docs") or []
+    attach_map = {d["doc_id"]: d for d in attached}
+    # Only docs whose effective visibility is 'included' are bundled
+    allowed_ids = [
+        did for did in attach_map
+        if _effective_doc_visibility(share, attach_map, did) == "included"
+    ]
+    if not allowed_ids:
+        raise HTTPException(status_code=404, detail="No documents available to download")
+    docs = await db.client_docs.find({"id": {"$in": allowed_ids}}, {"_id": 0}).to_list(500)
+    buf = BytesIO()
+    used_names = set()
+    included_names = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for cd in docs:
+            if not cd.get("file_id"):
+                continue
+            f = await db.client_files.find_one({"id": cd["file_id"]})
+            if not f:
+                continue
+            raw = base64.b64decode(f["data_b64"])
+            label = (cd.get("label") or "document").replace("/", "-").replace("\\", "-").strip()
+            base_name = f["filename"] or "file"
+            name = f"{label} - {base_name}"
+            n, i = name, 1
+            while n in used_names:
+                stem, dot, ext = name.rpartition(".")
+                n = f"{stem} ({i}).{ext}" if dot else f"{name} ({i})"
+                i += 1
+            used_names.add(n)
+            included_names.append(n)
+            zf.writestr(n, raw)
+    if not included_names:
+        raise HTTPException(status_code=404, detail="No files to download")
+    buf.seek(0)
+    await _log_view(scen["id"], share["id"], session, "download_zip",
+                    extra={"file_count": len(included_names), "files": included_names})
+    safe_name = "".join(c if ord(c) < 128 and c not in '\\/:*?"<>|' else "_" for c in (scen.get('name') or 'package'))
+    fname = f"byrd-{safe_name.replace(' ', '_')}-{share['id'][:8]}.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
 

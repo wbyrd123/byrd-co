@@ -9,6 +9,7 @@ import {
 import {
   ArrowLeft, Save, FileText, Trash2, Plus, Users, Share2, Copy,
   Download, Eye, EyeOff, Check, X, ExternalLink, Building2, RefreshCw,
+  Archive, Sliders,
 } from "lucide-react";
 
 const useDebouncedSave = (fn, delay = 800) => {
@@ -86,6 +87,8 @@ export default function AdminScenarioDetail() {
   const [lenders, setLenders] = useState([]);
   const [matches, setMatches] = useState([]);
   const [shareLenderId, setShareLenderId] = useState("");
+  const [shareDialog, setShareDialog] = useState(null);
+  // shareDialog shape: { mode: "create"|"edit", lenderId?, lenderName?, share?, overrides }
 
   const load = () => api.get(`/admin/scenarios/${id}`).then((r) => setScen(r.data));
 
@@ -114,16 +117,57 @@ export default function AdminScenarioDetail() {
     toast.success(`${r.data.length} lenders scored`);
   };
 
-  const createShare = async (lenderId) => {
+  const createShare = async (lenderId, docOverrides) => {
     try {
-      const res = await api.post(`/admin/scenarios/${id}/shares`, { lender_id: lenderId || null });
-      toast.success("Share created — copy the link");
+      const body = { lender_id: lenderId || null };
+      if (docOverrides) body.doc_overrides = docOverrides;
+      const res = await api.post(`/admin/scenarios/${id}/shares`, body);
+      toast.success("Share created — link copied to clipboard");
       const url = `${window.location.origin}/lender/scenario/${res.data.token}`;
       navigator.clipboard.writeText(url).catch(() => {});
       load();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed");
     }
+  };
+
+  const updateShareOverrides = async (shareId, docOverrides) => {
+    try {
+      await api.patch(`/admin/scenarios/${id}/shares/${shareId}/overrides`, { doc_overrides: docOverrides });
+      toast.success("Visibility updated");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed");
+    }
+  };
+
+  const openSendDialog = (lenderId) => {
+    const lender = lenders.find((l) => l.id === lenderId);
+    setShareDialog({
+      mode: "create",
+      lenderId,
+      lenderName: lender?.name || "Lender",
+      overrides: {},
+    });
+  };
+
+  const openEditVisibilityDialog = (share) => {
+    setShareDialog({
+      mode: "edit",
+      share,
+      lenderName: share.lender_name || share.recipient_institution || "Lender",
+      overrides: { ...(share.doc_overrides || {}) },
+    });
+  };
+
+  const submitShareDialog = async (overrides) => {
+    if (!shareDialog) return;
+    if (shareDialog.mode === "create") {
+      await createShare(shareDialog.lenderId, overrides);
+    } else {
+      await updateShareOverrides(shareDialog.share.id, overrides);
+    }
+    setShareDialog(null);
   };
 
   const revokeShare = async (shareId) => {
@@ -145,12 +189,6 @@ export default function AdminScenarioDetail() {
     await patch({ attached_docs: list });
   };
 
-  const grantDoc = async (shareId, docId, on) => {
-    if (on) await api.post(`/admin/scenarios/${id}/shares/${shareId}/grant/${docId}`);
-    else await api.delete(`/admin/scenarios/${id}/shares/${shareId}/grant/${docId}`);
-    load();
-  };
-
   const del = async () => {
     if (!window.confirm("Delete this scenario? This cannot be undone.")) return;
     await api.delete(`/admin/scenarios/${id}`);
@@ -164,6 +202,22 @@ export default function AdminScenarioDetail() {
       const url = URL.createObjectURL(res.data);
       window.open(url, "_blank");
     });
+  };
+
+  const downloadZip = async () => {
+    try {
+      const res = await api.get(`/admin/scenarios/${id}/docs.zip`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `byrd-scenario-${id.slice(0, 8)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "No documents attached");
+    }
   };
 
   if (!scen) return <div className="text-sm text-[#6B6558]">Loading…</div>;
@@ -200,6 +254,9 @@ export default function AdminScenarioDetail() {
         <div className="flex items-center gap-2">
           <button onClick={downloadPdf} className="byrd-btn byrd-btn-outline" data-testid="scen-pdf-btn">
             <Download size={14} /> PDF
+          </button>
+          <button onClick={downloadZip} className="byrd-btn byrd-btn-outline" data-testid="scen-zip-btn">
+            <Archive size={14} /> All Docs (ZIP)
           </button>
           <button onClick={del} className="byrd-btn byrd-btn-outline text-[#8A1F1A] border-[#E38380] hover:bg-[#FADCDA]" data-testid="scen-delete-btn">
             <Trash2 size={14} />
@@ -253,11 +310,20 @@ export default function AdminScenarioDetail() {
           lenders={lenders}
           matches={matches}
           runMatch={runMatch}
-          onCreateShare={createShare}
+          onOpenSendDialog={openSendDialog}
           onRevoke={revokeShare}
-          onGrantDoc={grantDoc}
+          onOpenEditVisibility={openEditVisibilityDialog}
           shareLenderId={shareLenderId}
           setShareLenderId={setShareLenderId}
+        />
+      )}
+
+      {shareDialog && (
+        <ShareVisibilityDialog
+          scen={scen}
+          dialog={shareDialog}
+          onClose={() => setShareDialog(null)}
+          onSubmit={submitShareDialog}
         />
       )}
     </div>
@@ -583,16 +649,37 @@ function DocsTab({ scen, onToggle }) {
 }
 
 // --------------- LENDERS TAB ---------------
-function LendersTab({ scen, lenders, matches, runMatch, onCreateShare, onRevoke, onGrantDoc, shareLenderId, setShareLenderId }) {
+function LendersTab({ scen, lenders, matches, runMatch, onOpenSendDialog, onRevoke, onOpenEditVisibility, shareLenderId, setShareLenderId }) {
   const attached = scen.attached_docs || [];
   const clientDocMap = {};
   (scen.client_docs || []).forEach((d) => { clientDocMap[d.id] = d; });
-  const onRequestDocs = attached.filter((a) => a.visibility === "on_request").map((a) => clientDocMap[a.doc_id]).filter(Boolean);
 
   const copyLink = (token) => {
     const url = `${window.location.origin}/lender/scenario/${token}`;
     navigator.clipboard.writeText(url);
     toast.success("Link copied to clipboard");
+  };
+
+  // Compute effective visibility counts per share (mirrors backend logic)
+  const shareCounts = (sh) => {
+    const overrides = sh.doc_overrides || {};
+    const grants = new Set(sh.doc_grants || []);
+    let included = 0, onReq = 0, hidden = 0;
+    attached.forEach((a) => {
+      let eff;
+      if (a.doc_id in overrides) {
+        const v = overrides[a.doc_id];
+        eff = v === "include" ? "included" : v === "hidden" ? "hidden" : "on_request";
+      } else if (grants.has(a.doc_id)) {
+        eff = "included";
+      } else {
+        eff = a.visibility === "included" ? "included" : "on_request";
+      }
+      if (eff === "included") included++;
+      else if (eff === "on_request") onReq++;
+      else hidden++;
+    });
+    return { included, onReq, hidden };
   };
 
   return (
@@ -626,8 +713,8 @@ function LendersTab({ scen, lenders, matches, runMatch, onCreateShare, onRevoke,
                     {m.misses.length > 0 && <div className="text-[#8A1F1A]">✗ {m.misses.join(" · ")}</div>}
                   </div>
                 </div>
-                <button onClick={() => onCreateShare(m.lender.id)} className="byrd-btn byrd-btn-dark h-9 px-3 text-xs shrink-0" data-testid={`match-share-${m.lender.id}`}>
-                  <Share2 size={12} /> Share
+                <button onClick={() => onOpenSendDialog(m.lender.id)} className="byrd-btn byrd-btn-dark h-9 px-3 text-xs shrink-0" data-testid={`match-share-${m.lender.id}`}>
+                  <Share2 size={12} /> Send Package
                 </button>
               </div>
             ))}
@@ -643,9 +730,12 @@ function LendersTab({ scen, lenders, matches, runMatch, onCreateShare, onRevoke,
             <option value="">Pick a lender from directory…</option>
             {lenders.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </Sel>
-          <button onClick={() => shareLenderId && onCreateShare(shareLenderId)} disabled={!shareLenderId} className="byrd-btn byrd-btn-dark" data-testid="create-share-btn">
-            <Share2 size={14} /> Create Share Link
+          <button onClick={() => shareLenderId && onOpenSendDialog(shareLenderId)} disabled={!shareLenderId} className="byrd-btn byrd-btn-dark" data-testid="create-share-btn">
+            <Share2 size={14} /> Send Package…
           </button>
+        </div>
+        <div className="text-[11px] text-[#6B6558] mt-2">
+          You&apos;ll be able to set per-document visibility (Include / On Request / Hidden) for this specific lender before sending.
         </div>
       </div>
 
@@ -657,7 +747,7 @@ function LendersTab({ scen, lenders, matches, runMatch, onCreateShare, onRevoke,
         ) : (
           <div className="space-y-4">
             {scen.shares.map((sh) => {
-              const grantSet = new Set(sh.doc_grants || []);
+              const c = shareCounts(sh);
               return (
                 <div key={sh.id} className="border border-[#E4DFD1] rounded-md p-4" data-testid={`share-${sh.id}`}>
                   <div className="flex items-start justify-between flex-wrap gap-3">
@@ -669,8 +759,22 @@ function LendersTab({ scen, lenders, matches, runMatch, onCreateShare, onRevoke,
                         {sh.recipient_email || "—"} · shared {new Date(sh.created_at).toLocaleDateString()}
                         {sh.requested_at && <> · <span className="text-[#7A5410]">Requested docs {new Date(sh.requested_at).toLocaleDateString()}</span></>}
                       </div>
+                      {attached.length > 0 && (
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                          <span className="byrd-chip byrd-chip-green" data-testid={`share-${sh.id}-included-count`}><Check size={10} /> {c.included} Included</span>
+                          <span className="byrd-chip byrd-chip-gold" data-testid={`share-${sh.id}-onrequest-count`}><Eye size={10} /> {c.onReq} On Request</span>
+                          {c.hidden > 0 && (
+                            <span className="byrd-chip byrd-chip-red" data-testid={`share-${sh.id}-hidden-count`}><EyeOff size={10} /> {c.hidden} Hidden</span>
+                          )}
+                        </div>
+                      )}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {attached.length > 0 && (
+                        <button onClick={() => onOpenEditVisibility(sh)} className="byrd-btn byrd-btn-outline h-9 px-3 text-xs" data-testid={`manage-visibility-${sh.id}`}>
+                          <Sliders size={12} /> Manage Visibility
+                        </button>
+                      )}
                       <button onClick={() => copyLink(sh.token)} className="byrd-btn byrd-btn-outline h-9 px-3 text-xs" data-testid={`copy-share-${sh.id}`}>
                         <Copy size={12} /> Copy Link
                       </button>
@@ -679,40 +783,181 @@ function LendersTab({ scen, lenders, matches, runMatch, onCreateShare, onRevoke,
                       </button>
                     </div>
                   </div>
-
-                  {onRequestDocs.length > 0 && (
-                    <div className="mt-4 pt-4 border-t border-[#E4DFD1]">
-                      <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558] mb-2">
-                        // On-Request Documents · grant per lender
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {onRequestDocs.map((d) => {
-                          const granted = grantSet.has(d.id);
-                          return (
-                            <button
-                              key={d.id}
-                              onClick={() => onGrantDoc(sh.id, d.id, !granted)}
-                              data-testid={`grant-${sh.id}-${d.id}`}
-                              className={`text-left px-3 py-2 rounded-md border text-sm flex items-center gap-2 ${
-                                granted
-                                  ? "bg-[#E4F4E4] border-[#8DBE8F] text-[#245C25]"
-                                  : "bg-white border-[#E4DFD1] hover:bg-[#F3EEE0]"
-                              }`}
-                            >
-                              {granted ? <Check size={14} /> : <Eye size={14} />}
-                              <span className="truncate">{d.label}</span>
-                              <span className="ml-auto text-[10px] font-mono">{granted ? "GRANTED" : "GRANT"}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
                 </div>
               );
             })}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// --------------- SHARE VISIBILITY DIALOG ---------------
+function ShareVisibilityDialog({ scen, dialog, onClose, onSubmit }) {
+  const attached = scen.attached_docs || [];
+  const clientDocs = scen.client_docs || [];
+  const clientDocMap = {};
+  clientDocs.forEach((d) => { clientDocMap[d.id] = d; });
+
+  // Build the row list (only attached docs that actually exist)
+  const rows = attached
+    .map((a) => ({ ...a, doc: clientDocMap[a.doc_id] }))
+    .filter((r) => r.doc);
+
+  // Compute the initial per-row visibility from either explicit override,
+  // legacy grant, or scenario visibility.
+  const initial = {};
+  const startOverrides = dialog.overrides || {};
+  const legacyGrants = new Set(dialog.share?.doc_grants || []);
+  rows.forEach((r) => {
+    if (r.doc_id in startOverrides) {
+      initial[r.doc_id] = startOverrides[r.doc_id];
+    } else if (legacyGrants.has(r.doc_id)) {
+      initial[r.doc_id] = "include";
+    } else {
+      initial[r.doc_id] = r.visibility === "included" ? "include" : "on_request";
+    }
+  });
+
+  const [state, setState] = useState(initial);
+  const [busy, setBusy] = useState(false);
+
+  const setAll = (v) => {
+    const next = {};
+    rows.forEach((r) => { next[r.doc_id] = v; });
+    setState(next);
+  };
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await onSubmit(state);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const counts = Object.values(state).reduce(
+    (acc, v) => {
+      if (v === "include") acc.include++;
+      else if (v === "hidden") acc.hidden++;
+      else acc.onReq++;
+      return acc;
+    },
+    { include: 0, onReq: 0, hidden: 0 }
+  );
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40"
+      role="dialog"
+      onClick={onClose}
+      data-testid="share-visibility-dialog"
+    >
+      <div
+        className="bg-white rounded-lg border border-[#E4DFD1] shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-[#E4DFD1] flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">
+              {dialog.mode === "create" ? "// Send Package" : "// Manage Visibility"}
+            </div>
+            <h2 className="font-serif text-2xl font-bold truncate">{dialog.lenderName}</h2>
+            <p className="text-xs text-[#6B6558] mt-1">
+              Set exactly which documents this lender can see, request, or never know about.
+            </p>
+          </div>
+          <button onClick={onClose} className="text-[#6B6558] hover:text-[#1A1A1A]" data-testid="dialog-close">
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Bulk actions */}
+        <div className="px-6 py-3 border-b border-[#E4DFD1] bg-[#FBF8F1] flex items-center justify-between flex-wrap gap-2 text-xs">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="byrd-chip byrd-chip-green"><Check size={10} /> {counts.include} Included</span>
+            <span className="byrd-chip byrd-chip-gold"><Eye size={10} /> {counts.onReq} On Request</span>
+            {counts.hidden > 0 && <span className="byrd-chip byrd-chip-red"><EyeOff size={10} /> {counts.hidden} Hidden</span>}
+          </div>
+          <div className="flex items-center gap-1 text-[11px] text-[#6B6558]">
+            <span className="mr-1">All:</span>
+            <button onClick={() => setAll("include")} className="underline hover:text-[#1A1A1A]" data-testid="bulk-include">Include</button>
+            <span>·</span>
+            <button onClick={() => setAll("on_request")} className="underline hover:text-[#1A1A1A]" data-testid="bulk-on-request">On Request</button>
+            <span>·</span>
+            <button onClick={() => setAll("hidden")} className="underline hover:text-[#1A1A1A]" data-testid="bulk-hidden">Hide</button>
+          </div>
+        </div>
+
+        {/* Doc list */}
+        <div className="overflow-y-auto flex-1 px-6 py-4 space-y-2">
+          {rows.length === 0 && (
+            <div className="text-sm text-[#6B6558] py-6 text-center">
+              No documents attached to this scenario yet. Attach some in the Documents tab first.
+            </div>
+          )}
+          {rows.map((r) => {
+            const d = r.doc;
+            const cur = state[r.doc_id];
+            const options = [
+              { v: "include", label: "Include", icon: Check, tone: "bg-[#245C25] text-white border-[#245C25]" },
+              { v: "on_request", label: "On Request", icon: Eye, tone: "bg-[#7A5410] text-white border-[#7A5410]" },
+              { v: "hidden", label: "Hide", icon: EyeOff, tone: "bg-[#8A1F1A] text-white border-[#8A1F1A]" },
+            ];
+            return (
+              <div key={r.doc_id} className="border border-[#E4DFD1] rounded-md p-3 flex items-start justify-between gap-3" data-testid={`viz-row-${r.doc_id}`}>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FileText size={14} className="text-[#C89434] shrink-0" />
+                    <div className="font-semibold text-sm truncate">{d.label}</div>
+                  </div>
+                  <div className="text-[11px] text-[#6B6558] mt-0.5 truncate">
+                    {d.category}
+                    {d.file?.filename && <> · {d.file.filename}</>}
+                    {!d.file_id && <> · <span className="text-[#8A1F1A]">Not uploaded yet</span></>}
+                  </div>
+                </div>
+                <div className="inline-flex rounded-md border border-[#E4DFD1] overflow-hidden text-[11px]">
+                  {options.map((opt) => {
+                    const active = cur === opt.v;
+                    return (
+                      <button
+                        key={opt.v}
+                        onClick={() => setState({ ...state, [r.doc_id]: opt.v })}
+                        className={`px-2.5 h-8 flex items-center gap-1 border-r border-[#E4DFD1] last:border-r-0 ${
+                          active ? opt.tone : "bg-white text-[#2A2A2A] hover:bg-[#F3EEE0]"
+                        }`}
+                        data-testid={`viz-${r.doc_id}-${opt.v}`}
+                      >
+                        <opt.icon size={11} /> {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-[#E4DFD1] flex items-center justify-between gap-3 flex-wrap">
+          <div className="text-[11px] text-[#6B6558]">
+            {dialog.mode === "create"
+              ? "A shareable link will be generated and copied to your clipboard."
+              : "The lender's link stays the same — visibility updates immediately."}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="byrd-btn byrd-btn-outline" data-testid="dialog-cancel">
+              Cancel
+            </button>
+            <button onClick={submit} disabled={busy} className="byrd-btn byrd-btn-dark" data-testid="dialog-submit">
+              {busy ? "Saving…" : dialog.mode === "create" ? <>Send Package <Share2 size={14} /></> : <>Save Visibility <Save size={14} /></>}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

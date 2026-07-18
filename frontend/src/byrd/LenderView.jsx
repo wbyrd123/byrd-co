@@ -113,6 +113,28 @@ export default function LenderView() {
     }
   };
 
+  const downloadZip = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/lender-view/${token}/docs.zip?session_token=${encodeURIComponent(session)}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "No documents available to download");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `byrd-package-${token.slice(0, 8)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("Package downloaded");
+    } catch (e) {
+      toast.error(e.message);
+    }
+  };
+
   if (preflightError) {
     return (
       <Shell>
@@ -291,14 +313,21 @@ export default function LenderView() {
         <div className="byrd-card p-6" data-testid="lender-docs">
           <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
             <h3 className="font-serif text-xl font-bold">Documents</h3>
-            {anyPending && !requestedNow && (
-              <button onClick={requestAll} className="byrd-btn byrd-btn-dark" data-testid="request-docs-btn">
-                <Send size={14} /> Request Full Data Room
-              </button>
-            )}
-            {requestedNow && (
-              <div className="byrd-chip byrd-chip-green"><Check size={12} /> Request sent to broker</div>
-            )}
+            <div className="flex items-center gap-2 flex-wrap">
+              {readyDocs.length > 0 && (
+                <button onClick={downloadZip} className="byrd-btn byrd-btn-outline" data-testid="lender-download-zip">
+                  <Download size={14} /> Download All (ZIP)
+                </button>
+              )}
+              {anyPending && !requestedNow && (
+                <button onClick={requestAll} className="byrd-btn byrd-btn-dark" data-testid="request-docs-btn">
+                  <Send size={14} /> Request Full Data Room
+                </button>
+              )}
+              {requestedNow && (
+                <div className="byrd-chip byrd-chip-green"><Check size={12} /> Request sent to broker</div>
+              )}
+            </div>
           </div>
 
           {readyDocs.length > 0 && (
