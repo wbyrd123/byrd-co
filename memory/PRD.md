@@ -1,48 +1,55 @@
 # Byrd & CO — Product Requirements Document
 
 ## Original Problem Statement
-"Commercial Real Estate Broker website for Byrd & CO. Lending on multifamily, hotels, office, condo projects, single-family units, condo units incl. leaseholds, 1–4 unit properties, portfolio loans. Offering refinances, purchases, cash-outs, new construction. Principals Caleb Byrd and Wayne Byrd. Need public site, login for Google Ads portal (internal), client portal where potential clients create login and upload docs via a shareable invite link. Testimonials section."
+"Commercial Real Estate Broker website for Byrd & CO. Add a lender-shopping platform for personal broker use — scenario builder, lender directory, shareable packages, gated document sharing."
 
 ## Product
-Byrd & CO — a marketing website + client document portal + broker admin console + AdsCopilot internal tool.
+Marketing site + client document portal + broker admin console + **Deal Engine** (Phase 1 + light Phase 2) + Google Ads Portal (internal marketing tool).
 
 ## Personas
-- **Public visitor** — reads the marketing site, requests a quote.
-- **Client** — receives an invite link from a broker, sets a password, uploads documents against a broker-tailored checklist.
-- **Broker (Wayne / Caleb)** — invites clients, curates their doc checklist per deal, reviews uploads (Pending → Uploaded → Reviewed / Rejected), reads quote inbox, runs AdsCopilot for marketing.
+- Public visitor → quote form
+- Client → invited via link, uploads docs
+- Broker (Wayne, Caleb) → invites clients, builds loan scenarios, curates a private lender directory, shops deals via watermarked shareable links, sees audit trail of lender engagement
+- Lender (external, no login) → soft-gated view of a scenario package; can request full data room
 
 ## Architecture
-- Backend: FastAPI + MongoDB (Motor). JWT auth (bcrypt). Base64 file storage in Mongo, 15MB cap.
-- Frontend: React 19 + Tailwind + Shadcn/UI, Recharts (AdsCopilot only), Sonner toasts.
-- Design: Editorial finance — Playfair Display headlines, Inter body, IBM Plex Mono for data. Palette: ivory #FBF8F1, gold #C89434, charcoal #1A1A1A.
-- AdsCopilot preserved at `/adscopilot/*` with its Swiss Brutalist styling scoped via `.adscopilot-scope`.
+- Backend: FastAPI + MongoDB (Motor). JWT auth (bcrypt). Base64 file storage (15MB cap). PDF via reportlab.
+- Frontend: React 19 + Tailwind + Shadcn/UI. Byrd editorial theme (Playfair Display + gold + charcoal). AdsCopilot scoped Swiss-Brutalist theme preserved.
 
 ## Implemented (2026-02)
-- **Public site**: Hero, four Programs (Purchase, Refinance, Cash-Out, New Construction), eight Property Types (Multifamily, Hotels, Office, Condo Projects, SFR, Condo Units, 1–4 Unit, Portfolio), Process, Principals (Wayne + Caleb with phone/email), Testimonials (4 seeded), Quote form, Footer.
-- **Auth**: JWT login. Startup seeds Wayne + Caleb as admins.
-- **Client invites**: Broker creates invite → shareable link `/portal/invite/<token>`. Client sets password, becomes role=client.
-- **Client portal** (`/portal`): grouped doc checklist by category, upload/replace with progress, status chips, file view/download, broker notes visible.
-- **Admin console** (`/admin`): overview stats, client roster, per-client detail with status dropdowns, notes, add/remove doc lines, copy invite link, quote inbox with reply/call actions, sidebar link into AdsCopilot and out to Google Ads.
-- **Files API** with per-user access control.
+### Prior iterations
+- Public site (hero, programs, properties, principals, testimonials, quote form)
+- Auth + client invite + client portal + broker admin console
+- Google Ads Portal (internal — formerly AdsCopilot) at `/adscopilot`
+
+### Iteration 3 — Deal Engine
+- **Scenario Builder** (`/admin/scenarios`): sponsor, property, loan request, financials, construction, sources & uses, business plan/notes; optional link to a client; status pipeline (draft → shopping → term_sheet → closed / lost).
+- **Sizing engine** (pure functions, unit-tested): LTV, LTC, DSCR, Debt Yield, Cash-on-Cash, monthly P&I, annual DS, S&U balance check.
+- **Lender Directory** (`/admin/lenders`): private CRM per broker — name, type, contacts, credit box (min/max loan, LTV/LTC/DSCR/DY thresholds), property types, geography, rate range, term, recourse preference, decision speed, fees, notes, status.
+- **Match Engine**: scores each lender vs a scenario (fits vs misses); one-click "Share" per match.
+- **Scenario Shares**: per-lender token; auto-transitions scenario status; audit log of every action (gate, view_scenario, view_doc, request_docs, download_pdf).
+- **Hybrid doc sharing**: attach each client doc as `included` (rides with link) or `on_request` (broker grants per lender).
+- **Public lender view** (`/lender/scenario/:token`): soft gate (name + email + institution), 12h session JWT, watermarked overlay ("Institution — Name"), metric grid, S&U, docs (Available Now vs On Request), "Request Full Data Room" button, downloadable watermarked PDF.
+- **PDF generation** (reportlab): brand cover, executive summary numbers, property/sponsor/loan detail, S&U, business plan/notes, diagonal watermark on every page + footer stamp with recipient name.
 
 ## Test Credentials
-- `wayne@byrd-co.com` / `byrdco2026` (admin)
-- `caleb@byrd-co.com` / `byrdco2026` (admin)
-- `sample@example.com` / `sample123` (client, checklist pre-populated)
+See `/app/memory/test_credentials.md`.
 
-## Backlog
-- **P1** Email delivery on quote form (Resend integration) — currently DB-only inbox.
-- **P1** Email delivery on invite creation (send link to client instead of manual copy).
-- **P1** Object storage (S3) — replace base64-in-Mongo for larger docs.
-- **P2** Password reset flow.
+## Prioritized Backlog
+- **P1** Resend integration → email quote requests + invite links + "you have a new lender view" notifications to broker.
+- **P1** Split server.py into modules (auth, byrd_portal, byrd_deal, adscopilot, pricing) — flagged by testing agent, mechanical refactor.
+- **P2** Object storage (S3) — replace base64-in-Mongo for large docs.
 - **P2** Editable testimonials in admin.
-- **P2** Doc templates (save a checklist as a template per loan type; auto-apply).
-- **P2** Client-facing status timeline / activity feed.
-- **P2** Public rate limiting + captcha on quote form.
-- **P3** Multi-broker teams beyond Wayne/Caleb.
-- **P3** Migrate FastAPI `on_event` to lifespan handlers.
+- **P2** Save doc-checklist and scenario templates per loan type.
+- **P2** Password reset flow.
+- **P2** Unit tests for sizing formulas (test_sizing.py — pin the math).
+- **P2** Rate limiting + captcha on `/api/public/quote`.
+- **P3** Real Google Ads API (developer token + OAuth) — replace simulated campaigns.
+- **P3** Lender-side "quote back" — capture proposed terms inside the link, side-by-side comparison for the broker.
+- **P3** Deal-level activity timeline (broker view: "Frost Bank viewed PFS 3× this week").
 
 ## Notes / Mocked
-- Testimonials are static seeded data.
-- Google Ads is a link out; AdsCopilot campaigns simulated.
-- Quote emails to wayne@ / caleb@ are NOT dispatched until Resend is wired.
+- Testimonials: seeded static data.
+- Quote form emails: not dispatched (needs Resend key).
+- Google Ads campaigns: simulated in Mongo.
+- Lender view session JWT is 12h; revoking a share invalidates the token immediately at the share-lookup layer.
