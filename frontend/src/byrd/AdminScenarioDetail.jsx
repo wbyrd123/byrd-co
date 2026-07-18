@@ -9,8 +9,10 @@ import {
 import {
   ArrowLeft, Save, FileText, Trash2, Plus, Users, Share2, Copy,
   Download, Eye, EyeOff, Check, X, ExternalLink, Building2, RefreshCw,
-  Archive, Sliders,
+  Archive, Sliders, Sparkles,
 } from "lucide-react";
+import ScenarioAIChat from "@/byrd/ScenarioAIChat";
+import ScenarioAIFab from "@/byrd/ScenarioAIFab";
 
 const useDebouncedSave = (fn, delay = 800) => {
   const [timer, setTimer] = useState(null);
@@ -75,6 +77,7 @@ const TABS = [
   { key: "package", label: "Package" },
   { key: "docs", label: "Documents" },
   { key: "lenders", label: "Lenders" },
+  { key: "ai", label: "AI Assist" },
 ];
 
 export default function AdminScenarioDetail() {
@@ -220,6 +223,41 @@ export default function AdminScenarioDetail() {
     }
   };
 
+  // Deep-merge patch so nested field updates from AI don't wipe sibling fields
+  const applyAIUpdates = async (updates) => {
+    const merge = (base, next) => {
+      const out = { ...(base || {}) };
+      for (const [k, v] of Object.entries(next || {})) {
+        if (v && typeof v === "object" && !Array.isArray(v) && base && typeof base[k] === "object" && !Array.isArray(base[k])) {
+          out[k] = merge(base[k], v);
+        } else if (v !== null && v !== "") {
+          out[k] = v;
+        }
+      }
+      return out;
+    };
+    // Build the merged payload from current scenario state
+    const merged = {};
+    for (const [k, v] of Object.entries(updates)) {
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        merged[k] = merge(scen[k], v);
+      } else if (v !== null && v !== "") {
+        merged[k] = v;
+      }
+    }
+    await patch(merged);
+  };
+
+  const sendToLenderByName = (lenderName) => {
+    const lender = lenders.find((l) => (l.name || "").toLowerCase() === lenderName.toLowerCase());
+    if (!lender) {
+      toast.error(`"${lenderName}" isn't in your directory yet`);
+      return;
+    }
+    setTab("lenders");
+    openSendDialog(lender.id);
+  };
+
   if (!scen) return <div className="text-sm text-[#6B6558]">Loading…</div>;
 
   const m = scen.metrics || {};
@@ -318,12 +356,30 @@ export default function AdminScenarioDetail() {
         />
       )}
 
+      {tab === "ai" && (
+        <div className="byrd-card overflow-hidden" data-testid="scen-tab-ai-panel">
+          <ScenarioAIChat
+            scenarioId={id}
+            onApplyUpdates={applyAIUpdates}
+            onSendToLender={sendToLenderByName}
+          />
+        </div>
+      )}
+
       {shareDialog && (
         <ShareVisibilityDialog
           scen={scen}
           dialog={shareDialog}
           onClose={() => setShareDialog(null)}
           onSubmit={submitShareDialog}
+        />
+      )}
+
+      {tab !== "ai" && (
+        <ScenarioAIFab
+          scenarioId={id}
+          onApplyUpdates={applyAIUpdates}
+          onSendToLender={sendToLenderByName}
         />
       )}
     </div>

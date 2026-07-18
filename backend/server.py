@@ -1669,6 +1669,284 @@ async def lender_docs_zip(token: str, session_token: Optional[str] = None):
 
 
 
+# ================ Scenario AI Assistant (Claude Sonnet 4.5) ================
+AI_MODES = Literal["interview", "parse", "analyst"]
+
+
+class AIChatRequest(BaseModel):
+    mode: AI_MODES = "interview"
+    message: str = Field(min_length=1, max_length=20000)
+
+
+class AIChatResetRequest(BaseModel):
+    keep_intro: bool = False
+
+
+def _make_scenario_ai_chat(session_id: str, system_message: str) -> LlmChat:
+    """Same model as AdsCopilot for consistency; Emergent Universal Key."""
+    return (
+        LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=system_message)
+        .with_model("anthropic", "claude-sonnet-4-5-20250929")
+    )
+
+
+def _lender_summary_for_ai(l: dict) -> dict:
+    """Compact lender record so we don't blow the context window."""
+    return {
+        "name": l.get("name"),
+        "type": l.get("institution_type"),
+        "property_types": l.get("property_types") or [],
+        "min_loan": l.get("min_loan"),
+        "max_loan": l.get("max_loan"),
+        "max_ltv": l.get("max_ltv"),
+        "min_dscr": l.get("min_dscr"),
+        "geography": l.get("geography") or [],
+        "rate_range": [l.get("rate_min"), l.get("rate_max")],
+        "recourse": l.get("recourse_preference"),
+        "status": l.get("status"),
+    }
+
+
+def _scenario_snapshot(scen: dict, metrics: dict) -> dict:
+    """Scoped view of the scenario that the model can safely read + reason over."""
+    return {
+        "name": scen.get("name"),
+        "status": scen.get("status"),
+        "sponsor": scen.get("sponsor"),
+        "property_info": scen.get("property_info"),
+        "loan_request": scen.get("loan_request"),
+        "financials": scen.get("financials"),
+        "construction": scen.get("construction"),
+        "sources_uses": scen.get("sources_uses"),
+        "notes": scen.get("notes"),
+        "business_plan": scen.get("business_plan"),
+        "metrics": metrics,
+    }
+
+
+AI_SYSTEM_PROMPT = """You are Byrd & CO's commercial real estate Deal Engine assistant.
+You help Wayne and Caleb Byrd (commercial mortgage brokers) build, review, and shop loan scenarios.
+
+You always operate on ONE scenario at a time. The current scenario JSON and the broker's lender directory
+are provided to you at the start of every turn. Use them faithfully — never invent lender names or numbers.
+
+# Modes
+- **interview**: Ask ONE focused question at a time to gather missing scenario fields. Keep questions
+  short and specific to CRE debt. Never ask for personal SSN, DOB, or non-relevant PII.
+- **parse**: The user pasted an offering memo, term sheet, email, or notes. Extract structured fields.
+  Be conservative — don't guess. Leave fields null if uncertain.
+- **analyst**: The scenario is mostly complete. Review it. Flag issues (DSCR < 1.20, LTV over lender
+  caps, missing NOI, wrong recourse defaults). Recommend concrete fixes and which lenders in the
+  directory fit best.
+
+# CRE domain rules
+- DSCR below 1.20 is risky, below 1.00 is un-financeable for permanent debt.
+- Debt yield below 8% is aggressive for perm debt.
+- Multifamily = "multifamily". Class B office is common. Retail can be single-tenant or multi-tenant.
+- Loan types: acquisition, refinance, construction, bridge, permanent, cash-out-refi.
+- Amortization is usually 300 or 360 months. Term 60/84/120 months typical.
+- Recourse options: recourse, non-recourse, partial.
+
+# Response format
+Write your reply in natural, warm broker-professional English. Then, if and only if you want to
+propose changes or lender picks, append fenced blocks at the very END of your message.
+
+Use these exact block markers:
+
+```updates
+{ ...JSON object with scenario field updates... }
+```
+
+```lenders
+[ {"name":"Frost Bank","reason":"in-market, DSCR fits, size range OK"}, ... ]
+```
+
+Rules for the ```updates``` block:
+- Only include fields you're proposing to change or set.
+- Use the exact nested shape of the scenario:
+  { "name": "...", "sponsor": {...}, "property_info": {...}, "loan_request": {...},
+    "financials": {...}, "notes": "...", "business_plan": "..." }
+- Never emit metrics — those are computed server-side.
+- Numbers must be numbers (not strings). Percentages are numbers like 6.5 (meaning 6.5%).
+
+Rules for the ```lenders``` block:
+- Only include names that appear verbatim in the provided lender directory.
+- Keep 1–5 recommendations, best fit first.
+- Each entry: { "name": "exact directory name", "reason": "one short sentence" }.
+
+Do NOT include either block if you have no changes/picks. Keep normal chat clean — no code fences
+unless you're using them for updates/lenders.
+"""
+
+
+def _build_turn_context(scen: dict, metrics: dict, lenders: List[dict], mode: str) -> str:
+    """Injected before the user's own message so the model always sees fresh state."""
+    lender_slim = [_lender_summary_for_ai(l) for l in lenders if l.get("status") != "dormant"]
+    payload = {
+        "mode": mode,
+        "current_scenario": _scenario_snapshot(scen, metrics),
+        "lender_directory": lender_slim,
+    }
+    return (
+        "Here is the current scenario state and lender directory (READ ONLY — do not echo this back):\n\n"
+        f"```json\n{json.dumps(payload, indent=2, default=str)}\n```\n\n"
+        "Now respond to the broker."
+    )
+
+
+def _extract_fenced_block(text: str, marker: str) -> Optional[str]:
+    """Find ```<marker>\n...\n``` in text and return the inner payload, or None."""
+    needle = f"```{marker}"
+    start = text.find(needle)
+    if start < 0:
+        return None
+    body_start = text.find("\n", start)
+    if body_start < 0:
+        return None
+    end = text.find("```", body_start + 1)
+    if end < 0:
+        return None
+    return text[body_start + 1:end].strip()
+
+
+def _split_ai_response(full_text: str) -> dict:
+    """Parse Claude's response into (chat_text, updates, lender_recs)."""
+    updates_raw = _extract_fenced_block(full_text, "updates")
+    lenders_raw = _extract_fenced_block(full_text, "lenders")
+
+    updates = None
+    if updates_raw:
+        try:
+            parsed = json.loads(updates_raw)
+            if isinstance(parsed, dict) and parsed:
+                updates = parsed
+        except Exception:
+            pass
+
+    lender_recs = None
+    if lenders_raw:
+        try:
+            parsed = json.loads(lenders_raw)
+            if isinstance(parsed, list):
+                lender_recs = [
+                    {"name": x.get("name"), "reason": x.get("reason", "")}
+                    for x in parsed if isinstance(x, dict) and x.get("name")
+                ][:5]
+        except Exception:
+            pass
+
+    # Strip the fenced blocks from the visible chat text
+    chat_text = full_text
+    for marker in ("updates", "lenders"):
+        needle = f"```{marker}"
+        idx = chat_text.find(needle)
+        if idx >= 0:
+            end = chat_text.find("```", idx + len(needle))
+            if end >= 0:
+                chat_text = chat_text[:idx] + chat_text[end + 3:]
+    return {"text": chat_text.strip(), "updates": updates, "lender_recs": lender_recs}
+
+
+@api.post("/admin/scenarios/{sid}/ai/chat")
+async def scenario_ai_chat(sid: str, body: AIChatRequest, admin=Depends(require_admin)):
+    """SSE streaming chat with Claude, aware of scenario + lender directory."""
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    metrics = compute_scenario_metrics(scen)
+    lenders = await db.lenders.find({}, {"_id": 0}).to_list(500)
+
+    # Session is one per (scenario, admin). Persistent history in DB is used only to
+    # rehydrate chat history on the client; LlmChat itself gets a fresh instance per call
+    # but we still hand it prior messages by writing them in as we go (the library keeps
+    # its own per-session store keyed by session_id, which lives inside the module).
+    session_id = f"scenario-ai::{sid}::{admin['id']}"
+    system_message = AI_SYSTEM_PROMPT
+    chat = _make_scenario_ai_chat(session_id, system_message)
+
+    turn_context = _build_turn_context(scen, metrics, lenders, body.mode)
+    user_text = f"{turn_context}\n\nBroker message ({body.mode} mode):\n{body.message}"
+
+    async def event_gen():
+        buf: List[str] = []
+        # Persist the user's own message first (without the injected context)
+        user_msg_id = str(uuid.uuid4())
+        await db.scenario_ai_messages.insert_one({
+            "id": user_msg_id,
+            "scenario_id": sid,
+            "admin_id": admin["id"],
+            "role": "user",
+            "mode": body.mode,
+            "content": body.message,
+            "created_at": now_iso(),
+        })
+        try:
+            async for ev in chat.stream_message(UserMessage(text=user_text)):
+                if isinstance(ev, TextDelta):
+                    buf.append(ev.content)
+                    payload = json.dumps({"type": "token", "content": ev.content})
+                    yield f"data: {payload}\n\n"
+                elif isinstance(ev, StreamDone):
+                    break
+        except Exception as e:
+            err = json.dumps({"type": "error", "message": str(e)[:400]})
+            yield f"data: {err}\n\n"
+            return
+
+        full_text = "".join(buf)
+        parsed = _split_ai_response(full_text)
+
+        # Persist the assistant reply
+        assistant_msg_id = str(uuid.uuid4())
+        await db.scenario_ai_messages.insert_one({
+            "id": assistant_msg_id,
+            "scenario_id": sid,
+            "admin_id": admin["id"],
+            "role": "assistant",
+            "mode": body.mode,
+            "content": parsed["text"],
+            "updates": parsed["updates"],
+            "lender_recs": parsed["lender_recs"],
+            "created_at": now_iso(),
+        })
+
+        done = json.dumps({
+            "type": "done",
+            "message_id": assistant_msg_id,
+            "text": parsed["text"],
+            "updates": parsed["updates"],
+            "lender_recs": parsed["lender_recs"],
+        })
+        yield f"data: {done}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@api.get("/admin/scenarios/{sid}/ai/messages")
+async def scenario_ai_messages(sid: str, admin=Depends(require_admin)):
+    """Return the persisted AI chat history for this scenario + admin."""
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0, "id": 1})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    msgs = await db.scenario_ai_messages.find(
+        {"scenario_id": sid, "admin_id": admin["id"]},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(500)
+    return msgs
+
+
+@api.post("/admin/scenarios/{sid}/ai/reset")
+async def scenario_ai_reset(sid: str, admin=Depends(require_admin)):
+    """Clear chat history for this scenario + admin so the assistant starts fresh."""
+    await db.scenario_ai_messages.delete_many({"scenario_id": sid, "admin_id": admin["id"]})
+    return {"ok": True}
+
+
+
 # ================ AdsCopilot (existing internal tool) ================
 class CampaignCreate(BaseModel):
     name: str
