@@ -6,7 +6,7 @@ Powers:
   * Admin/broker portal (manage clients, review docs, view quotes)
   * AdsCopilot internal tool (Claude Sonnet 4.5) — kept from prior iteration
 """
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -26,6 +26,10 @@ from typing import List, Optional, Literal
 from datetime import datetime, timezone, timedelta
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
+from email_service import (
+    send_email, broker_emails, public_base_url,
+    tmpl_quote, tmpl_invite, tmpl_lender_activity,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -211,7 +215,7 @@ class QuoteRequest(BaseModel):
 
 # ================ Public routes ================
 @api.post("/public/quote")
-async def submit_quote(body: QuoteRequest):
+async def submit_quote(body: QuoteRequest, background: BackgroundTasks):
     doc = {
         "id": str(uuid.uuid4()),
         **body.model_dump(),
@@ -221,6 +225,9 @@ async def submit_quote(body: QuoteRequest):
     await db.quotes.insert_one(doc)
     doc.pop("_id", None)
     logger.info(f"New quote request from {body.email}")
+    subj, html, text = tmpl_quote(doc)
+    for r in broker_emails():
+        background.add_task(send_email, r, subj, html, text, "quote")
     return {"ok": True, "id": doc["id"]}
 
 
@@ -301,7 +308,7 @@ async def me(user=Depends(get_current_user)):
 
 # ================ Invites ================
 @api.post("/admin/invites")
-async def create_invite(body: InviteCreate, admin=Depends(require_admin)):
+async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=Depends(require_admin)):
     # If user already exists, error out; otherwise create pending user + invite token
     existing = await db.users.find_one({"email": body.email.lower()})
     if existing:
@@ -346,6 +353,11 @@ async def create_invite(body: InviteCreate, admin=Depends(require_admin)):
             "created_at": now,
             "updated_at": now,
         })
+    # Email the invite link to the client (non-blocking, safe if Postmark down)
+    invite_url = f"{public_base_url()}/portal/invite/{token}" if public_base_url() else f"/portal/invite/{token}"
+    user_stub = {"name": body.name, "email": body.email.lower()}
+    subj, html, text = tmpl_invite(user_stub, invite_url)
+    background.add_task(send_email, body.email.lower(), subj, html, text, "invite")
     return {
         "token": token,
         "invite_url_path": f"/portal/invite/{token}",
@@ -1485,10 +1497,15 @@ async def lender_get_doc(token: str, doc_id: str, session_token: Optional[str] =
 
 
 @api.post("/lender-view/{token}/request-docs")
-async def lender_request_docs(token: str, session_token: Optional[str] = None):
+async def lender_request_docs(token: str, background: BackgroundTasks, session_token: Optional[str] = None):
     share, session = await _require_view_session(token, session_token)
     await db.scenario_shares.update_one({"id": share["id"]}, {"$set": {"requested_at": now_iso()}})
     await _log_view(share["scenario_id"], share["id"], session, "request_docs")
+    scen = await db.scenarios.find_one({"id": share["scenario_id"]}, {"_id": 0, "name": 1})
+    scen_name = (scen or {}).get("name", "Loan Package")
+    subj, html, text = tmpl_lender_activity("request_docs", share, session, scen_name)
+    for r in broker_emails():
+        background.add_task(send_email, r, subj, html, text, "lender-request")
     return {"ok": True}
 
 
