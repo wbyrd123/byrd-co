@@ -17,6 +17,7 @@ import AdminQuotes from "@/byrd/AdminQuotes";
 import AdminScenarios from "@/byrd/AdminScenarios";
 import AdminScenarioDetail from "@/byrd/AdminScenarioDetail";
 import AdminLenders from "@/byrd/AdminLenders";
+import AdminGuide from "@/byrd/AdminGuide";
 import LenderView from "@/byrd/LenderView";
 
 // AdsCopilot (staff-only)
@@ -97,6 +98,7 @@ function App() {
               <Route path="scenarios" element={<AdminScenarios />} />
               <Route path="scenarios/:id" element={<AdminScenarioDetail />} />
               <Route path="lenders" element={<AdminLenders />} />
+              <Route path="guide" element={<AdminGuide />} />
             </Route>
 
             {/* AdsCopilot (admin only) */}

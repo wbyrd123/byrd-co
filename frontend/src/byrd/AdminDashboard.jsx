@@ -66,6 +66,23 @@ export default function AdminDashboard() {
         </Link>
       </div>
 
+      {/* Help tile */}
+      <Link
+        to="/admin/guide"
+        data-testid="guide-tile"
+        className="byrd-card byrd-card-hover p-5 flex items-center gap-4 group"
+      >
+        <div className="w-10 h-10 shrink-0 rounded-md bg-[#F3EEE0] text-[#C89434] grid place-items-center">
+          <ArrowRight size={16} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="font-serif text-lg font-bold">New here? Read the Guide</div>
+          <div className="text-xs text-[#6B6558] mt-0.5">
+            5-minute walkthrough of every screen — invites, scenarios, lender shopping.
+          </div>
+        </div>
+      </Link>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="byrd-card p-6">
           <div className="flex items-center justify-between mb-4">

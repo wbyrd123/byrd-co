@@ -3,7 +3,7 @@ import { NavLink, Outlet, Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { LOGO_URL } from "@/byrd/data";
 import {
-  LayoutDashboard, Users, Inbox, Sparkles, LogOut, FileText, Building2,
+  LayoutDashboard, Users, Inbox, Sparkles, LogOut, FileText, Building2, BookOpen,
 } from "lucide-react";
 
 const NAV = [
@@ -12,6 +12,7 @@ const NAV = [
   { to: "/admin/scenarios", label: "Scenarios", icon: FileText, testId: "admin-nav-scenarios" },
   { to: "/admin/lenders", label: "Lenders", icon: Building2, testId: "admin-nav-lenders" },
   { to: "/admin/quotes", label: "Quote Inbox", icon: Inbox, testId: "admin-nav-quotes" },
+  { to: "/admin/guide", label: "Guide", icon: BookOpen, testId: "admin-nav-guide" },
 ];
 
 export default function AdminLayout() {
