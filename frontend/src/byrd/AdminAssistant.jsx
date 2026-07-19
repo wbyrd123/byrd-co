@@ -208,9 +208,12 @@ export default function AdminAssistant() {
     try {
       await api.post("/admin/assistant/email/send", draft);
       toast.success(`Email sent to ${draft.to}`);
-      setMessages((m) => m.map((x) => (x.id === msgId ? { ...x, _emailSent: true } : x)));
+      setMessages((m) => m.map((x) => (x.id === msgId ? { ...x, _emailSent: true, _emailError: null } : x)));
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Email failed");
+      const detail = e?.response?.data?.detail || e?.message || "Email failed";
+      // Persist the error on the draft card so it stays visible after the toast fades
+      setMessages((m) => m.map((x) => (x.id === msgId ? { ...x, _emailError: detail } : x)));
+      toast.error("Email failed — see the draft card for details");
     }
   };
 
@@ -476,6 +479,7 @@ function Bubble({ m, onSendEmail, onCreateClient }) {
           <EmailDraftCard
             draft={m.email_draft}
             sent={m._emailSent}
+            error={m._emailError}
             onSend={(d) => onSendEmail(d, m.id)}
           />
         )}
@@ -511,7 +515,7 @@ function Bubble({ m, onSendEmail, onCreateClient }) {
   );
 }
 
-function EmailDraftCard({ draft, sent, onSend }) {
+function EmailDraftCard({ draft, sent, error, onSend }) {
   const [d, setD] = useState(draft);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -551,12 +555,24 @@ function EmailDraftCard({ draft, sent, onSend }) {
                 className="byrd-btn byrd-btn-dark h-8 px-3 text-[11px]"
                 data-testid="email-send"
               >
-                {busy ? "Sending…" : <><Send size={11} /> Send</>}
+                {busy ? "Sending…" : error ? <><Send size={11} /> Retry</> : <><Send size={11} /> Send</>}
               </button>
             </>
           )}
         </div>
       </div>
+
+      {error && !sent && (
+        <div
+          className="mb-2 text-[11px] bg-[#FADCDA] border border-[#E38380] text-[#8A1F1A] rounded-md px-2 py-1.5 leading-snug"
+          data-testid="email-error"
+        >
+          <div className="font-semibold inline-flex items-center gap-1 mb-0.5">
+            <AlertCircle size={11} /> Not sent
+          </div>
+          {error}
+        </div>
+      )}
 
       {editing ? (
         <div className="space-y-2">

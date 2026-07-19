@@ -2719,11 +2719,14 @@ async def assistant_send_email(body: AssistantEmailSend, admin=Depends(require_a
     if not result.get("ok"):
         detail = error_msg or "Email failed to send"
         low = error_msg.lower()
-        if "pending approval" in low:
+        if "pending approval" in low or "[412]" in error_msg:
             detail = (
-                "Postmark account is still pending approval — right now it can only send "
-                "to addresses on your own domain (@byrd-co.com). Request approval in the "
-                "Postmark dashboard, then this email will go out. Raw error: " + error_msg
+                "Postmark account is still in trial/pending-approval mode. While in trial, "
+                "it will only send to recipients that share the exact domain of the sender. "
+                "Two ways to fix: (a) request approval in the Postmark dashboard (Servers → "
+                "your server → Request approval), OR (b) add an @byrd-co.com Sender Signature "
+                "(bare domain, not the mail. subdomain) and update POSTMARK_FROM to use it. "
+                "Raw error: " + error_msg
             )
         elif "sender signature" in low:
             detail = (
