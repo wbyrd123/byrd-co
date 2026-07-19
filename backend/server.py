@@ -177,7 +177,6 @@ class InviteCreate(BaseModel):
     name: str = Field(min_length=1)
     company: Optional[str] = None
     phone: Optional[str] = None
-    loan_type: Optional[str] = None
     doc_template: Optional[List[dict]] = None
 
 
@@ -323,7 +322,6 @@ async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=D
         "name": body.name,
         "phone": body.phone,
         "company": body.company,
-        "loan_type": body.loan_type,
         "role": "client",
         "password_hash": None,
         "pending": True,
@@ -363,7 +361,7 @@ async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=D
         "invite_url_path": f"/portal/invite/{token}",
         "user": {
             "id": user_id, "email": body.email.lower(), "name": body.name,
-            "company": body.company, "phone": body.phone, "loan_type": body.loan_type,
+            "company": body.company, "phone": body.phone,
         },
     }
 
@@ -420,10 +418,30 @@ async def _client_summary(client_id: str) -> dict:
 @api.get("/admin/clients")
 async def admin_list_clients(admin=Depends(require_admin)):
     users = await db.users.find({"role": "client"}, {"_id": 0, "password_hash": 0}).sort("created_at", -1).to_list(500)
+    # Batch-fetch scenarios per client so the roster can show a scenario count / latest type
+    scen_by_client: Dict[str, list] = {}
+    async for s in db.scenarios.find(
+        {"client_id": {"$in": [u["id"] for u in users]}},
+        {"_id": 0, "id": 1, "client_id": 1, "name": 1, "status": 1, "loan_request": 1, "updated_at": 1},
+    ):
+        scen_by_client.setdefault(s["client_id"], []).append(s)
     result = []
     for u in users:
         s = await _client_summary(u["id"])
         u["doc_summary"] = s
+        scens = sorted(scen_by_client.get(u["id"], []), key=lambda x: x.get("updated_at") or "", reverse=True)
+        u["scenario_count"] = len(scens)
+        u["latest_scenario"] = None
+        if scens:
+            top = scens[0]
+            u["latest_scenario"] = {
+                "id": top["id"],
+                "name": top.get("name"),
+                "status": top.get("status"),
+                "loan_type": (top.get("loan_request") or {}).get("loan_type"),
+            }
+        # Legacy: strip loan_type from user payload if it was set by an older invite
+        u.pop("loan_type", None)
         result.append(u)
     return result
 
@@ -433,6 +451,7 @@ async def admin_get_client(client_id: str, admin=Depends(require_admin)):
     u = await db.users.find_one({"id": client_id, "role": "client"}, {"_id": 0, "password_hash": 0})
     if not u:
         raise HTTPException(status_code=404, detail="Client not found")
+    u.pop("loan_type", None)  # legacy field — loan_type now lives on the scenario
     docs = await db.client_docs.find({"client_id": client_id}, {"_id": 0}).sort("order", 1).to_list(500)
     # Attach file metadata (without content) for docs that have uploads
     for d in docs:
@@ -440,7 +459,16 @@ async def admin_get_client(client_id: str, admin=Depends(require_admin)):
             f = await db.client_files.find_one({"id": d["file_id"]}, {"_id": 0, "data_b64": 0})
             d["file"] = f
     invite = await db.invites.find_one({"user_id": client_id}, {"_id": 0})
-    return {"client": u, "docs": docs, "invite": invite}
+    scenarios = await db.scenarios.find(
+        {"client_id": client_id},
+        {"_id": 0, "id": 1, "name": 1, "status": 1, "loan_request": 1, "updated_at": 1, "created_at": 1},
+    ).sort("updated_at", -1).to_list(200)
+    # Slim loan_request down to just loan_type + loan_amount for the client page
+    for s in scenarios:
+        lr = s.pop("loan_request", None) or {}
+        s["loan_type"] = lr.get("loan_type")
+        s["loan_amount"] = lr.get("loan_amount")
+    return {"client": u, "docs": docs, "invite": invite, "scenarios": scenarios}
 
 
 @api.post("/admin/clients/{client_id}/docs")

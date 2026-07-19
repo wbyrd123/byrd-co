@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, API_BASE } from "@/lib/api";
-import { LOAN_TYPES_FLAT } from "@/byrd/data";
 import { toast } from "sonner";
 import { Copy, Plus, Users, X, Check } from "lucide-react";
 
 const InviteDialog = ({ open, onClose, onCreated }) => {
   const [form, setForm] = useState({
-    name: "", email: "", company: "", phone: "", loan_type: "",
+    name: "", email: "", company: "", phone: "",
   });
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
@@ -85,20 +84,12 @@ const InviteDialog = ({ open, onClose, onCreated }) => {
                   className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]"
                 />
               </div>
-              <div className="sm:col-span-2">
-                <label className="text-xs uppercase font-mono tracking-widest text-[#6B6558]">Loan Type (optional)</label>
-                <select value={form.loan_type} onChange={(e) => set("loan_type", e.target.value)}
-                  className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white"
-                >
-                  <option value="">Select…</option>
-                  {LOAN_TYPES_FLAT.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
             </div>
             <div className="text-xs text-[#6B6558]">
               This adds the client to your roster and generates a portal invite link.
               A default document checklist (personal + business 3-yr tax returns, resume, entity docs, etc.)
-              is attached automatically — you can edit it after. Send the invite link now or later from the client&apos;s page.
+              is attached automatically — you can edit it after. <b>Loan details</b> live on scenarios, so one
+              client can have multiple deals in flight. Send the invite link now or later from the client&apos;s page.
             </div>
             <button type="submit" disabled={busy} className="byrd-btn byrd-btn-dark w-full" data-testid="invite-submit">
               {busy ? "Adding…" : "Add Client"}
@@ -172,7 +163,7 @@ export default function AdminClients() {
       ) : (
         <div className="byrd-card overflow-hidden">
           <div className="hidden md:grid grid-cols-[1.5fr_1fr_.9fr_.9fr_.9fr_.8fr] border-b border-[#E4DFD1] bg-[#FBF8F1]">
-            {["Client", "Email", "Loan Type", "Pending", "Uploaded", "Reviewed"].map((h) => (
+            {["Client", "Email", "Scenarios", "Pending", "Uploaded", "Reviewed"].map((h) => (
               <div key={h} className="px-4 py-3 text-[11px] uppercase font-mono tracking-widest text-[#6B6558]">{h}</div>
             ))}
           </div>
@@ -188,7 +179,18 @@ export default function AdminClients() {
                 <div className="text-xs text-[#6B6558]">{c.company || "—"}</div>
               </div>
               <div className="px-4 py-4 text-sm text-[#2A2A2A] truncate">{c.email}</div>
-              <div className="px-4 py-4 text-sm">{c.loan_type || "—"}</div>
+              <div className="px-4 py-4 text-sm">
+                {c.scenario_count > 0 ? (
+                  <div>
+                    <div className="font-mono text-sm">{c.scenario_count}</div>
+                    {c.latest_scenario?.loan_type && (
+                      <div className="text-[11px] text-[#6B6558] truncate">Latest: {c.latest_scenario.loan_type}</div>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-[#6B6558]">—</span>
+                )}
+              </div>
               <div className="px-4 py-4 font-mono text-sm">{c.doc_summary.pending}</div>
               <div className="px-4 py-4 font-mono text-sm">{c.doc_summary.uploaded}</div>
               <div className="px-4 py-4 font-mono text-sm">

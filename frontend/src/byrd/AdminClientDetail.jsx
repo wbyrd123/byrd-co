@@ -3,8 +3,10 @@ import { Link, useParams, useNavigate } from "react-router-dom";
 import { api, API_BASE } from "@/lib/api";
 import { toast } from "sonner";
 import { StatusChip, fmtSize, STATUS_OPTIONS } from "@/byrd/docHelpers";
+import { scenarioStatusChip, fmtMoney } from "@/byrd/dealData";
 import {
   ArrowLeft, Plus, Copy, Trash2, Download, Phone, Mail, Building2, Save,
+  FileText, ExternalLink,
 } from "lucide-react";
 
 const AddDocForm = ({ onAdd }) => {
@@ -96,7 +98,7 @@ export default function AdminClientDetail() {
 
   if (!data) return <div className="text-sm text-[#6B6558]">Loading…</div>;
 
-  const { client, docs, invite } = data;
+  const { client, docs, invite, scenarios = [] } = data;
   const inviteActivated = invite && invite.used_at;
 
   return (
@@ -113,7 +115,6 @@ export default function AdminClientDetail() {
             <a href={`mailto:${client.email}`} className="inline-flex items-center gap-1 hover:text-[#C89434]"><Mail size={12} /> {client.email}</a>
             {client.phone && <a href={`tel:${client.phone}`} className="inline-flex items-center gap-1 hover:text-[#C89434]"><Phone size={12} /> {client.phone}</a>}
             {client.company && <span className="inline-flex items-center gap-1"><Building2 size={12} /> {client.company}</span>}
-            {client.loan_type && <span className="byrd-chip byrd-chip-gold">{client.loan_type}</span>}
           </div>
         </div>
         <div className="flex flex-col items-end gap-2">
@@ -131,6 +132,9 @@ export default function AdminClientDetail() {
           </div>
         </div>
       </div>
+
+      {/* Scenarios for this client */}
+      <ScenariosStrip clientId={id} scenarios={scenarios} />
 
       {/* Add doc line */}
       <AddDocForm onAdd={add} />
@@ -155,6 +159,77 @@ export default function AdminClientDetail() {
           />
         ))}
       </div>
+    </div>
+  );
+}
+
+function ScenariosStrip({ clientId, scenarios }) {
+  const nav = useNavigate();
+  const [creating, setCreating] = useState(false);
+
+  const createFor = async () => {
+    setCreating(true);
+    try {
+      const res = await api.post("/admin/scenarios", {
+        name: "Untitled Scenario",
+        client_id: clientId,
+      });
+      toast.success("Scenario created");
+      nav(`/admin/scenarios/${res.data.id}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to create scenario");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="byrd-card p-6" data-testid="client-scenarios-strip">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Loan Scenarios</div>
+          <h3 className="font-serif text-xl font-bold mt-1">
+            Deals in flight {scenarios.length > 0 && <span className="text-[#6B6558] font-normal">({scenarios.length})</span>}
+          </h3>
+        </div>
+        <button onClick={createFor} disabled={creating} className="byrd-btn byrd-btn-dark" data-testid="new-scenario-for-client">
+          <Plus size={14} /> {creating ? "Creating…" : "New Scenario"}
+        </button>
+      </div>
+
+      {scenarios.length === 0 ? (
+        <div className="mt-4 text-sm text-[#6B6558]">
+          No scenarios yet. A client can have multiple loans in progress — start one and pick the loan type
+          (Purchase, Refi, Construction, Bridge, etc.) inside the scenario.
+        </div>
+      ) : (
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          {scenarios.map((s) => {
+            const chip = scenarioStatusChip(s.status);
+            return (
+              <Link
+                key={s.id}
+                to={`/admin/scenarios/${s.id}`}
+                data-testid={`client-scenario-${s.id}`}
+                className="border border-[#E4DFD1] rounded-md p-3 flex items-start justify-between gap-3 hover:bg-[#FBF8F1] transition-colors"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="font-semibold text-sm truncate inline-flex items-center gap-1.5">
+                    <FileText size={12} className="text-[#C89434] shrink-0" />
+                    {s.name || "Untitled"}
+                  </div>
+                  <div className="text-xs text-[#6B6558] mt-1 flex flex-wrap items-center gap-2">
+                    <span className={chip.chip}>{chip.label}</span>
+                    {s.loan_type && <span className="byrd-chip byrd-chip-gold">{s.loan_type}</span>}
+                    {s.loan_amount ? <span className="font-mono">{fmtMoney(s.loan_amount)}</span> : null}
+                  </div>
+                </div>
+                <ExternalLink size={14} className="text-[#6B6558] shrink-0 mt-1" />
+              </Link>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

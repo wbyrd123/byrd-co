@@ -20,6 +20,7 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - **Per-share per-document visibility (Include / On Request / Hidden)** — 2026-02
 - **ZIP bundle download** for admins and lenders (audit-logged for lenders) — 2026-02
 - **AI Deal Engine assistant (Claude Sonnet 4.5)** — 3-mode chat (Interview / Parse / Analyst) available as a dedicated "AI Assist" tab and floating chat FAB; streams tokens, proposes structured scenario updates with one-click Apply, and recommends lenders from the directory — 2026-02
+- **Data-model refactor: loan_type belongs to Scenario, not Client** — removed loan_type from Add Client form + client roster; each client page now shows a "Loan Scenarios" strip listing all their deals with per-scenario loan type/amount/status, plus a "New Scenario" quick-create — 2026-02
 
 ## Backlog
 - P0: Redeploy production to activate Postmark env vars

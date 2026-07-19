@@ -139,8 +139,8 @@ export default function AdminGuide() {
 
       <Card id="clients" icon={Users} title="Clients &amp; Documents">
         <Step n="1" title="Add a client">
-          <p>Sidebar → <b>Clients</b> → <b>Add Client</b>. Fill in name + email (optionally company / phone / loan type). Click <b>Add Client</b>.</p>
-          <p>The client is added to your roster immediately, and you get a shareable portal invite link. Copy it now to email/text them, or grab it later from their client page — no rush.</p>
+          <p>Sidebar → <b>Clients</b> → <b>Add Client</b>. Fill in name + email (optionally company / phone). Click <b>Add Client</b>.</p>
+          <p>The client is added to your roster immediately, and you get a shareable portal invite link. Copy it now to email/text them, or grab it later from their client page — no rush. Loan details (type, amount, terms) live on <b>Scenarios</b>, so one client can have multiple deals in parallel.</p>
         </Step>
         <Step n="2" title="The client sets a password">
           <p>They click the link, set their own password, and land in their portal. The default document checklist (18 items — Resume, personal + business tax returns for 3 years, entity docs, construction budget, etc.) is already attached to them.</p>
