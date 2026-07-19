@@ -2668,8 +2668,10 @@ async def assistant_reply_to_handoff(tid: str, body: AssistantTaskReply, admin=D
 
 
 @api.post("/admin/assistant/email/send")
-async def assistant_send_email(body: AssistantEmailSend, background: BackgroundTasks, admin=Depends(require_admin)):
-    """Send an email FROM the admin's own address via Postmark, and log it."""
+async def assistant_send_email(body: AssistantEmailSend, admin=Depends(require_admin)):
+    """Send an email FROM the admin's own address via Postmark, and log it.
+    Runs synchronously so we can surface Postmark errors (e.g. pending-approval, invalid domain)
+    directly in the UI instead of silently failing in a background task."""
     from_email = admin.get("email")
     if not from_email:
         raise HTTPException(status_code=400, detail="Admin has no email on file")
@@ -2684,13 +2686,14 @@ async def assistant_send_email(body: AssistantEmailSend, background: BackgroundT
         f"<a href=\"mailto:{from_email}\" style=\"color:#6B6558;\">{from_email}</a></div>"
         "</div>"
     )
-    # Fire-and-forget in background so we return quickly
-    background.add_task(
-        send_email, body.to, body.subject, html, body.body, "assistant-outbound",
+    # Synchronous send so we can return the real Postmark outcome
+    result = send_email(
+        body.to, body.subject, html, body.body, "assistant-outbound",
         from_email, from_name, from_email,
     )
-    # Log the outbound
     log_id = str(uuid.uuid4())
+    status = "sent" if result.get("ok") else "failed"
+    error_msg = result.get("error") or ""
     await db.assistant_emails.insert_one({
         "id": log_id,
         "admin_id": admin["id"],
@@ -2699,9 +2702,22 @@ async def assistant_send_email(body: AssistantEmailSend, background: BackgroundT
         "subject": body.subject,
         "body": body.body,
         "related_task_id": body.related_task_id,
+        "status": status,
+        "error": error_msg,
         "sent_at": now_iso(),
     })
-    return {"ok": True, "id": log_id}
+    if not result.get("ok"):
+        # Return a helpful error the frontend can surface directly
+        # Detect the common Postmark pending-approval error and give a friendlier hint
+        detail = error_msg or "Email failed to send"
+        if "pending approval" in error_msg.lower():
+            detail = (
+                f"Postmark account is still pending approval — right now it can only send "
+                f"to addresses on your own domain (@byrd-co.com). Request approval in the "
+                f"Postmark dashboard, then this email will go out. Raw error: {error_msg}"
+            )
+        raise HTTPException(status_code=502, detail=detail)
+    return {"ok": True, "id": log_id, "status": status}
 
 
 # ================ AdsCopilot (existing internal tool) ================

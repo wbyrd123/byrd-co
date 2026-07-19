@@ -1,0 +1,36 @@
+{
+  "summary": "Backend testing of POST /api/admin/assistant/email/send fix + assistant endpoint regressions. Application-level 502 with 'pending approval' hint works. TWO CRITICAL BUGS FOUND: (1) Cloudflare intercepts 502 status and replaces the JSON body with its own HTML 'Bad gateway' page — the helpful hint the fix is supposed to surface never reaches the user through the public URL. (2) Same-domain sends (e.g. to=caleb@byrd-co.com) ALSO fail because Postmark rejects From=wayne@byrd-co.com — that address is not a verified Sender Signature (only notifications@mail.byrd-co.com is). So the feature is currently broken for every recipient, same-domain or not. All other assistant endpoints (chat SSE, tasks list, messages, reset, teammates) pass regression.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/admin/assistant/email/send", "issue": "Same-domain send (e.g. to=caleb@byrd-co.com) fails with Postmark [400] 'The From address you supplied (wayne@byrd-co.com) is not a Sender Signature on your account.' The endpoint sets From=admin.email (wayne@byrd-co.com / caleb@byrd-co.com) but only POSTMARK_FROM=notifications@mail.byrd-co.com is a verified sender signature in Postmark. Every send attempt fails, not just off-domain ones. Fix: send From=POSTMARK_FROM and set ReplyTo=admin.email so replies still route to the broker; OR add wayne@byrd-co.com and caleb@byrd-co.com as verified Sender Signatures in the Postmark dashboard.", "priority": "CRITICAL"},
+      {"endpoint": "POST /api/admin/assistant/email/send", "issue": "Cloudflare intercepts the app's 502 response and replaces the JSON {detail: 'Postmark account is still pending approval ... byrd-co.com ...'} body with its own generic HTML 'Bad gateway' page. Verified: hitting http://localhost:8001 directly returns clean JSON with the helpful hint; hitting the public REACT_APP_BACKEND_URL returns Cloudflare HTML. Net effect: the whole point of the fix (surfacing the pending-approval hint in the UI) is defeated in production. Fix: change status_code from 502 to a 4xx (recommend 400 or 422) so Cloudflare passes the body through unchanged. Alternative: return status 200 with {ok:false, error:...} shape and let the frontend surface it.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/admin/assistant/tasks/{tid}/reply", "issue": "Endpoint only accepts reply on tasks that have handoff_note set. There's no way via API to create such a task for testing; only tasks originating from the assistant's LLM 'handoff' tool produce them. Not a bug, but a test-coverage gap — test skipped."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_assistant_email.py",
+    "/app/test_reports/pytest/assistant_email.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Change HTTPException status from 502 to 400 (or 422) in POST /admin/assistant/email/send so Cloudflare doesn't overwrite the JSON detail with its own HTML error page. Users currently see 'Bad gateway' instead of the pending-approval hint.",
+    "CRITICAL: Fix From address in assistant_send_email — use POSTMARK_FROM (notifications@mail.byrd-co.com) as From and set ReplyTo=admin.email. wayne@byrd-co.com is NOT a verified Postmark Sender Signature so ALL sends fail today, including same-domain. Alternatively, add wayne@ and caleb@byrd-co.com as verified sender signatures in Postmark.",
+    "OPTIONAL: If keeping 5xx, consider raising 424 Failed Dependency instead — but Cloudflare may still intercept; 4xx is safer."
+  ],
+  "critical_code_review_comments": [
+    "server.py:2670 assistant_send_email — the choice of 502 for an upstream (Postmark) error is semantically correct but pragmatically wrong behind Cloudflare: the whole helpful detail is lost. Move to 400.",
+    "server.py:2690 send_email(..., from_email, from_name, from_email) — third arg used as reply_to. But From is always the admin's own email, which is never a Postmark Sender Signature in this account. This is a hard blocker for the feature.",
+    "email_service.py:60 return {'ok': failed == 0 and sent > 0, ...} — good; caller now has real signal. LGTM.",
+    "server.py:2713 'pending approval' string match is case-sensitive on error_msg.lower() — fine; keep case-insensitive."
+  ],
+  "updated_files": ["/app/backend/tests/test_assistant_email.py"],
+  "success_rate": {"backend": "80% (8 of 10 test cases; 1 real-bug failure, 1 skipped)", "frontend": "N/A (backend only)"},
+  "test_credentials": "wayne@byrd-co.com / byrdco2026 (admin) — worked",
+  "seed_data_creation": "None; test data uses TEST_-prefixed unique-per-run emails to gmail.com/example.com which will only leave failed-status rows in db.assistant_emails (expected, useful for debug).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Test file at /app/backend/tests/test_assistant_email.py has 10 tests: 3 send scenarios (off-domain app-level 502, cloudflare masking, same-domain — currently failing due to sender signature bug) + 6 assistant regressions. After main agent fixes (1) status code and (2) From address, expect same-domain test to pass 200 and the Cloudflare-masking test to be inverted (should now assert JSON content-type instead of text/html). Also verify db.assistant_emails record has status=failed with error populated for off-domain (log evidence in backend.err.log confirms record insert code path runs).",
+  "rca of the issue": "USER COMPLAINT: 'email not received'. ROOT CAUSES: (a) Postmark account is still in trial/pending-approval — restricts to same-domain (external, main agent notes this cannot be fixed in code). (b) Application code sets From to the admin's personal email (wayne@byrd-co.com) which is NOT a verified Postmark Sender Signature; only notifications@mail.byrd-co.com is — so even same-domain sends are rejected with [400] before the trial-restriction ever applies. (c) The recent fix raises HTTPException(502) to surface Postmark errors, but Cloudflare masks 5xx responses with its own HTML error page, so the helpful 'pending approval — request approval in Postmark dashboard' hint never reaches the frontend UI. Reproduction: `curl -X POST $REACT_APP_BACKEND_URL/api/admin/assistant/email/send -H 'Authorization: Bearer <TOK>' -d '{\"to\":\"caleb@byrd-co.com\",\"subject\":\"x\",\"body\":\"y\"}'` returns Cloudflare HTML 502 page. Same call to http://localhost:8001 returns JSON with the real Postmark [400] error about sender signature. Mitigation: change status_code 502→400 AND set From=POSTMARK_FROM with ReplyTo=admin.email."
+}

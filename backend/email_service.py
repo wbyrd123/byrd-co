@@ -21,17 +21,22 @@ def _get_client() -> Optional[PostmarkClient]:
 
 def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag: str = "",
                from_email: Optional[str] = None, from_name: Optional[str] = None,
-               reply_to: Optional[str] = None) -> None:
+               reply_to: Optional[str] = None) -> dict:
     """Fire-and-forget email send. Never raises; logs on failure.
-    Optionally override the default From address (e.g. wayne@byrd-co.com for personal assistant emails)."""
+    Optionally override the default From address (e.g. wayne@byrd-co.com for personal assistant emails).
+    Returns a summary {'ok': bool, 'error': str|None, 'sent': int, 'failed': int} — callers that need
+    immediate feedback (like the assistant email) can use it; background callers can ignore it."""
     client = _get_client()
     if not client:
         logger.warning("POSTMARK_TOKEN not set — skipping email: %s", subject)
-        return
+        return {"ok": False, "error": "Email service not configured (POSTMARK_TOKEN missing)", "sent": 0, "failed": 0}
     resolved_name = from_name or os.environ.get("POSTMARK_FROM_NAME", "Byrd & CO")
     resolved_email = from_email or os.environ.get("POSTMARK_FROM", "notifications@mail.byrd-co.com")
     from_hdr = f"{resolved_name} <{resolved_email}>"
     recipients = [to] if isinstance(to, str) else list(to)
+    sent = 0
+    failed = 0
+    last_err: Optional[str] = None
     for r in recipients:
         try:
             kwargs = dict(
@@ -46,9 +51,13 @@ def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag:
             if reply_to:
                 kwargs["ReplyTo"] = reply_to
             client.emails.send(**kwargs)
+            sent += 1
             logger.info("Sent Postmark email tag=%s to=%s from=%s", tag, r, resolved_email)
         except Exception as e:
+            failed += 1
+            last_err = str(e)
             logger.error("Postmark send failed tag=%s to=%s err=%s", tag, r, e)
+    return {"ok": failed == 0 and sent > 0, "error": last_err, "sent": sent, "failed": failed}
 
 
 def broker_emails() -> list[str]:
