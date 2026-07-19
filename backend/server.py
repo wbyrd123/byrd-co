@@ -2669,27 +2669,36 @@ async def assistant_reply_to_handoff(tid: str, body: AssistantTaskReply, admin=D
 
 @api.post("/admin/assistant/email/send")
 async def assistant_send_email(body: AssistantEmailSend, admin=Depends(require_admin)):
-    """Send an email FROM the admin's own address via Postmark, and log it.
+    """Send an email on behalf of the admin via Postmark, and log it.
+    Uses the verified Postmark sender signature as the From address (only that address is
+    authorized to send in this account) and puts the admin's personal email in Reply-To so
+    replies still route to Wayne/Caleb naturally.
     Runs synchronously so we can surface Postmark errors (e.g. pending-approval, invalid domain)
     directly in the UI instead of silently failing in a background task."""
-    from_email = admin.get("email")
-    if not from_email:
+    admin_email = admin.get("email")
+    if not admin_email:
         raise HTTPException(status_code=400, detail="Admin has no email on file")
-    from_name = admin.get("name") or "Byrd & CO"
+    admin_name = admin.get("name") or "Byrd & CO"
     # Wrap the body in a lightweight branded template so it doesn't look like a system email
     safe_body = body.body.replace("<", "&lt;").replace(">", "&gt;")
     html = (
         "<div style=\"font-family:Georgia,serif;max-width:640px;margin:auto;color:#1A1A1A;\">"
         f"<div style=\"white-space:pre-wrap;font-family:Arial,sans-serif;font-size:14px;line-height:1.55;\">{safe_body}</div>"
         f"<hr style=\"margin:24px 0;border:none;border-top:1px solid #E4DFD1;\"/>"
-        f"<div style=\"font-family:Arial,sans-serif;font-size:12px;color:#6B6558;\">{from_name}<br/>Byrd &amp; CO Commercial Real Estate Lending<br/>"
-        f"<a href=\"mailto:{from_email}\" style=\"color:#6B6558;\">{from_email}</a></div>"
+        f"<div style=\"font-family:Arial,sans-serif;font-size:12px;color:#6B6558;\">{admin_name}<br/>Byrd &amp; CO Commercial Real Estate Lending<br/>"
+        f"<a href=\"mailto:{admin_email}\" style=\"color:#6B6558;\">{admin_email}</a></div>"
         "</div>"
     )
-    # Synchronous send so we can return the real Postmark outcome
+    # Synchronous send. From MUST be the verified POSTMARK_FROM sender signature
+    # (admin.email is not a Postmark sender signature and would be rejected).
+    # We set From-Name to include the admin's name so recipients still see who it's from,
+    # and put admin.email in Reply-To so replies land in the broker's normal inbox.
+    friendly_from_name = f"{admin_name} · Byrd & CO"
     result = send_email(
         body.to, body.subject, html, body.body, "assistant-outbound",
-        from_email, from_name, from_email,
+        None,  # use POSTMARK_FROM (the verified sender signature)
+        friendly_from_name,
+        admin_email,  # reply_to
     )
     log_id = str(uuid.uuid4())
     status = "sent" if result.get("ok") else "failed"
@@ -2697,7 +2706,8 @@ async def assistant_send_email(body: AssistantEmailSend, admin=Depends(require_a
     await db.assistant_emails.insert_one({
         "id": log_id,
         "admin_id": admin["id"],
-        "from_email": from_email,
+        "from_email": admin_email,
+        "reply_to": admin_email,
         "to": body.to,
         "subject": body.subject,
         "body": body.body,
@@ -2707,16 +2717,21 @@ async def assistant_send_email(body: AssistantEmailSend, admin=Depends(require_a
         "sent_at": now_iso(),
     })
     if not result.get("ok"):
-        # Return a helpful error the frontend can surface directly
-        # Detect the common Postmark pending-approval error and give a friendlier hint
         detail = error_msg or "Email failed to send"
-        if "pending approval" in error_msg.lower():
+        low = error_msg.lower()
+        if "pending approval" in low:
             detail = (
-                f"Postmark account is still pending approval — right now it can only send "
-                f"to addresses on your own domain (@byrd-co.com). Request approval in the "
-                f"Postmark dashboard, then this email will go out. Raw error: {error_msg}"
+                "Postmark account is still pending approval — right now it can only send "
+                "to addresses on your own domain (@byrd-co.com). Request approval in the "
+                "Postmark dashboard, then this email will go out. Raw error: " + error_msg
             )
-        raise HTTPException(status_code=502, detail=detail)
+        elif "sender signature" in low:
+            detail = (
+                "The sender address isn't verified in Postmark. Add it as a Sender Signature "
+                "in the Postmark dashboard or update POSTMARK_FROM. Raw error: " + error_msg
+            )
+        # Use 400 (not 502) so Cloudflare passes the JSON body through unchanged
+        raise HTTPException(status_code=400, detail=detail)
     return {"ok": True, "id": log_id, "status": status}
 
 

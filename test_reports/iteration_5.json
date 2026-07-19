@@ -1,0 +1,32 @@
+{
+  "summary": "Re-tested POST /api/admin/assistant/email/send after E1's two fixes. Both critical bugs from iteration_4 are RESOLVED at the code level: (1) From is now POSTMARK_FROM (verified sender signature) with admin.email in Reply-To — the previous [400] 'not a Sender Signature' Postmark error is GONE. (2) Endpoint returns HTTP 400 (not 502) so Cloudflare passes the JSON body through unchanged — verified through the public URL. However, the same-domain 200 test still fails, but for a NEW external reason: Postmark's pending-approval mode considers 'mail.byrd-co.com' (POSTMARK_FROM's domain) DIFFERENT from 'byrd-co.com' (recipient) and returns [412]. This is a Postmark approval/config issue, not a code bug. 7 of 8 tests pass. All assistant regression endpoints pass.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/admin/assistant/email/send", "issue": "Same-domain send to caleb@byrd-co.com still fails with HTTP 400 detail: '[412] While your account is pending approval, all recipient addresses must share the same domain as the From address. The domain of the From address is mail.byrd-co.com but you are attempting to send email to the following domain: byrd-co.com'. This is NOT a code bug — the fix (From=POSTMARK_FROM, Reply-To=admin.email) correctly landed. The blocker is external Postmark: POSTMARK_FROM=notifications@mail.byrd-co.com lives on subdomain mail.byrd-co.com, and Postmark's pending-approval rule treats mail.byrd-co.com != byrd-co.com. Two options for the user: (a) Get Postmark account approved out of trial in the dashboard, OR (b) Add a Sender Signature at an @byrd-co.com address (no subdomain) and change POSTMARK_FROM to it. No code change needed here — this is a Postmark account/config task."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_assistant_email.py",
+    "/app/test_reports/pytest/assistant_email.xml"
+  ],
+  "action_items": [
+    "USER ACTION (not code): resolve Postmark pending-approval OR verify an @byrd-co.com Sender Signature and update POSTMARK_FROM. Everything on the app side is now correct.",
+    "OPTIONAL: extend the 'pending approval' error-detail branch to also catch [412] response text (currently the detail says 'Raw error: [412]...') so the message is a little friendlier. Nice-to-have; the 400+JSON already reaches the frontend cleanly."
+  ],
+  "critical_code_review_comments": [
+    "server.py:2697-2702 — assistant_send_email now correctly passes None (POSTMARK_FROM) as from_email, friendly_from_name with admin name, and admin_email as reply_to. LGTM.",
+    "server.py:2733-2734 — HTTPException(400) replaces 502; verified via public URL that Cloudflare no longer masks the body. LGTM.",
+    "server.py:2728-2732 — added 'sender signature' branch is good defensive coding for future POSTMARK_FROM misconfig.",
+    "server.py:2706-2718 — db.assistant_emails insertion correctly captures reply_to=admin_email and error/status on both success and failure paths. Verified via direct Mongo read in tests."
+  ],
+  "updated_files": ["/app/backend/tests/test_assistant_email.py"],
+  "success_rate": {"backend": "87.5% (7 of 8 tests; the 1 failure is an external Postmark trial-mode config issue, not a code bug)", "frontend": "N/A (backend only)"},
+  "test_credentials": "wayne@byrd-co.com / byrdco2026 (admin) — worked",
+  "seed_data_creation": "TEST_-prefixed unique-per-run recipient addresses; each run inserts ~2 assistant_emails rows (one status=failed off-domain + one status=failed same-domain during trial). No production data touched.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Test file at /app/backend/tests/test_assistant_email.py has 8 tests (3 send + 5 regressions incl. SSE chat, tasks, messages, teammates, reset). If Postmark account gets approved in the dashboard, the same-domain test should flip to green with no code change. Task-reply regression test was removed since it can only run when a handoff-source task exists and no seed exists for it — main agent can add back if a seeding path is added.",
+  "rca of the issue": "Both critical bugs from iteration_4 are code-fixed and verified end-to-end through the public REACT_APP_BACKEND_URL. Fix #1 confirmed: swapping the [400] 'not a Sender Signature' error for the [412] 'pending approval' error proves the From address is now the verified POSTMARK_FROM. Fix #2 confirmed: the test client received a JSON body with content-type application/json and status 400, containing the full detail string with 'pending approval' and 'byrd-co.com' — Cloudflare no longer intercepts. Remaining friction: Postmark's pending-approval rule treats subdomains strictly, so sending FROM mail.byrd-co.com TO byrd-co.com counts as cross-domain. Resolution is external (Postmark dashboard) — either approve the account or add an @byrd-co.com Sender Signature. Reproduction of successful fix: curl -X POST $REACT_APP_BACKEND_URL/api/admin/assistant/email/send -H 'Authorization: Bearer <TOK>' -d '{\"to\":\"x@gmail.com\",\"subject\":\"t\",\"body\":\"t\"}' now returns HTTP 400 with clean JSON, not Cloudflare's HTML 502 page."
+}
