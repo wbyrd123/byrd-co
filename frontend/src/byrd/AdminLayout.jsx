@@ -4,10 +4,12 @@ import { useAuth } from "@/context/AuthContext";
 import { LOGO_URL } from "@/byrd/data";
 import {
   LayoutDashboard, Users, Inbox, Sparkles, LogOut, FileText, Building2, BookOpen, MessageSquareQuote,
+  Bot,
 } from "lucide-react";
 
 const NAV = [
   { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true, testId: "admin-nav-overview" },
+  { to: "/admin/assistant", label: "Personal Assistant", icon: Bot, testId: "admin-nav-assistant" },
   { to: "/admin/clients", label: "Clients", icon: Users, testId: "admin-nav-clients" },
   { to: "/admin/scenarios", label: "Scenarios", icon: FileText, testId: "admin-nav-scenarios" },
   { to: "/admin/lenders", label: "Lenders", icon: Building2, testId: "admin-nav-lenders" },

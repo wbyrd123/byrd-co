@@ -23,6 +23,7 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - **Data-model refactor: loan_type belongs to Scenario, not Client** — removed loan_type from Add Client form + client roster; each client page now shows a "Loan Scenarios" strip listing all their deals with per-scenario loan type/amount/status, plus a "New Scenario" quick-create — 2026-02
 - **New Scenario dialog** — Top-level "+ New Scenario" now opens a dialog that lets you name it and optionally link a client + pick loan type in one shot — 2026-02
 - **Testimonials CRUD admin page** — Add / edit / publish/draft / reorder / delete testimonials from `/admin/testimonials`; public homepage reads from DB, seeded with the original 4 quotes so nothing disappears — 2026-02
+- **Personal Assistant (per-admin private Claude bot)** — Wayne and Caleb each get a private chat + task tracker at `/admin/assistant`. Claude addresses them by name, knows today's date, auto-extracts tasks with due dates from conversation, greets with overdue/due-today counts, drafts outbound emails (sent from `wayne@byrd-co.com` / `caleb@byrd-co.com` with review-before-send), suggests adding new names as clients, and marks tasks done when the broker says so — 2026-02
 
 ## Backlog
 - P0: Redeploy production to activate Postmark env vars

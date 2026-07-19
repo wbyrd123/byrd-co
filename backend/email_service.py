@@ -19,19 +19,22 @@ def _get_client() -> Optional[PostmarkClient]:
     return _client
 
 
-def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag: str = "") -> None:
-    """Fire-and-forget email send. Never raises; logs on failure."""
+def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag: str = "",
+               from_email: Optional[str] = None, from_name: Optional[str] = None,
+               reply_to: Optional[str] = None) -> None:
+    """Fire-and-forget email send. Never raises; logs on failure.
+    Optionally override the default From address (e.g. wayne@byrd-co.com for personal assistant emails)."""
     client = _get_client()
     if not client:
         logger.warning("POSTMARK_TOKEN not set — skipping email: %s", subject)
         return
-    from_name = os.environ.get("POSTMARK_FROM_NAME", "Byrd & CO")
-    from_email = os.environ.get("POSTMARK_FROM", "notifications@mail.byrd-co.com")
-    from_hdr = f"{from_name} <{from_email}>"
+    resolved_name = from_name or os.environ.get("POSTMARK_FROM_NAME", "Byrd & CO")
+    resolved_email = from_email or os.environ.get("POSTMARK_FROM", "notifications@mail.byrd-co.com")
+    from_hdr = f"{resolved_name} <{resolved_email}>"
     recipients = [to] if isinstance(to, str) else list(to)
     for r in recipients:
         try:
-            client.emails.send(
+            kwargs = dict(
                 From=from_hdr,
                 To=r,
                 Subject=subject,
@@ -40,7 +43,10 @@ def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag:
                 Tag=tag or None,
                 MessageStream="outbound",
             )
-            logger.info("Sent Postmark email tag=%s to=%s", tag, r)
+            if reply_to:
+                kwargs["ReplyTo"] = reply_to
+            client.emails.send(**kwargs)
+            logger.info("Sent Postmark email tag=%s to=%s from=%s", tag, r, resolved_email)
         except Exception as e:
             logger.error("Postmark send failed tag=%s to=%s err=%s", tag, r, e)
 

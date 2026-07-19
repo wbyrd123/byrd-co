@@ -2072,6 +2072,463 @@ async def scenario_ai_reset(sid: str, admin=Depends(require_admin)):
 
 
 
+# ================ Personal Assistant (per-admin Claude bot + tasks + email drafts) ================
+class AssistantChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+
+
+class AssistantTaskCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    notes: Optional[str] = ""
+    due_date: Optional[str] = None  # ISO date string YYYY-MM-DD
+    related_client_id: Optional[str] = None
+    related_name: Optional[str] = ""
+
+
+class AssistantTaskUpdate(BaseModel):
+    title: Optional[str] = None
+    notes: Optional[str] = None
+    due_date: Optional[str] = None
+    status: Optional[Literal["open", "done", "dismissed"]] = None
+
+
+class AssistantEmailSend(BaseModel):
+    to: EmailStr
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=20000)
+    related_task_id: Optional[str] = None
+
+
+def _today_iso() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+ASSISTANT_SYSTEM_PROMPT = """You are the personal assistant to a commercial real estate broker at Byrd & CO.
+You are warm, concise, and proactive. You address the broker by first name.
+
+At the top of every turn you receive:
+- The broker's identity (name, email)
+- Today's date + local weekday
+- The broker's CURRENT open task list (with due dates and any linked client)
+- The broker's client roster (name + email, for quick recognition)
+
+# What you do
+1. Have a natural conversation. Keep responses short and friendly.
+2. Extract commitments the broker makes and turn them into structured tasks.
+3. If a due date is mentioned (e.g. "check with me on July 21st", "next Tuesday"), compute the
+   real ISO date given today's date and put it on the task.
+4. If the broker mentions a person who is NOT in the client roster, offer to add them as a client
+   (name only — never fabricate emails or phone numbers).
+5. If the broker asks you to email someone, DRAFT the email in the structured block below —
+   do not send it. The user will review and send.
+6. When the broker tells you something is done, mark the matching open task complete.
+7. Never expose task IDs in visible chat — only in the structured blocks.
+
+# Response format
+Write your natural-language reply first. Then, ONLY IF you have structured actions to take,
+append fenced blocks at the end of your message:
+
+```new_tasks
+[
+  {
+    "title": "Start purchase loan process for Rod Literral — home in Tennessee",
+    "notes": "optional detail",
+    "due_date": "2026-07-21",
+    "related_name": "Rod Literral"
+  }
+]
+```
+
+```complete_tasks
+["<task_id_from_open_tasks_list>"]
+```
+
+```email_draft
+{
+  "to": "rod@example.com",
+  "subject": "Follow-up on document request",
+  "body": "Hi Rod,\\n\\nJust checking in to see..."
+}
+```
+
+```suggest_client
+{"name": "Rod Literral", "hint": "purchase loan Tennessee"}
+```
+
+Rules:
+- Only include blocks you're actually proposing. Never emit empty ones.
+- Never emit `complete_tasks` unless you're matching a task from the "OPEN TASKS" list.
+- Never emit `email_draft` unless the broker asked you to email someone.
+- Dates in `due_date` MUST be ISO format YYYY-MM-DD.
+- Keep quotes/apostrophes safe in JSON (escape with \\").
+"""
+
+
+def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[dict]) -> str:
+    today = datetime.now(timezone.utc)
+    slim_tasks = [
+        {
+            "id": t["id"],
+            "title": t["title"],
+            "due_date": t.get("due_date"),
+            "notes": t.get("notes", ""),
+            "related_name": t.get("related_name") or "",
+        }
+        for t in open_tasks
+    ]
+    slim_clients = [
+        {"id": c["id"], "name": c.get("name"), "email": c.get("email"), "company": c.get("company")}
+        for c in clients
+    ]
+    payload = {
+        "broker": {
+            "id": admin["id"],
+            "name": admin.get("name") or admin.get("email", "").split("@")[0],
+            "email": admin.get("email"),
+        },
+        "today": today.date().isoformat(),
+        "weekday": today.strftime("%A"),
+        "utc_now": today.isoformat(),
+        "open_tasks": slim_tasks,
+        "clients": slim_clients,
+    }
+    return (
+        "Here is the current state (READ ONLY — do not echo this back):\n\n"
+        f"```json\n{json.dumps(payload, indent=2, default=str)}\n```\n\n"
+        "Now respond to the broker."
+    )
+
+
+def _split_assistant_response(full_text: str) -> dict:
+    """Parse Claude's response into visible chat_text plus structured actions."""
+    def _grab(marker: str):
+        needle = f"```{marker}"
+        start = full_text.find(needle)
+        if start < 0:
+            return None
+        body_start = full_text.find("\n", start)
+        if body_start < 0:
+            return None
+        end = full_text.find("```", body_start + 1)
+        if end < 0:
+            return None
+        return full_text[body_start + 1:end].strip()
+
+    raw_new = _grab("new_tasks")
+    raw_done = _grab("complete_tasks")
+    raw_email = _grab("email_draft")
+    raw_client = _grab("suggest_client")
+
+    new_tasks = None
+    if raw_new:
+        try:
+            parsed = json.loads(raw_new)
+            if isinstance(parsed, list):
+                new_tasks = [
+                    {
+                        "title": (x.get("title") or "").strip(),
+                        "notes": x.get("notes") or "",
+                        "due_date": x.get("due_date"),
+                        "related_name": x.get("related_name") or "",
+                    }
+                    for x in parsed if isinstance(x, dict) and x.get("title")
+                ]
+                if not new_tasks:
+                    new_tasks = None
+        except Exception:
+            pass
+
+    complete_tasks = None
+    if raw_done:
+        try:
+            parsed = json.loads(raw_done)
+            if isinstance(parsed, list):
+                complete_tasks = [str(x) for x in parsed if x]
+                if not complete_tasks:
+                    complete_tasks = None
+        except Exception:
+            pass
+
+    email_draft = None
+    if raw_email:
+        try:
+            parsed = json.loads(raw_email)
+            if isinstance(parsed, dict) and parsed.get("to") and parsed.get("subject") and parsed.get("body"):
+                email_draft = {
+                    "to": parsed["to"],
+                    "subject": parsed["subject"],
+                    "body": parsed["body"],
+                }
+        except Exception:
+            pass
+
+    suggest_client = None
+    if raw_client:
+        try:
+            parsed = json.loads(raw_client)
+            if isinstance(parsed, dict) and parsed.get("name"):
+                suggest_client = {
+                    "name": parsed["name"],
+                    "hint": parsed.get("hint", ""),
+                }
+        except Exception:
+            pass
+
+    chat_text = full_text
+    for marker in ("new_tasks", "complete_tasks", "email_draft", "suggest_client"):
+        needle = f"```{marker}"
+        idx = chat_text.find(needle)
+        if idx >= 0:
+            end = chat_text.find("```", idx + len(needle))
+            if end >= 0:
+                chat_text = chat_text[:idx] + chat_text[end + 3:]
+    return {
+        "text": chat_text.strip(),
+        "new_tasks": new_tasks,
+        "complete_tasks": complete_tasks,
+        "email_draft": email_draft,
+        "suggest_client": suggest_client,
+    }
+
+
+async def _apply_assistant_actions(admin_id: str, parsed: dict) -> dict:
+    """Persist any tasks Claude proposed / completed. Returns the applied deltas."""
+    applied_new = []
+    if parsed.get("new_tasks"):
+        for t in parsed["new_tasks"]:
+            tid = str(uuid.uuid4())
+            doc = {
+                "id": tid,
+                "admin_id": admin_id,
+                "title": t["title"],
+                "notes": t.get("notes", ""),
+                "due_date": t.get("due_date"),
+                "related_name": t.get("related_name", ""),
+                "related_client_id": None,
+                "status": "open",
+                "source": "assistant",
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "completed_at": None,
+            }
+            await db.assistant_tasks.insert_one(doc)
+            doc.pop("_id", None)
+            applied_new.append(doc)
+
+    applied_complete = []
+    if parsed.get("complete_tasks"):
+        for tid in parsed["complete_tasks"]:
+            res = await db.assistant_tasks.update_one(
+                {"id": tid, "admin_id": admin_id, "status": "open"},
+                {"$set": {"status": "done", "completed_at": now_iso(), "updated_at": now_iso()}},
+            )
+            if res.modified_count:
+                applied_complete.append(tid)
+
+    return {"created": applied_new, "completed": applied_complete}
+
+
+@api.post("/admin/assistant/chat")
+async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin)):
+    """SSE streaming chat with the personal assistant, per-admin private."""
+    open_tasks = await db.assistant_tasks.find(
+        {"admin_id": admin["id"], "status": "open"}, {"_id": 0}
+    ).sort("due_date", 1).to_list(200)
+    clients = await db.users.find(
+        {"role": "client"}, {"_id": 0, "id": 1, "name": 1, "email": 1, "company": 1}
+    ).to_list(500)
+
+    session_id = f"assistant::{admin['id']}"
+    chat = _make_scenario_ai_chat(session_id, ASSISTANT_SYSTEM_PROMPT)
+    turn_context = _assistant_turn_context(admin, open_tasks, clients)
+    user_text = f"{turn_context}\n\nBroker message:\n{body.message}"
+
+    async def event_gen():
+        buf: List[str] = []
+        # Persist user's own message (without injected context)
+        await db.assistant_messages.insert_one({
+            "id": str(uuid.uuid4()),
+            "admin_id": admin["id"],
+            "role": "user",
+            "content": body.message,
+            "created_at": now_iso(),
+        })
+        try:
+            async for ev in chat.stream_message(UserMessage(text=user_text)):
+                if isinstance(ev, TextDelta):
+                    buf.append(ev.content)
+                    yield f"data: {json.dumps({'type': 'token', 'content': ev.content})}\n\n"
+                elif isinstance(ev, StreamDone):
+                    break
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)[:400]})}\n\n"
+            return
+
+        full_text = "".join(buf)
+        parsed = _split_assistant_response(full_text)
+        applied = await _apply_assistant_actions(admin["id"], parsed)
+
+        assistant_msg_id = str(uuid.uuid4())
+        await db.assistant_messages.insert_one({
+            "id": assistant_msg_id,
+            "admin_id": admin["id"],
+            "role": "assistant",
+            "content": parsed["text"],
+            "email_draft": parsed.get("email_draft"),
+            "suggest_client": parsed.get("suggest_client"),
+            "created_tasks": applied["created"],
+            "completed_task_ids": applied["completed"],
+            "created_at": now_iso(),
+        })
+
+        done_payload = {
+            "type": "done",
+            "message_id": assistant_msg_id,
+            "text": parsed["text"],
+            "email_draft": parsed.get("email_draft"),
+            "suggest_client": parsed.get("suggest_client"),
+            "created_tasks": applied["created"],
+            "completed_task_ids": applied["completed"],
+        }
+        yield f"data: {json.dumps(done_payload)}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@api.get("/admin/assistant/messages")
+async def assistant_messages(admin=Depends(require_admin)):
+    msgs = await db.assistant_messages.find(
+        {"admin_id": admin["id"]}, {"_id": 0}
+    ).sort("created_at", 1).to_list(500)
+    return msgs
+
+
+@api.post("/admin/assistant/reset")
+async def assistant_reset(admin=Depends(require_admin)):
+    await db.assistant_messages.delete_many({"admin_id": admin["id"]})
+    return {"ok": True}
+
+
+@api.get("/admin/assistant/tasks")
+async def assistant_list_tasks(admin=Depends(require_admin)):
+    """Returns tasks bucketed for the UI."""
+    tasks = await db.assistant_tasks.find(
+        {"admin_id": admin["id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(500)
+    today = _today_iso()
+    overdue, due_today, upcoming, done, dismissed = [], [], [], [], []
+    for t in tasks:
+        if t["status"] == "done":
+            done.append(t)
+            continue
+        if t["status"] == "dismissed":
+            dismissed.append(t)
+            continue
+        due = t.get("due_date")
+        if not due:
+            upcoming.append(t)
+        elif due < today:
+            overdue.append(t)
+        elif due == today:
+            due_today.append(t)
+        else:
+            upcoming.append(t)
+    return {
+        "overdue": overdue,
+        "due_today": due_today,
+        "upcoming": upcoming,
+        "done": done[:20],
+        "dismissed": dismissed[:10],
+    }
+
+
+@api.post("/admin/assistant/tasks")
+async def assistant_create_task(body: AssistantTaskCreate, admin=Depends(require_admin)):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "admin_id": admin["id"],
+        "title": body.title,
+        "notes": body.notes or "",
+        "due_date": body.due_date,
+        "related_name": body.related_name or "",
+        "related_client_id": body.related_client_id,
+        "status": "open",
+        "source": "manual",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "completed_at": None,
+    }
+    await db.assistant_tasks.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/admin/assistant/tasks/{tid}")
+async def assistant_update_task(tid: str, body: AssistantTaskUpdate, admin=Depends(require_admin)):
+    update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = now_iso()
+    if update.get("status") == "done":
+        update["completed_at"] = now_iso()
+    res = await db.assistant_tasks.update_one(
+        {"id": tid, "admin_id": admin["id"]}, {"$set": update}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Task not found")
+    doc = await db.assistant_tasks.find_one({"id": tid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/admin/assistant/tasks/{tid}")
+async def assistant_delete_task(tid: str, admin=Depends(require_admin)):
+    res = await db.assistant_tasks.delete_one({"id": tid, "admin_id": admin["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"ok": True}
+
+
+@api.post("/admin/assistant/email/send")
+async def assistant_send_email(body: AssistantEmailSend, background: BackgroundTasks, admin=Depends(require_admin)):
+    """Send an email FROM the admin's own address via Postmark, and log it."""
+    from_email = admin.get("email")
+    if not from_email:
+        raise HTTPException(status_code=400, detail="Admin has no email on file")
+    from_name = admin.get("name") or "Byrd & CO"
+    # Wrap the body in a lightweight branded template so it doesn't look like a system email
+    safe_body = body.body.replace("<", "&lt;").replace(">", "&gt;")
+    html = (
+        "<div style=\"font-family:Georgia,serif;max-width:640px;margin:auto;color:#1A1A1A;\">"
+        f"<div style=\"white-space:pre-wrap;font-family:Arial,sans-serif;font-size:14px;line-height:1.55;\">{safe_body}</div>"
+        f"<hr style=\"margin:24px 0;border:none;border-top:1px solid #E4DFD1;\"/>"
+        f"<div style=\"font-family:Arial,sans-serif;font-size:12px;color:#6B6558;\">{from_name}<br/>Byrd &amp; CO Commercial Real Estate Lending<br/>"
+        f"<a href=\"mailto:{from_email}\" style=\"color:#6B6558;\">{from_email}</a></div>"
+        "</div>"
+    )
+    # Fire-and-forget in background so we return quickly
+    background.add_task(
+        send_email, body.to, body.subject, html, body.body, "assistant-outbound",
+        from_email, from_name, from_email,
+    )
+    # Log the outbound
+    log_id = str(uuid.uuid4())
+    await db.assistant_emails.insert_one({
+        "id": log_id,
+        "admin_id": admin["id"],
+        "from_email": from_email,
+        "to": body.to,
+        "subject": body.subject,
+        "body": body.body,
+        "related_task_id": body.related_task_id,
+        "sent_at": now_iso(),
+    })
+    return {"ok": True, "id": log_id}
+
+
 # ================ AdsCopilot (existing internal tool) ================
 class CampaignCreate(BaseModel):
     name: str
