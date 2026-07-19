@@ -2516,6 +2516,91 @@ async def assistant_reset(admin=Depends(require_admin)):
     return {"ok": True}
 
 
+class EmailTestRequest(BaseModel):
+    to: EmailStr
+
+
+@api.get("/admin/settings/email/status")
+async def email_status(admin=Depends(require_admin)):
+    """Compact Postmark health snapshot for the dashboard widget."""
+    token_present = bool(os.environ.get("POSTMARK_TOKEN"))
+    from_email = os.environ.get("POSTMARK_FROM", "")
+    from_name = os.environ.get("POSTMARK_FROM_NAME", "")
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    sent = await db.assistant_emails.count_documents({"status": "sent", "sent_at": {"$gte": since}})
+    failed = await db.assistant_emails.count_documents({"status": "failed", "sent_at": {"$gte": since}})
+    last_failure = await db.assistant_emails.find_one(
+        {"status": "failed"}, {"_id": 0}, sort=[("sent_at", -1)]
+    )
+    last_success = await db.assistant_emails.find_one(
+        {"status": "sent"}, {"_id": 0}, sort=[("sent_at", -1)]
+    )
+    return {
+        "configured": token_present,
+        "from_email": from_email,
+        "from_name": from_name,
+        "sent_30d": sent,
+        "failed_30d": failed,
+        "last_success_at": (last_success or {}).get("sent_at"),
+        "last_failure_at": (last_failure or {}).get("sent_at"),
+        "last_failure_error": (last_failure or {}).get("error"),
+        "last_failure_to": (last_failure or {}).get("to"),
+    }
+
+
+@api.post("/admin/settings/email/test")
+async def email_test(body: EmailTestRequest, admin=Depends(require_admin)):
+    """Fire a canary email via Postmark, synchronously, so we can surface the exact
+    Postmark response back to the operator."""
+    admin_email = admin.get("email") or ""
+    admin_name = admin.get("name") or "Byrd & CO"
+    now = datetime.now(timezone.utc).isoformat()
+    html = (
+        "<div style=\"font-family:Georgia,serif;max-width:640px;margin:auto;color:#1A1A1A;\">"
+        "<h2 style=\"font-family:Georgia,serif;\">Byrd &amp; CO — Email Test</h2>"
+        f"<p>This is a test email from your Byrd &amp; CO admin dashboard, sent at {now} UTC.</p>"
+        f"<p>Triggered by: <b>{admin_name}</b> ({admin_email})</p>"
+        "<p>If you received this, Postmark is properly configured and delivering to this address.</p>"
+        "<hr style=\"margin:24px 0;border:none;border-top:1px solid #E4DFD1;\"/>"
+        "<div style=\"font-family:Arial,sans-serif;font-size:12px;color:#6B6558;\">Byrd &amp; CO Commercial Real Estate Lending</div>"
+        "</div>"
+    )
+    text = f"Byrd & CO — Email Test\n\nSent at {now} UTC by {admin_name} ({admin_email}).\nIf you received this, Postmark is delivering."
+    result = send_email(
+        body.to, "Byrd & CO — Email Test", html, text, "email-test",
+        None, f"{admin_name} · Byrd & CO", admin_email or None,
+    )
+    # Log this test send too, so the status widget stays accurate
+    await db.assistant_emails.insert_one({
+        "id": str(uuid.uuid4()),
+        "admin_id": admin["id"],
+        "from_email": os.environ.get("POSTMARK_FROM", ""),
+        "reply_to": admin_email,
+        "to": body.to,
+        "subject": "Byrd & CO — Email Test",
+        "body": text,
+        "related_task_id": None,
+        "status": "sent" if result.get("ok") else "failed",
+        "error": result.get("error") or "",
+        "sent_at": now_iso(),
+        "tag": "email-test",
+    })
+    if not result.get("ok"):
+        err = result.get("error") or "Unknown error"
+        low = err.lower()
+        detail = err
+        if "pending approval" in low or "[412]" in err:
+            detail = (
+                "Postmark account is still in trial mode. Request approval in the "
+                "Postmark dashboard (Servers → your server → Request approval). Raw: " + err
+            )
+        elif "sender signature" in low:
+            detail = "Sender signature not verified in Postmark. Raw: " + err
+        raise HTTPException(status_code=400, detail=detail)
+    return {"ok": True, "sent_to": body.to, "from": os.environ.get("POSTMARK_FROM")}
+
+
+
 @api.get("/admin/assistant/teammates")
 async def assistant_teammates(admin=Depends(require_admin)):
     """Return other admin users so the client can offer @mention autocomplete."""

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
-import { Users, Inbox, FileCheck, ArrowRight, Plus, Sparkles } from "lucide-react";
+import { toast } from "sonner";
+import { Users, Inbox, FileCheck, ArrowRight, Plus, Sparkles, Mail, CheckCircle2, AlertTriangle, Send } from "lucide-react";
 
 const Stat = ({ label, value, icon: Icon, testId }) => (
   <div className="byrd-card p-6" data-testid={testId}>
@@ -43,6 +44,8 @@ export default function AdminDashboard() {
         <Stat label="Docs Received" value={`${uploaded}/${totalDocs}`} icon={FileCheck} testId="stat-docs" />
         <Stat label="New Quote Requests" value={newQuotes} icon={Inbox} testId="stat-quotes" />
       </div>
+
+      <EmailStatusCard />
 
       {/* Marketing tools */}
       <div>
@@ -138,6 +141,138 @@ export default function AdminDashboard() {
               ))}
             </ul>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmailStatusCard() {
+  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [testTo, setTestTo] = useState("waynebyrd11@gmail.com");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null); // { ok, message }
+
+  const load = () => {
+    setLoading(true);
+    api.get("/admin/settings/email/status")
+      .then((r) => setStatus(r.data))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, []);
+
+  const sendTest = async () => {
+    if (!testTo.trim()) return;
+    setBusy(true);
+    setResult(null);
+    try {
+      const r = await api.post("/admin/settings/email/test", { to: testTo.trim() });
+      setResult({ ok: true, message: `Sent to ${r.data.sent_to} (from ${r.data.from})` });
+      toast.success("Test email dispatched");
+      load();
+    } catch (e) {
+      const detail = e?.response?.data?.detail || e?.message || "Send failed";
+      setResult({ ok: false, message: detail });
+      toast.error("Test failed — see error below");
+      load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const healthy = status && status.configured && (status.sent_30d > 0 || (status.failed_30d === 0 && status.sent_30d === 0));
+  const hasRecentFailure = status && status.failed_30d > 0;
+  const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—");
+
+  return (
+    <div className="byrd-card p-6" data-testid="email-status-card">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0 flex-1">
+          <div className="font-mono text-[10px] uppercase text-[#6B6558] tracking-widest">// Postmark Email</div>
+          <div className="flex items-center gap-2 mt-1">
+            <h3 className="font-serif text-xl font-bold">Email Delivery</h3>
+            {loading ? (
+              <span className="byrd-chip text-[#6B6558]">Checking…</span>
+            ) : !status?.configured ? (
+              <span className="byrd-chip byrd-chip-red"><AlertTriangle size={10} /> Not Configured</span>
+            ) : hasRecentFailure ? (
+              <span className="byrd-chip byrd-chip-gold"><AlertTriangle size={10} /> Recent Failures</span>
+            ) : (
+              <span className="byrd-chip byrd-chip-green"><CheckCircle2 size={10} /> Healthy</span>
+            )}
+          </div>
+          {status && (
+            <div className="text-xs text-[#6B6558] mt-1">
+              From: <span className="font-mono">{status.from_name} &lt;{status.from_email}&gt;</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {status && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
+          <div className="border border-[#E4DFD1] rounded-md p-3">
+            <div className="font-mono text-[10px] uppercase text-[#6B6558] tracking-widest">Sent · 30d</div>
+            <div className="font-serif text-2xl font-bold mt-1 text-[#245C25]">{status.sent_30d}</div>
+            <div className="text-[11px] text-[#6B6558] mt-0.5">Last: {fmtTime(status.last_success_at)}</div>
+          </div>
+          <div className="border border-[#E4DFD1] rounded-md p-3">
+            <div className="font-mono text-[10px] uppercase text-[#6B6558] tracking-widest">Failed · 30d</div>
+            <div className={`font-serif text-2xl font-bold mt-1 ${status.failed_30d ? "text-[#8A1F1A]" : "text-[#6B6558]"}`}>{status.failed_30d}</div>
+            <div className="text-[11px] text-[#6B6558] mt-0.5">Last: {fmtTime(status.last_failure_at)}</div>
+          </div>
+          <div className="border border-[#E4DFD1] rounded-md p-3">
+            <div className="font-mono text-[10px] uppercase text-[#6B6558] tracking-widest">Last Error</div>
+            <div className="text-xs text-[#8A1F1A] mt-1 leading-snug line-clamp-3">
+              {status.last_failure_error ? status.last_failure_error.slice(0, 180) : "—"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-5 border-t border-[#E4DFD1] pt-4">
+        <div className="font-mono text-[10px] uppercase text-[#6B6558] tracking-widest mb-2">// Send Test</div>
+        <div className="flex items-end gap-2 flex-wrap">
+          <div className="flex-1 min-w-[240px]">
+            <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Recipient</label>
+            <input
+              type="email"
+              value={testTo}
+              onChange={(e) => setTestTo(e.target.value)}
+              className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]"
+              data-testid="email-test-to"
+              placeholder="waynebyrd11@gmail.com"
+            />
+          </div>
+          <button
+            onClick={sendTest}
+            disabled={busy || !testTo.trim()}
+            className="byrd-btn byrd-btn-dark h-11 px-4"
+            data-testid="email-test-send"
+          >
+            <Send size={14} /> {busy ? "Sending…" : "Send Test"}
+          </button>
+        </div>
+        {result && (
+          <div
+            className={`mt-3 text-xs rounded-md px-3 py-2 leading-snug ${
+              result.ok
+                ? "bg-[#E4F4E4] border border-[#8DBE8F] text-[#245C25]"
+                : "bg-[#FADCDA] border border-[#E38380] text-[#8A1F1A]"
+            }`}
+            data-testid="email-test-result"
+          >
+            <div className="font-semibold inline-flex items-center gap-1">
+              {result.ok ? <><CheckCircle2 size={12} /> Test dispatched</> : <><AlertTriangle size={12} /> Postmark rejected the test</>}
+            </div>
+            <div className="mt-0.5 whitespace-pre-wrap">{result.message}</div>
+          </div>
+        )}
+        <div className="text-[10px] text-[#6B6558] mt-2 leading-snug">
+          Fires a canary email through your Postmark server. If Postmark rejects, you&apos;ll see the raw
+          error here — the most common cause is the account still being in trial mode
+          (fix: Postmark dashboard → Servers → your server → <b>Request approval</b>).
         </div>
       </div>
     </div>
