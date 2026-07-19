@@ -26,10 +26,14 @@ export default function AdminAssistant() {
   const { user } = useAuth();
   const [messages, setMessages] = useState([]);
   const [buckets, setBuckets] = useState({ overdue: [], due_today: [], upcoming: [], done: [], dismissed: [] });
+  const [teammates, setTeammates] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [streaming, setStreaming] = useState("");
+  const [mentionQuery, setMentionQuery] = useState(null); // null | { text: string, caret: number }
+  const [mentionIdx, setMentionIdx] = useState(0);
   const scrollerRef = useRef(null);
+  const inputRef = useRef(null);
   const controllerRef = useRef(null);
   const today = new Date().toISOString().slice(0, 10);
 
@@ -87,6 +91,7 @@ export default function AdminAssistant() {
 
   useEffect(() => {
     if (user) loadAll();
+    api.get("/admin/assistant/teammates").then((r) => setTeammates(r.data)).catch(() => {});
     return () => controllerRef.current?.abort();
   }, [user]);
 
@@ -226,6 +231,55 @@ export default function AdminAssistant() {
 
   const openList = [...buckets.overdue, ...buckets.due_today, ...buckets.upcoming];
 
+  // Mention autocomplete: derive matches based on current @query
+  const filteredMentions = mentionQuery === null
+    ? []
+    : teammates.filter((tm) => tm.first_name.toLowerCase().startsWith(mentionQuery.text.toLowerCase())).slice(0, 6);
+
+  const handleInputChange = (value, caret) => {
+    setInput(value);
+    // Look backwards from caret to find an @ that starts a mention token
+    const upToCaret = value.slice(0, caret);
+    const match = upToCaret.match(/(?:^|\s)@([A-Za-z]*)$/);
+    if (match) {
+      setMentionQuery({ text: match[1], caret });
+      setMentionIdx(0);
+    } else {
+      setMentionQuery(null);
+    }
+  };
+
+  const insertMention = (tm) => {
+    const caret = mentionQuery?.caret ?? input.length;
+    const before = input.slice(0, caret);
+    const after = input.slice(caret);
+    // Replace the partial "@abc" that immediately precedes the caret
+    const replaced = before.replace(/@[A-Za-z]*$/, `@${tm.first_name} `);
+    const nextValue = replaced + after;
+    setInput(nextValue);
+    setMentionQuery(null);
+    setMentionIdx(0);
+    // Restore focus + caret
+    setTimeout(() => {
+      const el = inputRef.current;
+      if (el) {
+        const pos = replaced.length;
+        el.focus();
+        el.setSelectionRange(pos, pos);
+      }
+    }, 0);
+  };
+
+  const handleInputKeyDown = (e) => {
+    if (mentionQuery !== null && filteredMentions.length > 0) {
+      if (e.key === "ArrowDown") { e.preventDefault(); setMentionIdx((i) => Math.min(i + 1, filteredMentions.length - 1)); return; }
+      if (e.key === "ArrowUp")   { e.preventDefault(); setMentionIdx((i) => Math.max(i - 1, 0)); return; }
+      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); insertMention(filteredMentions[mentionIdx]); return; }
+      if (e.key === "Escape")    { e.preventDefault(); setMentionQuery(null); return; }
+    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  };
+
   return (
     <div className="space-y-6" data-testid="admin-assistant">
       <div className="flex items-end justify-between flex-wrap gap-4">
@@ -288,15 +342,46 @@ export default function AdminAssistant() {
             )}
           </div>
 
-          <div className="border-t border-[#E4DFD1] px-4 py-3 bg-white">
+          <div className="border-t border-[#E4DFD1] px-4 py-3 bg-white relative">
+            {/* Mention autocomplete popover */}
+            {mentionQuery !== null && filteredMentions.length > 0 && (
+              <div
+                className="absolute bottom-full left-4 mb-2 bg-white border border-[#E4DFD1] rounded-md shadow-lg min-w-[220px] py-1 z-10"
+                data-testid="mention-popover"
+              >
+                <div className="px-2 pt-1 pb-0.5 font-mono text-[9px] uppercase tracking-widest text-[#6B6558]">
+                  Hand off to…
+                </div>
+                {filteredMentions.map((tm, i) => (
+                  <button
+                    key={tm.id}
+                    onMouseDown={(e) => { e.preventDefault(); insertMention(tm); }}
+                    onMouseEnter={() => setMentionIdx(i)}
+                    className={`w-full text-left px-2 py-1.5 flex items-center gap-2 text-sm ${
+                      i === mentionIdx ? "bg-[#F3EEE0]" : "hover:bg-[#FBF8F1]"
+                    }`}
+                    data-testid={`mention-option-${tm.first_name.toLowerCase()}`}
+                  >
+                    <div className="w-6 h-6 rounded-full bg-[#F3EEE0] text-[#C89434] grid place-items-center border border-[#E4DFD1] font-serif font-bold text-[11px]">
+                      {tm.first_name[0]}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-semibold leading-tight">{tm.first_name}</div>
+                      <div className="text-[10px] text-[#6B6558] leading-tight">{tm.email}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div className="flex items-end gap-2">
               <textarea
+                ref={inputRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-                }}
-                placeholder="Tell me what's going on, or ask me to email a client…"
+                onChange={(e) => handleInputChange(e.target.value, e.target.selectionStart)}
+                onKeyDown={handleInputKeyDown}
+                onBlur={() => setTimeout(() => setMentionQuery(null), 150)}
+                placeholder="Tell me what's going on, ask me to email a client, or type @name to hand off…"
                 rows={2}
                 disabled={busy}
                 data-testid="assistant-input"
@@ -312,7 +397,7 @@ export default function AdminAssistant() {
               </button>
             </div>
             <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] mt-2">
-              Claude Sonnet 4.5 · Enter to send · your chat is private to your account
+              Claude Sonnet 4.5 · Enter to send · <span className="normal-case tracking-normal">type <code className="font-mono bg-[#F3EEE0] px-1 rounded">@name</code> to hand off</span>
             </div>
           </div>
         </div>

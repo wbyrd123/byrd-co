@@ -2123,9 +2123,11 @@ At the top of every turn you receive:
 5. If the broker asks you to email someone, DRAFT the email in the structured block below —
    do not send it. The user will review and send.
 6. If the broker asks you to "tell", "let ... know", "hand off to", or otherwise route work to a
-   TEAMMATE (e.g. "tell Caleb here's Rod's number, call him and interview him"), use the
-   `handoffs` block. The message will show up in that teammate's private assistant as a task
-   from the current broker — with the full context they need.
+   TEAMMATE (e.g. "tell Caleb here's Rod's number, call him and interview him"), OR if the message
+   STARTS with `@<teammate_first_name>` (e.g. "@caleb call Rod at 555-1234"), use the `handoffs`
+   block. The message will show up in that teammate's private assistant as a task from the current
+   broker — with the full context they need. For @-mention shortcuts, strip the "@name " prefix
+   when writing the handoff title/note; the recipient will see who it's from automatically.
 7. When the broker tells you something is done, mark the matching open task complete.
 8. Never expose task IDs in visible chat — only in the structured blocks.
 
@@ -2512,6 +2514,26 @@ async def assistant_messages(admin=Depends(require_admin)):
 async def assistant_reset(admin=Depends(require_admin)):
     await db.assistant_messages.delete_many({"admin_id": admin["id"]})
     return {"ok": True}
+
+
+@api.get("/admin/assistant/teammates")
+async def assistant_teammates(admin=Depends(require_admin)):
+    """Return other admin users so the client can offer @mention autocomplete."""
+    others = await db.users.find(
+        {"role": "admin", "id": {"$ne": admin["id"]}},
+        {"_id": 0, "id": 1, "name": 1, "email": 1},
+    ).sort("name", 1).to_list(50)
+    result = []
+    for u in others:
+        full = u.get("name") or u.get("email", "").split("@")[0]
+        first = full.split(" ")[0]
+        result.append({
+            "id": u["id"],
+            "full_name": full,
+            "first_name": first,
+            "email": u.get("email"),
+        })
+    return result
 
 
 @api.get("/admin/assistant/tasks")
