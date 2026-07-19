@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import {
   Sparkles, Send, RotateCcw, Check, Mail, User, Calendar, X, AlertCircle,
-  ChevronRight, Trash2, Edit3, Plus,
+  ChevronRight, Edit3, Plus, ArrowRight, Users as UsersIcon,
 } from "lucide-react";
 
 const firstName = (u) => (u?.name || u?.email || "there").split(" ")[0].split("@")[0];
@@ -29,52 +29,66 @@ export default function AdminAssistant() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [streaming, setStreaming] = useState("");
-  const [greeted, setGreeted] = useState(false);
   const scrollerRef = useRef(null);
   const controllerRef = useRef(null);
   const today = new Date().toISOString().slice(0, 10);
+
+  const buildGreeting = (name, msgs, tasks) => {
+    const overdueN = tasks.overdue.length;
+    const todayN = tasks.due_today.length;
+    const openList = [...tasks.overdue, ...tasks.due_today, ...tasks.upcoming];
+    const handoffs = openList.filter((t) => t.assigned_by_name);
+    const handoffByPerson = {};
+    handoffs.forEach((t) => {
+      const from = (t.assigned_by_name || "").split(" ")[0];
+      handoffByPerson[from] = (handoffByPerson[from] || 0) + 1;
+    });
+    const handoffSummary = Object.entries(handoffByPerson)
+      .map(([n, c]) => `${c} from ${n}`).join(", ");
+    if (overdueN > 0 || todayN > 0) {
+      return `Hi ${name} — you have ${overdueN ? `${overdueN} overdue` : ""}${overdueN && todayN ? " and " : ""}${todayN ? `${todayN} due today` : ""}${handoffSummary ? ` (including ${handoffSummary})` : ""}. Did you handle any of these?`;
+    }
+    if (handoffs.length > 0) {
+      return `Hi ${name} — ${handoffSummary} on your list. Want to talk through any of them?`;
+    }
+    if (msgs.length === 0) {
+      return `Hi ${name}, how are you today? Anything you'd like to hand off to me — a client to follow up with, a note for a teammate, something you need reminded of?`;
+    }
+    return null;
+  };
 
   const loadAll = async () => {
     const [msgs, tasks] = await Promise.all([
       api.get("/admin/assistant/messages").then((r) => r.data),
       api.get("/admin/assistant/tasks").then((r) => r.data),
     ]);
-    setMessages(msgs);
+    // Compute greeting once, use functional setState so strict-mode double-fires
+    // don't wipe the greeting.
+    setMessages((prev) => {
+      const hasGreeting = prev.some((m) => m._greeting);
+      if (hasGreeting) return msgs.length ? [prev.find((m) => m._greeting), ...msgs] : prev;
+      if (!user) return msgs;
+      const greeting = buildGreeting(firstName(user), msgs, tasks);
+      if (!greeting) return msgs;
+      return [
+        {
+          id: "greeting-" + Date.now(),
+          role: "assistant",
+          content: greeting,
+          _greeting: true,
+          created_at: new Date().toISOString(),
+        },
+        ...msgs,
+      ];
+    });
     setBuckets(tasks);
     return { msgs, tasks };
   };
 
   useEffect(() => {
-    loadAll();
+    if (user) loadAll();
     return () => controllerRef.current?.abort();
-  }, []);
-  useEffect(() => {
-    if (greeted || !user) return;
-    if (messages.length === 0 || (buckets.overdue.length + buckets.due_today.length) > 0) {
-      const name = firstName(user);
-      const overdueN = buckets.overdue.length;
-      const todayN = buckets.due_today.length;
-      let greeting;
-      if (overdueN > 0 || todayN > 0) {
-        greeting = `Hi ${name} — you have ${overdueN ? `${overdueN} overdue` : ""}${overdueN && todayN ? " and " : ""}${todayN ? `${todayN} due today` : ""}. Did you handle any of these?`;
-      } else if (messages.length === 0) {
-        greeting = `Hi ${name}, how are you today? Anything you'd like to hand off to me — a client to follow up with, a note for Caleb, something you need reminded of?`;
-      }
-      if (greeting) {
-        setMessages((m) => [
-          {
-            id: "greeting-" + Date.now(),
-            role: "assistant",
-            content: greeting,
-            _greeting: true,
-            created_at: new Date().toISOString(),
-          },
-          ...m,
-        ]);
-      }
-      setGreeted(true);
-    }
-  }, [user, buckets, messages.length]);
+  }, [user]);
 
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: "smooth" });
@@ -137,6 +151,7 @@ export default function AdminAssistant() {
                 suggest_client: evt.suggest_client,
                 created_tasks: evt.created_tasks,
                 completed_task_ids: evt.completed_task_ids,
+                handoffs_sent: evt.handoffs_sent,
                 created_at: new Date().toISOString(),
               },
             ]);
@@ -160,7 +175,6 @@ export default function AdminAssistant() {
     if (!window.confirm("Clear this conversation? Your tasks are safe.")) return;
     await api.post("/admin/assistant/reset");
     setMessages([]);
-    setGreeted(false);
     toast.success("Conversation cleared");
   };
 
@@ -335,6 +349,28 @@ function Bubble({ m, onSendEmail, onCreateClient }) {
               <div key={t.id} className="text-[#2A2A2A]">
                 • {t.title}
                 {t.due_date && <span className="text-[#6B6558]"> — due {fmtDue(t.due_date)}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!isUser && m.handoffs_sent && m.handoffs_sent.length > 0 && (
+          <div className="border border-[#1A1A1A] bg-[#F3EEE0] rounded-md p-3 text-xs" data-testid="handoff-sent-card">
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[#1A1A1A] mb-1.5 inline-flex items-center gap-1">
+              <ArrowRight size={10} /> Handed off ({m.handoffs_sent.length})
+            </div>
+            {m.handoffs_sent.map((h) => (
+              <div key={h.task_id} className="mt-1 pt-1 first:mt-0 first:pt-0 border-t border-[#E4DFD1] first:border-t-0">
+                <div className="inline-flex items-center gap-1 font-semibold text-[#2A2A2A]">
+                  <UsersIcon size={11} /> To {h.to_name}
+                  {h.due_date && <span className="text-[#6B6558] font-normal">· due {fmtDue(h.due_date)}</span>}
+                </div>
+                <div className="text-[#2A2A2A] mt-0.5">{h.title}</div>
+                {h.note && (
+                  <div className="mt-1 text-[11px] text-[#6B6558] italic bg-white/60 border border-[#E4DFD1] rounded-sm px-2 py-1">
+                    &ldquo;{h.note}&rdquo;
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -555,6 +591,18 @@ function TaskSection({ title, tone, icon: Icon, items, today, onComplete, onDism
       <div className="space-y-2">
         {items.map((t) => (
           <div key={t.id} className="border border-[#E4DFD1] rounded-md p-2.5 text-xs bg-white" data-testid={`task-${t.id}`}>
+            {t.assigned_by_name && (
+              <div className="mb-1.5 -mt-0.5 -mx-0.5 rounded-sm bg-[#F3EEE0] px-2 py-1 border border-[#E4DFD1]">
+                <div className="font-mono text-[9px] uppercase tracking-widest text-[#1A1A1A] inline-flex items-center gap-1">
+                  <ArrowRight size={9} /> From {t.assigned_by_name.split(" ")[0]}
+                </div>
+                {t.handoff_note && (
+                  <div className="text-[11px] text-[#2A2A2A] italic mt-0.5 leading-snug">
+                    &ldquo;{t.handoff_note}&rdquo;
+                  </div>
+                )}
+              </div>
+            )}
             <div className="font-semibold text-[#2A2A2A] leading-snug">{t.title}</div>
             {(t.related_name || t.due_date) && (
               <div className="mt-1 flex items-center gap-2 flex-wrap">

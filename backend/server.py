@@ -2111,6 +2111,7 @@ At the top of every turn you receive:
 - Today's date + local weekday
 - The broker's CURRENT open task list (with due dates and any linked client)
 - The broker's client roster (name + email, for quick recognition)
+- The broker's teammates (other admins on the account) — you can hand tasks off to them by name
 
 # What you do
 1. Have a natural conversation. Keep responses short and friendly.
@@ -2121,8 +2122,12 @@ At the top of every turn you receive:
    (name only — never fabricate emails or phone numbers).
 5. If the broker asks you to email someone, DRAFT the email in the structured block below —
    do not send it. The user will review and send.
-6. When the broker tells you something is done, mark the matching open task complete.
-7. Never expose task IDs in visible chat — only in the structured blocks.
+6. If the broker asks you to "tell", "let ... know", "hand off to", or otherwise route work to a
+   TEAMMATE (e.g. "tell Caleb here's Rod's number, call him and interview him"), use the
+   `handoffs` block. The message will show up in that teammate's private assistant as a task
+   from the current broker — with the full context they need.
+7. When the broker tells you something is done, mark the matching open task complete.
+8. Never expose task IDs in visible chat — only in the structured blocks.
 
 # Response format
 Write your natural-language reply first. Then, ONLY IF you have structured actions to take,
@@ -2155,16 +2160,31 @@ append fenced blocks at the end of your message:
 {"name": "Rod Literral", "hint": "purchase loan Tennessee"}
 ```
 
+```handoffs
+[
+  {
+    "to_name": "Caleb",
+    "title": "Call Rod Literral and interview him for the Ohio mixed-use loan",
+    "note": "Wayne wanted me to give you Rod's number: 555-123-4567. He requested that you call him and interview him for the mixed-use property loan in Ohio.",
+    "related_name": "Rod Literral",
+    "due_date": "2026-07-22"
+  }
+]
+```
+
 Rules:
 - Only include blocks you're actually proposing. Never emit empty ones.
 - Never emit `complete_tasks` unless you're matching a task from the "OPEN TASKS" list.
 - Never emit `email_draft` unless the broker asked you to email someone.
+- `handoffs.to_name` MUST match a first name from the teammates list exactly.
+- `handoffs.note` should be a complete, self-contained message the teammate can read cold —
+   include phone numbers, addresses, deal specifics the broker mentioned.
 - Dates in `due_date` MUST be ISO format YYYY-MM-DD.
 - Keep quotes/apostrophes safe in JSON (escape with \\").
 """
 
 
-def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[dict]) -> str:
+def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[dict], teammates: List[dict]) -> str:
     today = datetime.now(timezone.utc)
     slim_tasks = [
         {
@@ -2173,12 +2193,17 @@ def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[d
             "due_date": t.get("due_date"),
             "notes": t.get("notes", ""),
             "related_name": t.get("related_name") or "",
+            "from_teammate": t.get("assigned_by_name") or "",
         }
         for t in open_tasks
     ]
     slim_clients = [
         {"id": c["id"], "name": c.get("name"), "email": c.get("email"), "company": c.get("company")}
         for c in clients
+    ]
+    slim_teammates = [
+        {"first_name": (t.get("name") or t.get("email", "").split("@")[0]).split(" ")[0], "full_name": t.get("name"), "email": t.get("email")}
+        for t in teammates
     ]
     payload = {
         "broker": {
@@ -2191,6 +2216,7 @@ def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[d
         "utc_now": today.isoformat(),
         "open_tasks": slim_tasks,
         "clients": slim_clients,
+        "teammates": slim_teammates,
     }
     return (
         "Here is the current state (READ ONLY — do not echo this back):\n\n"
@@ -2218,6 +2244,7 @@ def _split_assistant_response(full_text: str) -> dict:
     raw_done = _grab("complete_tasks")
     raw_email = _grab("email_draft")
     raw_client = _grab("suggest_client")
+    raw_handoffs = _grab("handoffs")
 
     new_tasks = None
     if raw_new:
@@ -2274,8 +2301,28 @@ def _split_assistant_response(full_text: str) -> dict:
         except Exception:
             pass
 
+    handoffs = None
+    if raw_handoffs:
+        try:
+            parsed = json.loads(raw_handoffs)
+            if isinstance(parsed, list):
+                handoffs = [
+                    {
+                        "to_name": (x.get("to_name") or "").strip(),
+                        "title": (x.get("title") or "").strip(),
+                        "note": (x.get("note") or "").strip(),
+                        "related_name": x.get("related_name") or "",
+                        "due_date": x.get("due_date"),
+                    }
+                    for x in parsed if isinstance(x, dict) and x.get("to_name") and x.get("title")
+                ]
+                if not handoffs:
+                    handoffs = None
+        except Exception:
+            pass
+
     chat_text = full_text
-    for marker in ("new_tasks", "complete_tasks", "email_draft", "suggest_client"):
+    for marker in ("new_tasks", "complete_tasks", "email_draft", "suggest_client", "handoffs"):
         needle = f"```{marker}"
         idx = chat_text.find(needle)
         if idx >= 0:
@@ -2288,11 +2335,13 @@ def _split_assistant_response(full_text: str) -> dict:
         "complete_tasks": complete_tasks,
         "email_draft": email_draft,
         "suggest_client": suggest_client,
+        "handoffs": handoffs,
     }
 
 
-async def _apply_assistant_actions(admin_id: str, parsed: dict) -> dict:
-    """Persist any tasks Claude proposed / completed. Returns the applied deltas."""
+async def _apply_assistant_actions(admin: dict, parsed: dict) -> dict:
+    """Persist any tasks Claude proposed / completed / handed off. Returns the applied deltas."""
+    admin_id = admin["id"]
     applied_new = []
     if parsed.get("new_tasks"):
         for t in parsed["new_tasks"]:
@@ -2307,6 +2356,9 @@ async def _apply_assistant_actions(admin_id: str, parsed: dict) -> dict:
                 "related_client_id": None,
                 "status": "open",
                 "source": "assistant",
+                "assigned_by_admin_id": None,
+                "assigned_by_name": "",
+                "handoff_note": "",
                 "created_at": now_iso(),
                 "updated_at": now_iso(),
                 "completed_at": None,
@@ -2325,7 +2377,50 @@ async def _apply_assistant_actions(admin_id: str, parsed: dict) -> dict:
             if res.modified_count:
                 applied_complete.append(tid)
 
-    return {"created": applied_new, "completed": applied_complete}
+    applied_handoffs = []
+    if parsed.get("handoffs"):
+        # Match teammate by first-name (case-insensitive) among other admins
+        others = await db.users.find(
+            {"role": "admin", "id": {"$ne": admin_id}},
+            {"_id": 0, "id": 1, "name": 1, "email": 1},
+        ).to_list(50)
+        by_first = {(u.get("name") or "").split(" ")[0].lower(): u for u in others if u.get("name")}
+        from_name = admin.get("name") or admin.get("email", "").split("@")[0]
+        for h in parsed["handoffs"]:
+            teammate = by_first.get((h.get("to_name") or "").strip().lower())
+            if not teammate:
+                # Skip silently — Claude was told to only use valid names
+                continue
+            tid = str(uuid.uuid4())
+            doc = {
+                "id": tid,
+                "admin_id": teammate["id"],  # target owns the task
+                "title": h["title"],
+                "notes": "",
+                "due_date": h.get("due_date"),
+                "related_name": h.get("related_name", ""),
+                "related_client_id": None,
+                "status": "open",
+                "source": "handoff",
+                "assigned_by_admin_id": admin_id,
+                "assigned_by_name": from_name,
+                "handoff_note": h.get("note", ""),
+                "created_at": now_iso(),
+                "updated_at": now_iso(),
+                "completed_at": None,
+            }
+            await db.assistant_tasks.insert_one(doc)
+            doc.pop("_id", None)
+            applied_handoffs.append({
+                "task_id": tid,
+                "to_admin_id": teammate["id"],
+                "to_name": teammate.get("name") or h["to_name"],
+                "title": h["title"],
+                "note": h.get("note", ""),
+                "due_date": h.get("due_date"),
+            })
+
+    return {"created": applied_new, "completed": applied_complete, "handoffs": applied_handoffs}
 
 
 @api.post("/admin/assistant/chat")
@@ -2337,10 +2432,14 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
     clients = await db.users.find(
         {"role": "client"}, {"_id": 0, "id": 1, "name": 1, "email": 1, "company": 1}
     ).to_list(500)
+    teammates = await db.users.find(
+        {"role": "admin", "id": {"$ne": admin["id"]}},
+        {"_id": 0, "id": 1, "name": 1, "email": 1},
+    ).to_list(50)
 
     session_id = f"assistant::{admin['id']}"
     chat = _make_scenario_ai_chat(session_id, ASSISTANT_SYSTEM_PROMPT)
-    turn_context = _assistant_turn_context(admin, open_tasks, clients)
+    turn_context = _assistant_turn_context(admin, open_tasks, clients, teammates)
     user_text = f"{turn_context}\n\nBroker message:\n{body.message}"
 
     async def event_gen():
@@ -2366,7 +2465,7 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
 
         full_text = "".join(buf)
         parsed = _split_assistant_response(full_text)
-        applied = await _apply_assistant_actions(admin["id"], parsed)
+        applied = await _apply_assistant_actions(admin, parsed)
 
         assistant_msg_id = str(uuid.uuid4())
         await db.assistant_messages.insert_one({
@@ -2378,6 +2477,7 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
             "suggest_client": parsed.get("suggest_client"),
             "created_tasks": applied["created"],
             "completed_task_ids": applied["completed"],
+            "handoffs_sent": applied["handoffs"],
             "created_at": now_iso(),
         })
 
@@ -2389,6 +2489,7 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
             "suggest_client": parsed.get("suggest_client"),
             "created_tasks": applied["created"],
             "completed_task_ids": applied["completed"],
+            "handoffs_sent": applied["handoffs"],
         }
         yield f"data: {json.dumps(done_payload)}\n\n"
 
