@@ -3,25 +3,33 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import {
-  fmtMoney, fmtPct, scenarioStatusChip,
+  fmtMoney, fmtPct, scenarioStatusChip, LOAN_TYPES,
 } from "@/byrd/dealData";
-import { FileText, Plus, ExternalLink } from "lucide-react";
+import { FileText, Plus, X } from "lucide-react";
 
 export default function AdminScenarios() {
   const [rows, setRows] = useState([]);
+  const [clients, setClients] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [dialog, setDialog] = useState(false);
   const nav = useNavigate();
 
   const load = () => api.get("/admin/scenarios").then((r) => setRows(r.data)).finally(() => setLoading(false));
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    api.get("/admin/clients").then((r) => setClients(r.data));
+  }, []);
 
-  const create = async () => {
+  const openDialog = () => setDialog(true);
+  const closeDialog = () => setDialog(false);
+
+  const create = async (payload) => {
     try {
-      const res = await api.post("/admin/scenarios", { name: "Untitled Scenario" });
+      const res = await api.post("/admin/scenarios", payload);
       toast.success("Scenario created");
       nav(`/admin/scenarios/${res.data.id}`);
     } catch (e) {
-      toast.error("Failed");
+      toast.error(e?.response?.data?.detail || "Failed");
     }
   };
 
@@ -32,7 +40,7 @@ export default function AdminScenarios() {
           <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Deal Engine</div>
           <h1 className="font-serif text-4xl md:text-5xl font-bold mt-2">Loan Scenarios.</h1>
         </div>
-        <button onClick={create} className="byrd-btn byrd-btn-dark" data-testid="new-scenario-btn">
+        <button onClick={openDialog} className="byrd-btn byrd-btn-dark" data-testid="new-scenario-btn">
           <Plus size={14} /> New Scenario
         </button>
       </div>
@@ -49,7 +57,7 @@ export default function AdminScenarios() {
             Build a loan scenario to shop to lenders. Attach documents, generate a branded PDF, and share a
             watermarked link.
           </p>
-          <button onClick={create} className="byrd-btn byrd-btn-primary mt-5">
+          <button onClick={openDialog} className="byrd-btn byrd-btn-primary mt-5">
             Create First Scenario <Plus size={14} />
           </button>
         </div>
@@ -91,6 +99,141 @@ export default function AdminScenarios() {
           })}
         </div>
       )}
+
+      {dialog && (
+        <NewScenarioDialog
+          clients={clients}
+          onClose={closeDialog}
+          onCreate={create}
+        />
+      )}
+    </div>
+  );
+}
+
+function NewScenarioDialog({ clients, onClose, onCreate }) {
+  const [form, setForm] = useState({
+    name: "",
+    client_id: "",
+    loan_type: "",
+  });
+  const [busy, setBusy] = useState(false);
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    const payload = {
+      name: (form.name || "").trim() || "Untitled Scenario",
+    };
+    if (form.client_id) payload.client_id = form.client_id;
+    if (form.loan_type) payload.loan_request = { loan_type: form.loan_type };
+    await onCreate(payload);
+    setBusy(false);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40"
+      onClick={onClose}
+      role="dialog"
+      data-testid="new-scenario-dialog"
+    >
+      <div
+        className="bg-white rounded-lg border border-[#E4DFD1] shadow-2xl w-full max-w-md"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-6 py-4 border-b border-[#E4DFD1] flex items-start justify-between gap-2">
+          <div>
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// New Scenario</div>
+            <h2 className="font-serif text-2xl font-bold mt-1">Start a Deal</h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-9 h-9 grid place-items-center rounded-md border border-[#E4DFD1]"
+            data-testid="new-scenario-close"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <form onSubmit={submit} className="px-6 py-5 space-y-4">
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">
+              Scenario Name
+            </label>
+            <input
+              value={form.name}
+              onChange={(e) => set("name", e.target.value)}
+              placeholder="e.g. 12-Unit MF Refi — Sugar Land"
+              data-testid="new-scen-name"
+              className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]"
+            />
+            <div className="text-[11px] text-[#6B6558] mt-1">
+              You can rename it later. Leave blank to name it &quot;Untitled Scenario&quot;.
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">
+              Link to Client <span className="normal-case text-[#6B6558]">(optional)</span>
+            </label>
+            <select
+              value={form.client_id}
+              onChange={(e) => set("client_id", e.target.value)}
+              data-testid="new-scen-client"
+              className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]"
+            >
+              <option value="">Standalone (no client)</option>
+              {clients.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} — {c.email}
+                </option>
+              ))}
+            </select>
+            <div className="text-[11px] text-[#6B6558] mt-1">
+              Linking a client makes their uploaded documents available to attach in the Documents tab.
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">
+              Loan Type <span className="normal-case text-[#6B6558]">(optional)</span>
+            </label>
+            <select
+              value={form.loan_type}
+              onChange={(e) => set("loan_type", e.target.value)}
+              data-testid="new-scen-loan-type"
+              className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]"
+            >
+              <option value="">Pick later</option>
+              {LOAN_TYPES.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="byrd-btn byrd-btn-outline flex-1"
+              data-testid="new-scen-cancel"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={busy}
+              className="byrd-btn byrd-btn-dark flex-1"
+              data-testid="new-scen-submit"
+            >
+              {busy ? "Creating…" : <>Create Scenario <Plus size={14} /></>}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
