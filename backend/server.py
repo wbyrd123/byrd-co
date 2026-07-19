@@ -2568,6 +2568,11 @@ async def assistant_create_task(body: AssistantTaskCreate, admin=Depends(require
     return doc
 
 
+class AssistantTaskReply(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    mark_done: bool = False
+
+
 @api.patch("/admin/assistant/tasks/{tid}")
 async def assistant_update_task(tid: str, body: AssistantTaskUpdate, admin=Depends(require_admin)):
     update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
@@ -2591,6 +2596,53 @@ async def assistant_delete_task(tid: str, admin=Depends(require_admin)):
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"ok": True}
+
+
+@api.post("/admin/assistant/tasks/{tid}/reply")
+async def assistant_reply_to_handoff(tid: str, body: AssistantTaskReply, admin=Depends(require_admin)):
+    """Send a reply on a handoff task. Creates a new task in the ORIGINAL sender's list
+    (with a 'From Caleb' badge and the reply as the note). Optionally marks the current task done."""
+    task = await db.assistant_tasks.find_one({"id": tid, "admin_id": admin["id"]})
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not task.get("assigned_by_admin_id"):
+        raise HTTPException(status_code=400, detail="This isn't a handoff task — nothing to reply to")
+
+    sender_id = task["assigned_by_admin_id"]
+    sender = await db.users.find_one({"id": sender_id, "role": "admin"}, {"_id": 0, "id": 1, "name": 1, "email": 1})
+    if not sender:
+        raise HTTPException(status_code=404, detail="Original sender no longer exists")
+
+    from_name = admin.get("name") or admin.get("email", "").split("@")[0]
+    reply_id = str(uuid.uuid4())
+    reply_doc = {
+        "id": reply_id,
+        "admin_id": sender_id,
+        "title": f"Reply from {from_name.split(' ')[0]} on: {task['title']}",
+        "notes": "",
+        "due_date": None,
+        "related_name": task.get("related_name", ""),
+        "related_client_id": task.get("related_client_id"),
+        "status": "open",
+        "source": "reply",
+        "assigned_by_admin_id": admin["id"],
+        "assigned_by_name": from_name,
+        "handoff_note": body.message,
+        "parent_task_id": tid,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "completed_at": None,
+    }
+    await db.assistant_tasks.insert_one(reply_doc)
+
+    if body.mark_done:
+        await db.assistant_tasks.update_one(
+            {"id": tid, "admin_id": admin["id"]},
+            {"$set": {"status": "done", "completed_at": now_iso(), "updated_at": now_iso()}},
+        )
+
+    reply_doc.pop("_id", None)
+    return {"ok": True, "reply": reply_doc, "task_marked_done": body.mark_done}
 
 
 @api.post("/admin/assistant/email/send")

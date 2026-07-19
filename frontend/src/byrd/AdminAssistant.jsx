@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import {
   Sparkles, Send, RotateCcw, Check, Mail, User, Calendar, X, AlertCircle,
-  ChevronRight, Edit3, Plus, ArrowRight, Users as UsersIcon,
+  ChevronRight, Edit3, Plus, ArrowRight, Users as UsersIcon, Reply,
 } from "lucide-react";
 
 const firstName = (u) => (u?.name || u?.email || "there").split(" ")[0].split("@")[0];
@@ -189,6 +189,16 @@ export default function AdminAssistant() {
     api.get("/admin/assistant/tasks").then((r) => setBuckets(r.data));
   };
 
+  const replyToTask = async (t, message, markDone) => {
+    try {
+      await api.post(`/admin/assistant/tasks/${t.id}/reply`, { message, mark_done: markDone });
+      api.get("/admin/assistant/tasks").then((r) => setBuckets(r.data));
+      toast.success(`Reply sent to ${t.assigned_by_name.split(" ")[0]}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Reply failed");
+    }
+  };
+
   const sendEmail = async (draft, msgId) => {
     try {
       await api.post("/admin/assistant/email/send", draft);
@@ -314,6 +324,7 @@ export default function AdminAssistant() {
           openList={openList}
           onComplete={completeTask}
           onDismiss={dismissTask}
+          onReply={replyToTask}
           onRefresh={() => api.get("/admin/assistant/tasks").then((r) => setBuckets(r.data))}
         />
       </div>
@@ -506,7 +517,7 @@ function EmailDraftCard({ draft, sent, onSend }) {
   );
 }
 
-function TaskRail({ buckets, today, openList, onComplete, onDismiss, onRefresh }) {
+function TaskRail({ buckets, today, openList, onComplete, onDismiss, onReply, onRefresh }) {
   return (
     <aside className="byrd-card p-4 space-y-5 h-fit sticky top-6" data-testid="task-rail">
       <div className="flex items-center justify-between">
@@ -533,6 +544,7 @@ function TaskRail({ buckets, today, openList, onComplete, onDismiss, onRefresh }
         today={today}
         onComplete={onComplete}
         onDismiss={onDismiss}
+        onReply={onReply}
       />
       <TaskSection
         title="Due Today"
@@ -542,6 +554,7 @@ function TaskRail({ buckets, today, openList, onComplete, onDismiss, onRefresh }
         today={today}
         onComplete={onComplete}
         onDismiss={onDismiss}
+        onReply={onReply}
       />
       <TaskSection
         title="Upcoming"
@@ -551,6 +564,7 @@ function TaskRail({ buckets, today, openList, onComplete, onDismiss, onRefresh }
         today={today}
         onComplete={onComplete}
         onDismiss={onDismiss}
+        onReply={onReply}
       />
       {buckets.done.length > 0 && (
         <TaskSection
@@ -572,7 +586,7 @@ function TaskRail({ buckets, today, openList, onComplete, onDismiss, onRefresh }
   );
 }
 
-function TaskSection({ title, tone, icon: Icon, items, today, onComplete, onDismiss, isDone }) {
+function TaskSection({ title, tone, icon: Icon, items, today, onComplete, onDismiss, onReply, isDone }) {
   if (!items || items.length === 0) return null;
   const chipCls = {
     bad: "byrd-chip byrd-chip-red",
@@ -590,52 +604,141 @@ function TaskSection({ title, tone, icon: Icon, items, today, onComplete, onDism
       </div>
       <div className="space-y-2">
         {items.map((t) => (
-          <div key={t.id} className="border border-[#E4DFD1] rounded-md p-2.5 text-xs bg-white" data-testid={`task-${t.id}`}>
-            {t.assigned_by_name && (
-              <div className="mb-1.5 -mt-0.5 -mx-0.5 rounded-sm bg-[#F3EEE0] px-2 py-1 border border-[#E4DFD1]">
-                <div className="font-mono text-[9px] uppercase tracking-widest text-[#1A1A1A] inline-flex items-center gap-1">
-                  <ArrowRight size={9} /> From {t.assigned_by_name.split(" ")[0]}
-                </div>
-                {t.handoff_note && (
-                  <div className="text-[11px] text-[#2A2A2A] italic mt-0.5 leading-snug">
-                    &ldquo;{t.handoff_note}&rdquo;
-                  </div>
-                )}
-              </div>
-            )}
-            <div className="font-semibold text-[#2A2A2A] leading-snug">{t.title}</div>
-            {(t.related_name || t.due_date) && (
-              <div className="mt-1 flex items-center gap-2 flex-wrap">
-                {t.related_name && <span className="text-[#6B6558]">{t.related_name}</span>}
-                {t.due_date && (
-                  <span className={`font-mono text-[10px] ${dueColor(t.due_date, today)}`}>
-                    {fmtDue(t.due_date)}
-                  </span>
-                )}
-              </div>
-            )}
-            {!isDone && (
-              <div className="mt-2 flex items-center gap-1.5">
-                <button
-                  onClick={() => onComplete(t)}
-                  className="flex-1 h-7 rounded-md border border-[#8DBE8F] bg-white text-[#245C25] hover:bg-[#E4F4E4] inline-flex items-center justify-center gap-1 text-[11px]"
-                  data-testid={`task-complete-${t.id}`}
-                >
-                  <Check size={10} /> Done
-                </button>
-                <button
-                  onClick={() => onDismiss(t)}
-                  className="w-7 h-7 rounded-md border border-[#E4DFD1] hover:bg-[#FADCDA] hover:border-[#E38380] hover:text-[#8A1F1A] grid place-items-center"
-                  title="Dismiss"
-                  data-testid={`task-dismiss-${t.id}`}
-                >
-                  <X size={11} />
-                </button>
-              </div>
-            )}
-          </div>
+          <TaskCard
+            key={t.id}
+            t={t}
+            today={today}
+            onComplete={onComplete}
+            onDismiss={onDismiss}
+            onReply={onReply}
+            isDone={isDone}
+          />
         ))}
       </div>
+    </div>
+  );
+}
+
+function TaskCard({ t, today, onComplete, onDismiss, onReply, isDone }) {
+  const [replyOpen, setReplyOpen] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const [markDone, setMarkDone] = useState(true);
+  const [sending, setSending] = useState(false);
+  const isHandoff = !!t.assigned_by_name;
+
+  const submitReply = async () => {
+    if (!replyText.trim()) return;
+    setSending(true);
+    try {
+      await onReply(t, replyText.trim(), markDone);
+      setReplyOpen(false);
+      setReplyText("");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="border border-[#E4DFD1] rounded-md p-2.5 text-xs bg-white" data-testid={`task-${t.id}`}>
+      {isHandoff && (
+        <div className="mb-1.5 -mt-0.5 -mx-0.5 rounded-sm bg-[#F3EEE0] px-2 py-1 border border-[#E4DFD1]">
+          <div className="font-mono text-[9px] uppercase tracking-widest text-[#1A1A1A] inline-flex items-center gap-1">
+            <ArrowRight size={9} /> From {t.assigned_by_name.split(" ")[0]}
+          </div>
+          {t.handoff_note && (
+            <div className="text-[11px] text-[#2A2A2A] italic mt-0.5 leading-snug">
+              &ldquo;{t.handoff_note}&rdquo;
+            </div>
+          )}
+        </div>
+      )}
+      <div className="font-semibold text-[#2A2A2A] leading-snug">{t.title}</div>
+      {(t.related_name || t.due_date) && (
+        <div className="mt-1 flex items-center gap-2 flex-wrap">
+          {t.related_name && <span className="text-[#6B6558]">{t.related_name}</span>}
+          {t.due_date && (
+            <span className={`font-mono text-[10px] ${dueColor(t.due_date, today)}`}>
+              {fmtDue(t.due_date)}
+            </span>
+          )}
+        </div>
+      )}
+      {!isDone && (
+        <>
+          <div className="mt-2 flex items-center gap-1.5">
+            <button
+              onClick={() => onComplete(t)}
+              className="flex-1 h-7 rounded-md border border-[#8DBE8F] bg-white text-[#245C25] hover:bg-[#E4F4E4] inline-flex items-center justify-center gap-1 text-[11px]"
+              data-testid={`task-complete-${t.id}`}
+            >
+              <Check size={10} /> Done
+            </button>
+            {isHandoff && (
+              <button
+                onClick={() => setReplyOpen((v) => !v)}
+                className={`h-7 px-2 rounded-md border inline-flex items-center gap-1 text-[11px] ${
+                  replyOpen
+                    ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
+                    : "bg-white border-[#E4DFD1] hover:bg-[#F3EEE0]"
+                }`}
+                title={`Reply to ${t.assigned_by_name.split(" ")[0]}`}
+                data-testid={`task-reply-${t.id}`}
+              >
+                <Reply size={11} /> Reply
+              </button>
+            )}
+            <button
+              onClick={() => onDismiss(t)}
+              className="w-7 h-7 rounded-md border border-[#E4DFD1] hover:bg-[#FADCDA] hover:border-[#E38380] hover:text-[#8A1F1A] grid place-items-center"
+              title="Dismiss"
+              data-testid={`task-dismiss-${t.id}`}
+            >
+              <X size={11} />
+            </button>
+          </div>
+          {replyOpen && (
+            <div className="mt-2 border border-[#E4DFD1] rounded-md p-2 bg-[#FBF8F1]" data-testid={`task-reply-box-${t.id}`}>
+              <div className="font-mono text-[9px] uppercase tracking-widest text-[#6B6558] mb-1">
+                Reply to {t.assigned_by_name.split(" ")[0]}
+              </div>
+              <textarea
+                value={replyText}
+                onChange={(e) => setReplyText(e.target.value)}
+                placeholder="Called Rod at 3pm — he's putting the docs together and will send tomorrow."
+                rows={3}
+                className="w-full px-2 py-1.5 rounded-md border border-[#E4DFD1] bg-white text-[11px] focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434] resize-y"
+                data-testid={`task-reply-text-${t.id}`}
+              />
+              <label className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-[#2A2A2A] cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={markDone}
+                  onChange={(e) => setMarkDone(e.target.checked)}
+                  className="accent-[#245C25]"
+                  data-testid={`task-reply-mark-done-${t.id}`}
+                />
+                Also mark this task done
+              </label>
+              <div className="mt-2 flex items-center gap-1.5">
+                <button
+                  onClick={submitReply}
+                  disabled={sending || !replyText.trim()}
+                  className="flex-1 h-7 rounded-md bg-[#1A1A1A] text-white hover:bg-[#2A2A2A] inline-flex items-center justify-center gap-1 text-[11px] disabled:opacity-50"
+                  data-testid={`task-reply-send-${t.id}`}
+                >
+                  <Send size={10} /> {sending ? "Sending…" : "Send Reply"}
+                </button>
+                <button
+                  onClick={() => { setReplyOpen(false); setReplyText(""); }}
+                  className="h-7 px-2 rounded-md border border-[#E4DFD1] hover:bg-[#F3EEE0] text-[11px]"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
