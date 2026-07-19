@@ -232,8 +232,23 @@ async def submit_quote(body: QuoteRequest, background: BackgroundTasks):
 
 @api.get("/public/testimonials")
 async def testimonials():
-    # Seeded testimonials — editable later
-    return [
+    """Public list — only published testimonials, in the admin-defined order."""
+    docs = await db.testimonials.find(
+        {"published": True}, {"_id": 0}
+    ).sort("order", 1).to_list(200)
+    if docs:
+        return docs
+    # Fallback if the collection is empty for any reason
+    return await _seed_testimonials_if_empty(return_docs=True)
+
+
+async def _seed_testimonials_if_empty(return_docs: bool = False):
+    """Ensures the 4 legacy testimonials exist in DB so nothing disappears from the site."""
+    if await db.testimonials.count_documents({}) > 0:
+        if return_docs:
+            return await db.testimonials.find({"published": True}, {"_id": 0}).sort("order", 1).to_list(200)
+        return None
+    seed = [
         {
             "id": "t1",
             "name": "Marcus Reyes",
@@ -267,6 +282,88 @@ async def testimonials():
             "avatar": "https://images.unsplash.com/photo-1580489944761-15a19d654956?w=200&h=200&fit=crop",
         },
     ]
+    now = now_iso()
+    for i, s in enumerate(seed):
+        await db.testimonials.insert_one({**s, "order": i, "published": True, "created_at": now, "updated_at": now})
+    if return_docs:
+        return await db.testimonials.find({"published": True}, {"_id": 0}).sort("order", 1).to_list(200)
+    return None
+
+
+class TestimonialCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    title: Optional[str] = ""
+    quote: str = Field(min_length=1, max_length=1000)
+    rating: int = Field(default=5, ge=1, le=5)
+    avatar: Optional[str] = ""
+    published: bool = True
+
+
+class TestimonialUpdate(BaseModel):
+    name: Optional[str] = None
+    title: Optional[str] = None
+    quote: Optional[str] = None
+    rating: Optional[int] = Field(default=None, ge=1, le=5)
+    avatar: Optional[str] = None
+    published: Optional[bool] = None
+    order: Optional[int] = None
+
+
+class TestimonialReorder(BaseModel):
+    order: List[str]  # ordered list of testimonial ids
+
+
+@api.get("/admin/testimonials")
+async def admin_list_testimonials(admin=Depends(require_admin)):
+    await _seed_testimonials_if_empty()
+    docs = await db.testimonials.find({}, {"_id": 0}).sort("order", 1).to_list(200)
+    return docs
+
+
+@api.post("/admin/testimonials")
+async def admin_create_testimonial(body: TestimonialCreate, admin=Depends(require_admin)):
+    now = now_iso()
+    # Put new items at the end
+    last = await db.testimonials.find({}, {"order": 1}).sort("order", -1).limit(1).to_list(1)
+    next_order = (last[0].get("order", -1) + 1) if last else 0
+    doc = {
+        "id": str(uuid.uuid4()),
+        **body.model_dump(),
+        "order": next_order,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.testimonials.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/admin/testimonials/{tid}")
+async def admin_update_testimonial(tid: str, body: TestimonialUpdate, admin=Depends(require_admin)):
+    update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = now_iso()
+    res = await db.testimonials.update_one({"id": tid}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Testimonial not found")
+    doc = await db.testimonials.find_one({"id": tid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/admin/testimonials/{tid}")
+async def admin_delete_testimonial(tid: str, admin=Depends(require_admin)):
+    res = await db.testimonials.delete_one({"id": tid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Testimonial not found")
+    return {"ok": True}
+
+
+@api.post("/admin/testimonials/reorder")
+async def admin_reorder_testimonials(body: TestimonialReorder, admin=Depends(require_admin)):
+    for i, tid in enumerate(body.order):
+        await db.testimonials.update_one({"id": tid}, {"$set": {"order": i, "updated_at": now_iso()}})
+    return {"ok": True}
 
 
 @api.get("/public/principals")
