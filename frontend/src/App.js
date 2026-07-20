@@ -22,6 +22,7 @@ import AdminTestimonials from "@/byrd/AdminTestimonials";
 import AdminAssistant from "@/byrd/AdminAssistant";
 import AdminContacts from "@/byrd/AdminContacts";
 import Unsubscribe from "@/byrd/Unsubscribe";
+import FeeAgreementSign from "@/byrd/FeeAgreementSign";
 import LenderView from "@/byrd/LenderView";
 
 // AdsCopilot (staff-only)
@@ -76,6 +77,7 @@ function App() {
             {/* Public lender view (token-gated) */}
             <Route path="/lender/scenario/:token" element={<LenderView />} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />
+            <Route path="/fee-agreement/:token" element={<FeeAgreementSign />} />
 
             {/* Client portal (role=client) */}
             <Route

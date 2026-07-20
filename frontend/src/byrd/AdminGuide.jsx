@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import {
   BookOpen, Copy, ArrowRight, Users, FileText, Building2, Share2,
   Inbox, Sparkles, ShieldCheck, ChevronRight, Bot, Megaphone,
-  Contact as ContactIcon, Clock, AtSign,
+  Contact as ContactIcon, Clock, AtSign, PenLine,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -60,6 +60,7 @@ const SECTIONS = [
   { id: "contacts", label: "Contacts CRM" },
   { id: "clients", label: "Clients" },
   { id: "scenarios", label: "Scenarios & Docs" },
+  { id: "fee-agreement", label: "Fee Agreement" },
   { id: "lenders", label: "Lender Directory" },
   { id: "shopping", label: "Shopping a Deal" },
   { id: "quotes", label: "Quote Inbox" },
@@ -277,6 +278,48 @@ export default function AdminGuide() {
         </Step>
         <Step n="6" title="Generate the PDF.">
           <p><b>PDF</b> button, top-right. Branded Byrd &amp; CO loan package with all the numbers and sponsor/property/loan detail.</p>
+        </Step>
+      </Card>
+
+      <Card id="fee-agreement" icon={PenLine} title="Fee Agreement — E-Signature">
+        <p className="text-sm text-[#6B6558] -mt-2 mb-4">
+          Every scenario needs a signed Byrd &amp; CO fee agreement before you shop the deal.
+          The signing flow is built right into the Documents tab.
+        </p>
+
+        <Step n="1" title="Enter the broker fee and preview.">
+          <p>Open a scenario &rarr; <b>Documents</b> tab. The <b>Broker fee &amp; e-signature</b> card sits at the very top.</p>
+          <p>Type the fee percentage (e.g. <InlineCode>1.25</InlineCode> for 1.25%) &mdash; that's the number that fills the <em>Fee: __% of the total loan amount</em> line in the agreement.</p>
+          <p>Click <b>View Draft</b> to open a PDF of the agreement pre-filled with everything the template needs: borrower name and email, entity, property address and type, loan purpose (from the loan type on the scenario), fee %, today's date, and the broker who's sending it (Wayne or Caleb — whoever is logged in).</p>
+        </Step>
+
+        <Step n="2" title="Send for signature.">
+          <p>Click <b>Send for Signature</b>. Behind the scenes:</p>
+          <p>&mdash; A pinned document line named <b>Signed Fee Agreement</b> is created at the top of the checklist (order = &minus;1000, hidden from lenders, protected from deletion).</p>
+          <p>&mdash; A one-time signing token is generated and emailed to the borrower at the email on their client record. The email includes a big <b>Review &amp; Sign</b> button that opens the public signing page.</p>
+          <p>&mdash; The card flips to <b>Awaiting borrower &middot; sent {"{date}"}</b> and the button set becomes <b>Resend</b> / <b>Cancel Request</b>.</p>
+        </Step>
+
+        <Step n="3" title="What the borrower sees.">
+          <p>The signing page (public, token-gated at <InlineCode>/fee-agreement/{"{token}"}</InlineCode>) shows the full PDF on the left and a summary sidebar on the right (borrower, entity, property, type, loan, fee, date, broker). To sign they:</p>
+          <p>1. Type their full legal name &mdash; a cursive-style preview renders live so they see their signature.</p>
+          <p>2. Tick the consent checkbox (which explicitly restates the fee %).</p>
+          <p>3. Click <b>Agree &amp; Sign</b>.</p>
+        </Step>
+
+        <Step n="4" title="Byrd & CO countersigns automatically.">
+          <p>The moment the borrower submits, the backend:</p>
+          <p>&mdash; Fills the signature block in the PDF with both parties' typed names (italic script font), the borrower's signing timestamp and IP for audit, and Wayne or Caleb's name on the broker side.</p>
+          <p>&mdash; Stores that fully-executed PDF as the file on the <b>Signed Fee Agreement</b> line, marks it <b>Reviewed</b>.</p>
+          <p>&mdash; Emails a confirmation to the borrower and a "signed" alert to the broker who sent it.</p>
+          <p>The Documents tab card flips to <b>Signed &middot; {"{date}"}</b> with a <b>Download Signed</b> button. Same signed PDF is downloadable by the borrower from their portal too.</p>
+        </Step>
+
+        <Step n="5" title="Rules of the road.">
+          <p>&mdash; If you need to change the fee %, edit it and click <b>Resend</b> &mdash; the old link auto-supersedes.</p>
+          <p>&mdash; <b>Cancel Request</b> kills a pending link without sending a new one.</p>
+          <p>&mdash; The Signed Fee Agreement line is <b>always at the top of the checklist</b>, is <b>hidden from lender views</b>, and can't be deleted through the normal UI (the delete endpoint refuses).</p>
+          <p>&mdash; Borrowers cannot upload to this line themselves &mdash; it's system-managed.</p>
         </Step>
       </Card>
 

@@ -6,7 +6,7 @@ Powers:
   * Admin/broker portal (manage clients, review docs, view quotes)
   * AdsCopilot internal tool (Claude Sonnet 4.5) — kept from prior iteration
 """
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
@@ -1057,6 +1057,8 @@ async def client_upload(doc_id: str, body: DocUploadInput, user=Depends(require_
     d = await db.client_docs.find_one({"id": doc_id, "client_id": user["id"]})
     if not d:
         raise HTTPException(status_code=404, detail="Doc not found")
+    if d.get("system"):
+        raise HTTPException(status_code=400, detail="This line is managed by Byrd & CO and can't be uploaded to directly.")
     try:
         raw = base64.b64decode(body.data_b64, validate=True)
     except Exception:
@@ -1234,6 +1236,7 @@ class ScenarioUpdate(BaseModel):
     attached_docs: Optional[List[AttachedDoc]] = None
     notes: Optional[str] = None
     business_plan: Optional[str] = None
+    broker_fee_pct: Optional[float] = None  # e.g. 1.0 = 1%
 
 
 class LenderContact(BaseModel):
@@ -1838,6 +1841,8 @@ async def scenario_delete_doc(sid: str, doc_id: str, admin=Depends(require_admin
     d = await db.client_docs.find_one({"id": doc_id, "scenario_id": sid})
     if not d:
         raise HTTPException(status_code=404, detail="Doc not found")
+    if d.get("system"):
+        raise HTTPException(status_code=400, detail="This document line is system-managed and can't be deleted here.")
     if d.get("file_id"):
         await db.client_files.delete_one({"id": d["file_id"]})
     await db.client_docs.delete_one({"id": doc_id})
@@ -1960,6 +1965,609 @@ async def scenario_pdf(sid: str, admin=Depends(require_admin)):
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="byrd-scenario-{sid[:8]}.pdf"'},
     )
+
+
+# ================ Fee Agreement (e-signature) ================
+FEE_AGREEMENT_DOC_LABEL = "Signed Fee Agreement"
+
+
+def render_fee_agreement_pdf(
+    scen: dict,
+    client: dict,
+    admin_signer: dict,
+    fee_pct: Optional[float],
+    agreement_date: str,          # ISO date string
+    signatures: Optional[dict] = None,  # {"borrower_name": str, "borrower_signed_at": iso, "broker_name": str, "broker_signed_at": iso}
+) -> bytes:
+    """Render the Byrd & CO Commercial Loan Broker Fee Agreement.
+    If `signatures` is provided, the signature block is filled in (fully executed copy).
+    Otherwise it renders as a draft with the signature lines empty."""
+    from io import BytesIO
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=letter,
+        leftMargin=0.9 * inch, rightMargin=0.9 * inch,
+        topMargin=0.9 * inch, bottomMargin=0.9 * inch,
+        title="Byrd & CO — Commercial Loan Broker Fee Agreement",
+    )
+    ss = getSampleStyleSheet()
+    title_style = ParagraphStyle("title", parent=ss["Heading1"], fontName="Helvetica-Bold",
+                                 fontSize=14, alignment=1, spaceAfter=14, textColor=colors.HexColor("#1A1A1A"))
+    h2 = ParagraphStyle("h2", parent=ss["Heading2"], fontName="Helvetica-Bold",
+                        fontSize=10.5, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor("#1A1A1A"))
+    body = ParagraphStyle("body", parent=ss["BodyText"], fontName="Helvetica",
+                          fontSize=9.5, leading=13, spaceAfter=4, textColor=colors.HexColor("#1A1A1A"))
+    small_lbl = ParagraphStyle("small", parent=ss["BodyText"], fontName="Helvetica-Bold",
+                               fontSize=9, leading=11, textColor=colors.HexColor("#6B6558"))
+
+    story: list = []
+
+    # Title
+    story.append(Paragraph("COMMERCIAL LOAN BROKER FEE AGREEMENT", title_style))
+
+    # Date + parties
+    date_str = agreement_date or datetime.now(timezone.utc).date().isoformat()
+    story.append(Paragraph(
+        f'This Agreement (&ldquo;Agreement&rdquo;) is entered into as of <b>{date_str}</b>, '
+        f'by and between:', body,
+    ))
+    story.append(Spacer(1, 8))
+
+    # Broker block
+    broker_first = (admin_signer.get("name") or "").split(" ")[0] or "Wayne"
+    broker_name_full = admin_signer.get("name") or "Wayne Byrd"
+    broker_email = admin_signer.get("email") or "wayne@byrd-co.com"
+    broker_phone = admin_signer.get("phone") or "832-813-9802"
+    parties_data = [
+        [
+            Paragraph("<b>Broker:</b><br/>Byrd &amp; CO<br/>(&ldquo;Broker&rdquo;)<br/>"
+                      f"Email: {broker_email} &nbsp; Phone: {broker_phone}", body),
+            Paragraph("<b>Borrower:</b><br/>"
+                      f"{client.get('name') or '_______________________'}<br/>"
+                      f"({client.get('company') or '&ldquo;Borrower&rdquo;'})<br/>"
+                      f"Email: {client.get('email') or '_______________________'}", body),
+        ]
+    ]
+    t = Table(parties_data, colWidths=[3.35 * inch, 3.35 * inch])
+    t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#E4DFD1")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E4DFD1")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(t)
+
+    # Section 1
+    prop = scen.get("property_info") or {}
+    prop_addr_parts = [prop.get("address"), prop.get("city"), prop.get("state"), prop.get("zip_code")]
+    prop_addr = ", ".join([p for p in prop_addr_parts if p]) or "_______________________"
+    prop_type = prop.get("property_type") or "_______________________"
+    lr = scen.get("loan_request") or {}
+    purpose_label = (lr.get("loan_type") or "purchase / refinance / rehab / construction").lower()
+
+    story.append(Paragraph("<b>1. PURPOSE</b>", h2))
+    story.append(Paragraph(
+        f'Borrower hereby engages Broker to arrange, negotiate, or assist in obtaining a commercial loan '
+        f'(&ldquo;Loan&rdquo;) for the purpose of <b>{purpose_label}</b> on the following property:',
+        body,
+    ))
+    story.append(Spacer(1, 4))
+    prop_data = [
+        [Paragraph("<b>Property Address:</b>", small_lbl), Paragraph(prop_addr, body)],
+        [Paragraph("<b>Type of Property:</b>", small_lbl), Paragraph(prop_type, body)],
+    ]
+    pt = Table(prop_data, colWidths=[1.4 * inch, 5.3 * inch])
+    pt.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#E4DFD1")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E4DFD1")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(pt)
+
+    # Section 2
+    fee_str = f"{fee_pct:g}" if fee_pct is not None else "_____"
+    story.append(Paragraph("<b>2. BROKER COMPENSATION</b>", h2))
+    story.append(Paragraph("Broker shall be compensated as follows:", body))
+    story.append(Paragraph(
+        f'<b>Fee: {fee_str}% of the total loan amount</b> &ndash; This fee shall be paid upon successful closing. '
+        f"Broker's fee shall be paid directly through escrow at funding.", body,
+    ))
+
+    # Section 3
+    story.append(Paragraph("<b>3. EXCLUSIVITY</b>", h2))
+    story.append(Paragraph(
+        "Borrower agrees to provide Broker thirty (30) days of exclusivity to source financing for the "
+        "property referenced above. During this period, Borrower shall not engage any other mortgage broker, "
+        "commercial lender, or intermediary to obtain financing for the same property or loan request.", body,
+    ))
+    story.append(Paragraph(
+        "If Broker presents a lender offering acceptable financing terms during this period, Borrower agrees "
+        "that the loan will be processed through the Broker, and the Broker shall be entitled to the agreed "
+        "fee upon closing.", body,
+    ))
+    story.append(Paragraph(
+        "After the 45-day period, the Agreement will automatically convert to a non-exclusive basis if Broker "
+        "is unable to provide financing, unless otherwise terminated in writing by either party.", body,
+    ))
+
+    # Section 4
+    story.append(Paragraph("<b>4. NON-CIRCUMVENTION</b>", h2))
+    story.append(Paragraph(
+        "Borrower agrees that all lenders introduced by Broker are proprietary contacts of the Broker. "
+        "Borrower shall not, directly or indirectly, contact, negotiate, or close financing with such lenders "
+        "without Broker's written consent. Any violation will result in the Broker being entitled to the "
+        "full agreed-upon fee.", body,
+    ))
+
+    # Section 5
+    story.append(Paragraph("<b>5. TERM OF AGREEMENT</b>", h2))
+    story.append(Paragraph(
+        "This Agreement shall remain in effect for six (6) months from the date hereof, unless terminated "
+        "earlier in writing by either party.", body,
+    ))
+    story.append(Paragraph(
+        "Termination shall not affect Broker's right to compensation for any loan originated, negotiated, or "
+        "closed during the term or within 12 months thereafter with a lender introduced by Broker.", body,
+    ))
+
+    # Section 6
+    story.append(Paragraph("<b>6. REPRESENTATIONS</b>", h2))
+    story.append(Paragraph(
+        "Borrower warrants that all information and documentation provided to Broker are true and accurate. "
+        "Broker is not a lender and makes no representations or warranties regarding loan approval or funding.", body,
+    ))
+
+    # Section 7
+    story.append(Paragraph("<b>7. CONFIDENTIALITY</b>", h2))
+    story.append(Paragraph(
+        "Both parties agree to maintain confidentiality regarding all loan information, borrower financials, "
+        "and lender relationships.", body,
+    ))
+
+    # Section 8
+    story.append(Paragraph("<b>8. GOVERNING LAW</b>", h2))
+    story.append(Paragraph(
+        "This Agreement shall be governed by and construed in accordance with the laws of the State of Texas.", body,
+    ))
+
+    # Section 9
+    story.append(Paragraph("<b>9. ENTIRE AGREEMENT</b>", h2))
+    story.append(Paragraph(
+        "This Agreement constitutes the entire understanding between the parties and may only be modified in "
+        "writing signed by both parties.", body,
+    ))
+
+    # Section 10 — SIGNATURES
+    story.append(Paragraph("<b>10. SIGNATURES</b>", h2))
+
+    if signatures and signatures.get("borrower_name") and signatures.get("broker_name"):
+        # Fully executed copy — render the recorded typed signatures in italic cursive-ish font
+        borrower_sig = signatures["borrower_name"]
+        borrower_when = signatures.get("borrower_signed_at", "")
+        broker_sig = signatures["broker_name"]
+        broker_when = signatures.get("broker_signed_at", "")
+        sig_data = [
+            [
+                Paragraph(
+                    "<b>Broker:</b><br/><br/>"
+                    f"<font name='Helvetica-Oblique' size='13'>{broker_sig}</font><br/>"
+                    f"<font size='9' color='#6B6558'>Electronic signature</font><br/>"
+                    f"{broker_name_full}, Byrd &amp; CO<br/>"
+                    f"Date: {broker_when.split('T')[0] if broker_when else ''}",
+                    body,
+                ),
+                Paragraph(
+                    "<b>Borrower:</b><br/><br/>"
+                    f"<font name='Helvetica-Oblique' size='13'>{borrower_sig}</font><br/>"
+                    f"<font size='9' color='#6B6558'>Electronic signature</font><br/>"
+                    f"Name: {client.get('name') or ''}<br/>"
+                    f"Date: {borrower_when.split('T')[0] if borrower_when else ''}",
+                    body,
+                ),
+            ]
+        ]
+    else:
+        sig_data = [
+            [
+                Paragraph(
+                    "<b>Broker:</b><br/><br/>"
+                    "________________________________<br/>"
+                    f"{broker_name_full}, Byrd &amp; CO<br/>"
+                    "Date: ______________________", body,
+                ),
+                Paragraph(
+                    "<b>Borrower:</b><br/><br/>"
+                    "________________________________<br/>"
+                    "Name: ______________________<br/>"
+                    "Date: ______________________", body,
+                ),
+            ]
+        ]
+    sig_t = Table(sig_data, colWidths=[3.35 * inch, 3.35 * inch])
+    sig_t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#E4DFD1")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E4DFD1")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+    ]))
+    story.append(Spacer(1, 4))
+    story.append(sig_t)
+
+    if signatures and signatures.get("borrower_signed_ip"):
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(
+            f"<font size='7.5' color='#6B6558'>Signature audit: borrower signed electronically at "
+            f"{signatures.get('borrower_signed_at','')} (IP {signatures['borrower_signed_ip']}). "
+            f"Broker countersigned electronically at {signatures.get('broker_signed_at','')}.</font>",
+            body,
+        ))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _fee_agreement_email_body(client_name: str, sender_first: str, sign_url: str, fee_pct: Optional[float], scen_name: str) -> tuple[str, str, str]:
+    fee_note = f"{fee_pct:g}% of the total loan amount" if fee_pct is not None else "a broker fee to be confirmed"
+    subject = f"Sign your Fee Agreement — {scen_name}"
+    html = f"""
+    <div style="font-family:Helvetica,Arial,sans-serif;color:#1A1A1A;line-height:1.55;font-size:14px;">
+      <p>Hi {client_name.split(' ')[0] if client_name else 'there'},</p>
+      <p>Before we start shopping your loan, I need you to sign the Byrd &amp; CO commercial loan broker
+      fee agreement for <b>{scen_name}</b>. The broker fee is <b>{fee_note}</b>, paid at closing directly
+      through escrow.</p>
+      <p>Please review and sign here:</p>
+      <p><a href="{sign_url}" style="background:#1A1A1A;color:#FBF8F1;text-decoration:none;padding:12px 18px;border-radius:6px;font-weight:600;display:inline-block;">Review &amp; Sign</a></p>
+      <p style="font-size:12px;color:#6B6558;">The link opens a page where you'll see the full agreement, type your name, and click Agree. I'll countersign on my end and email you a copy.</p>
+      <p>Thanks,<br/>{sender_first}<br/>Byrd &amp; CO</p>
+    </div>
+    """
+    text = (
+        f"Hi {client_name.split(' ')[0] if client_name else 'there'},\n\n"
+        f"Before we start shopping your loan, I need you to sign the Byrd & CO commercial loan broker fee "
+        f"agreement for {scen_name}. The broker fee is {fee_note}, paid at closing directly through escrow.\n\n"
+        f"Please review and sign here:\n{sign_url}\n\nThanks,\n{sender_first}\nByrd & CO\n"
+    )
+    return subject, html, text
+
+
+def _fee_agreement_signed_email(client_name: str, sender_first: str, scen_name: str) -> tuple[str, str, str]:
+    subject = f"Fee Agreement executed — {scen_name}"
+    html = f"""
+    <div style="font-family:Helvetica,Arial,sans-serif;color:#1A1A1A;line-height:1.55;font-size:14px;">
+      <p>Hi {client_name.split(' ')[0] if client_name else 'there'},</p>
+      <p>Thanks for signing. The Byrd &amp; CO fee agreement for <b>{scen_name}</b> is now fully executed by both sides,
+      and a signed copy is on file in your portal. I'll get to work shopping your loan.</p>
+      <p>Thanks,<br/>{sender_first}<br/>Byrd &amp; CO</p>
+    </div>
+    """
+    text = (
+        f"Hi {client_name.split(' ')[0] if client_name else 'there'},\n\n"
+        f"Thanks for signing. The Byrd & CO fee agreement for {scen_name} is fully executed and a signed copy "
+        f"is in your portal. I'll get to work shopping your loan.\n\n"
+        f"Thanks,\n{sender_first}\nByrd & CO\n"
+    )
+    return subject, html, text
+
+
+async def _ensure_fee_agreement_doc_line(scenario_id: str, client_id: Optional[str]) -> str:
+    """Get or create the pinned 'Signed Fee Agreement' doc line at the top of the checklist.
+    Returns its doc_id."""
+    existing = await db.client_docs.find_one({"scenario_id": scenario_id, "label": FEE_AGREEMENT_DOC_LABEL}, {"_id": 0})
+    if existing:
+        return existing["id"]
+    now = now_iso()
+    doc_id = str(uuid.uuid4())
+    await db.client_docs.insert_one({
+        "id": doc_id,
+        "scenario_id": scenario_id,
+        "client_id": client_id,
+        "label": FEE_AGREEMENT_DOC_LABEL,
+        "category": "Fee Agreement",
+        "required": True,
+        "status": "pending",
+        "notes": "Signed automatically once the borrower and Byrd & CO countersign the fee agreement.",
+        "file_id": None,
+        "order": -1000,  # pinned to the top
+        "lender_visibility": "hidden",  # this is a Byrd/borrower doc, never shown to lenders
+        "created_at": now,
+        "updated_at": now,
+        "system": True,
+    })
+    return doc_id
+
+
+@api.get("/admin/scenarios/{sid}/fee-agreement/preview.pdf")
+async def scenario_fee_agreement_preview(sid: str, admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    client = None
+    if scen.get("client_id"):
+        client = await db.users.find_one({"id": scen["client_id"]}, {"_id": 0, "password_hash": 0})
+    if not client:
+        raise HTTPException(status_code=400, detail="Link a client to this scenario before drafting the fee agreement")
+    fee_pct = scen.get("broker_fee_pct")
+    pdf = render_fee_agreement_pdf(
+        scen, client, admin, fee_pct,
+        agreement_date=datetime.now(timezone.utc).date().isoformat(),
+        signatures=None,
+    )
+    return Response(
+        content=pdf, media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="byrd-fee-agreement-draft.pdf"'},
+    )
+
+
+class FeeAgreementSend(BaseModel):
+    broker_fee_pct: Optional[float] = None  # If provided, saves onto the scenario first
+
+
+@api.post("/admin/scenarios/{sid}/fee-agreement/send")
+async def scenario_fee_agreement_send(sid: str, body: FeeAgreementSend, background: BackgroundTasks, admin=Depends(require_admin)):
+    """Send the fee agreement to the borrower for e-signature.
+    Creates (or refreshes) a pinned 'Signed Fee Agreement' doc line and a signing session token."""
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    if not scen.get("client_id"):
+        raise HTTPException(status_code=400, detail="Link a client to this scenario first")
+    client = await db.users.find_one({"id": scen["client_id"]}, {"_id": 0, "password_hash": 0})
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if not client.get("email"):
+        raise HTTPException(status_code=400, detail="Client has no email on file")
+
+    now = now_iso()
+    # Save the fee pct if provided
+    if body.broker_fee_pct is not None:
+        if body.broker_fee_pct <= 0 or body.broker_fee_pct > 10:
+            raise HTTPException(status_code=400, detail="Fee must be between 0 and 10")
+        await db.scenarios.update_one({"id": sid}, {"$set": {"broker_fee_pct": body.broker_fee_pct, "updated_at": now}})
+        scen["broker_fee_pct"] = body.broker_fee_pct
+    if scen.get("broker_fee_pct") is None:
+        raise HTTPException(status_code=400, detail="Enter the broker fee percentage first")
+
+    doc_id = await _ensure_fee_agreement_doc_line(sid, client["id"])
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+
+    # Supersede any pending prior request
+    await db.fee_agreements.update_many(
+        {"scenario_id": sid, "status": "sent"},
+        {"$set": {"status": "superseded", "superseded_at": now}},
+    )
+    fa = {
+        "id": str(uuid.uuid4()),
+        "scenario_id": sid,
+        "client_id": client["id"],
+        "doc_id": doc_id,
+        "token": token,
+        "broker_fee_pct": scen["broker_fee_pct"],
+        "sent_by_admin_id": admin["id"],
+        "sent_by_admin_name": admin.get("name") or admin.get("email"),
+        "sent_by_admin_email": admin.get("email"),
+        "sent_by_admin_phone": admin.get("phone"),
+        "borrower_email_at_send": client["email"],
+        "agreement_date": datetime.now(timezone.utc).date().isoformat(),
+        "status": "sent",
+        "created_at": now,
+        "signed_at": None,
+        "borrower_signed_name": None,
+        "borrower_signed_at": None,
+        "borrower_signed_ip": None,
+        "broker_signed_name": None,
+        "broker_signed_at": None,
+        "signed_file_id": None,
+    }
+    await db.fee_agreements.insert_one(fa)
+
+    await db.client_docs.update_one(
+        {"id": doc_id},
+        {"$set": {"status": "pending", "notes": "Sent to borrower for signature.", "updated_at": now}},
+    )
+
+    # Email the client with the signing link
+    sender_first = (admin.get("name") or "Byrd").split(" ")[0]
+    sign_url = f"{public_base_url()}/fee-agreement/{token}" if public_base_url() else f"/fee-agreement/{token}"
+    subj, html, text = _fee_agreement_email_body(
+        client.get("name") or "there", sender_first, sign_url, scen["broker_fee_pct"], scen.get("name") or "your loan",
+    )
+    background.add_task(send_email, client["email"], subj, html, text, "fee_agreement")
+
+    fa.pop("_id", None)
+    return fa
+
+
+@api.get("/admin/scenarios/{sid}/fee-agreement")
+async def scenario_fee_agreement_status(sid: str, admin=Depends(require_admin)):
+    fa = await db.fee_agreements.find_one(
+        {"scenario_id": sid, "status": {"$in": ["sent", "signed"]}}, {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    return {"fee_agreement": fa}
+
+
+@api.post("/admin/scenarios/{sid}/fee-agreement/cancel")
+async def scenario_fee_agreement_cancel(sid: str, admin=Depends(require_admin)):
+    fa = await db.fee_agreements.find_one({"scenario_id": sid, "status": "sent"}, {"_id": 0})
+    if not fa:
+        raise HTTPException(status_code=404, detail="No pending fee agreement to cancel")
+    await db.fee_agreements.update_one(
+        {"id": fa["id"]},
+        {"$set": {"status": "canceled", "canceled_at": now_iso(), "canceled_by_admin_id": admin["id"]}},
+    )
+    return {"ok": True}
+
+
+# ---- Public signing endpoints (token-gated, no auth) ----
+@api.get("/fee-agreement/{token}")
+async def public_fee_agreement_get(token: str):
+    fa = await db.fee_agreements.find_one({"token": token}, {"_id": 0})
+    if not fa:
+        raise HTTPException(status_code=404, detail="Invalid or expired link")
+    scen = await db.scenarios.find_one({"id": fa["scenario_id"]}, {"_id": 0, "id": 1, "name": 1, "property_info": 1, "loan_request": 1, "client_id": 1})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    client = await db.users.find_one({"id": fa["client_id"]}, {"_id": 0, "id": 1, "name": 1, "email": 1, "company": 1})
+    prop = scen.get("property_info") or {}
+    prop_addr = ", ".join([p for p in [prop.get("address"), prop.get("city"), prop.get("state"), prop.get("zip_code")] if p]) or "—"
+    return {
+        "status": fa["status"],  # 'sent' | 'signed' | 'superseded' | 'canceled'
+        "signed_at": fa.get("signed_at"),
+        "agreement_date": fa["agreement_date"],
+        "broker_fee_pct": fa["broker_fee_pct"],
+        "scenario": {
+            "id": scen["id"],
+            "name": scen.get("name"),
+            "property_address": prop_addr,
+            "property_type": prop.get("property_type"),
+            "loan_type": (scen.get("loan_request") or {}).get("loan_type"),
+        },
+        "client": {
+            "name": client.get("name"),
+            "email": client.get("email"),
+            "company": client.get("company"),
+        },
+        "broker": {
+            "name": fa.get("sent_by_admin_name") or "Wayne Byrd",
+            "email": fa.get("sent_by_admin_email"),
+            "phone": fa.get("sent_by_admin_phone"),
+        },
+    }
+
+
+@api.get("/fee-agreement/{token}/preview.pdf")
+async def public_fee_agreement_pdf(token: str):
+    fa = await db.fee_agreements.find_one({"token": token})
+    if not fa:
+        raise HTTPException(status_code=404, detail="Invalid link")
+    scen = await db.scenarios.find_one({"id": fa["scenario_id"]}, {"_id": 0})
+    client = await db.users.find_one({"id": fa["client_id"]}, {"_id": 0, "password_hash": 0})
+    admin_signer = await db.users.find_one({"id": fa.get("sent_by_admin_id")}, {"_id": 0, "password_hash": 0}) or {"name": "Wayne Byrd", "email": "wayne@byrd-co.com"}
+    # If signed, render the fully-executed version
+    signatures = None
+    if fa.get("status") == "signed":
+        signatures = {
+            "borrower_name": fa.get("borrower_signed_name"),
+            "borrower_signed_at": fa.get("borrower_signed_at"),
+            "borrower_signed_ip": fa.get("borrower_signed_ip"),
+            "broker_name": fa.get("broker_signed_name"),
+            "broker_signed_at": fa.get("broker_signed_at"),
+        }
+    pdf = render_fee_agreement_pdf(
+        scen, client, admin_signer, fa["broker_fee_pct"],
+        agreement_date=fa["agreement_date"],
+        signatures=signatures,
+    )
+    return Response(
+        content=pdf, media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="byrd-fee-agreement.pdf"'},
+    )
+
+
+class PublicSignBody(BaseModel):
+    typed_name: str = Field(min_length=2, max_length=200)
+    agree: bool
+
+
+@api.post("/fee-agreement/{token}/sign")
+async def public_fee_agreement_sign(token: str, body: PublicSignBody, request: Request, background: BackgroundTasks):
+    if not body.agree:
+        raise HTTPException(status_code=400, detail="You must confirm the acceptance checkbox to sign")
+    fa = await db.fee_agreements.find_one({"token": token}, {"_id": 0})
+    if not fa:
+        raise HTTPException(status_code=404, detail="Invalid link")
+    if fa["status"] != "sent":
+        raise HTTPException(status_code=409, detail=f"This agreement is already {fa['status']}")
+
+    scen = await db.scenarios.find_one({"id": fa["scenario_id"]}, {"_id": 0})
+    client = await db.users.find_one({"id": fa["client_id"]}, {"_id": 0, "password_hash": 0})
+    admin_signer = await db.users.find_one({"id": fa.get("sent_by_admin_id")}, {"_id": 0, "password_hash": 0}) or {}
+
+    now = datetime.now(timezone.utc).isoformat()
+    ip = (request.client.host if request.client else "") or ""
+    signatures = {
+        "borrower_name": body.typed_name.strip(),
+        "borrower_signed_at": now,
+        "borrower_signed_ip": ip,
+        "broker_name": admin_signer.get("name") or "Wayne Byrd",
+        "broker_signed_at": now,
+    }
+    # Render the fully-executed PDF and save it into the doc line
+    pdf_bytes = render_fee_agreement_pdf(
+        scen, client, admin_signer, fa["broker_fee_pct"],
+        agreement_date=fa["agreement_date"], signatures=signatures,
+    )
+    # Delete any prior file on the doc line to avoid stale copies
+    old = await db.client_docs.find_one({"id": fa["doc_id"]}, {"_id": 0, "file_id": 1})
+    if old and old.get("file_id"):
+        await db.client_files.delete_one({"id": old["file_id"]})
+    file_id = str(uuid.uuid4())
+    await db.client_files.insert_one({
+        "id": file_id,
+        "doc_id": fa["doc_id"],
+        "client_id": fa["client_id"],
+        "scenario_id": fa["scenario_id"],
+        "filename": "Byrd & CO — Fee Agreement (Signed).pdf",
+        "content_type": "application/pdf",
+        "size": len(pdf_bytes),
+        "data_b64": base64.b64encode(pdf_bytes).decode(),
+        "uploaded_at": now,
+        "system": True,
+    })
+    await db.client_docs.update_one(
+        {"id": fa["doc_id"]},
+        {"$set": {
+            "file_id": file_id,
+            "status": "reviewed",
+            "notes": f"Signed by {signatures['borrower_name']} and countersigned by {signatures['broker_name']} on {now.split('T')[0]}.",
+            "updated_at": now,
+        }},
+    )
+    await db.fee_agreements.update_one(
+        {"id": fa["id"]},
+        {"$set": {
+            "status": "signed",
+            "signed_at": now,
+            "borrower_signed_name": signatures["borrower_name"],
+            "borrower_signed_at": signatures["borrower_signed_at"],
+            "borrower_signed_ip": ip,
+            "broker_signed_name": signatures["broker_name"],
+            "broker_signed_at": signatures["broker_signed_at"],
+            "signed_file_id": file_id,
+        }},
+    )
+
+    # Confirmation emails to both borrower and the admin who sent it
+    sender_first = (admin_signer.get("name") or "Wayne").split(" ")[0]
+    scen_name = scen.get("name") or "your loan"
+    subj_c, html_c, text_c = _fee_agreement_signed_email(client.get("name") or "there", sender_first, scen_name)
+    if client.get("email"):
+        background.add_task(send_email, client["email"], subj_c, html_c, text_c, "fee_agreement_signed")
+    if admin_signer.get("email"):
+        subj_a = f"[Fee Agreement signed] {scen_name} — {client.get('name', 'client')}"
+        html_a = (
+            f"<p>Heads up — <b>{client.get('name') or 'the borrower'}</b> just signed the fee agreement for "
+            f"<b>{scen_name}</b>. It's countersigned on your behalf and stored on the scenario.</p>"
+        )
+        background.add_task(send_email, admin_signer["email"], subj_a, html_a, "", "fee_agreement_signed")
+
+    return {"ok": True, "status": "signed", "signed_at": now}
 
 
 @api.get("/admin/scenarios/{sid}/docs.zip")

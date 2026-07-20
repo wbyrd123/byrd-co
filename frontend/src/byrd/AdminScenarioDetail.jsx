@@ -9,7 +9,7 @@ import {
 import {
   ArrowLeft, Save, FileText, Trash2, Plus, Users, Share2, Copy,
   Download, Eye, EyeOff, Check, X, ExternalLink, Building2, RefreshCw,
-  Archive, Sliders, Sparkles,
+  Archive, Sliders, Sparkles, PenLine, Send, ShieldCheck, Clock, AlertCircle,
 } from "lucide-react";
 import ScenarioAIChat from "@/byrd/ScenarioAIChat";
 import ScenarioAIFab from "@/byrd/ScenarioAIFab";
@@ -646,9 +646,216 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
   );
 }
 
-// --------------- DOCS TAB ---------------
+// --------------- FEE AGREEMENT CARD ---------------
+function FeeAgreementCard({ scen, feeDoc, onReload }) {
+  const [fee, setFee] = useState(scen.broker_fee_pct != null ? String(scen.broker_fee_pct) : "");
+  const [feeStatus, setFeeStatus] = useState(null); // {status, signed_at, ...} — from /fee-agreement endpoint
+  const [busy, setBusy] = useState(false);
+
+  const loadStatus = () => {
+    api.get(`/admin/scenarios/${scen.id}/fee-agreement`)
+      .then((r) => setFeeStatus(r.data.fee_agreement))
+      .catch(() => setFeeStatus(null));
+  };
+  useEffect(() => {
+    loadStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scen.id, feeDoc?.status, feeDoc?.file_id]);
+
+  useEffect(() => {
+    setFee(scen.broker_fee_pct != null ? String(scen.broker_fee_pct) : "");
+  }, [scen.broker_fee_pct]);
+
+  const canSend = !!scen.client_id && !!fee && parseFloat(fee) > 0 && parseFloat(fee) <= 10;
+
+  const previewUrl = `${API_BASE}/admin/scenarios/${scen.id}/fee-agreement/preview.pdf`;
+  const preview = async () => {
+    if (!scen.client_id) { toast.error("Link a client first"); return; }
+    // Save fee value first if it's changed, so the preview reflects it
+    if (fee && parseFloat(fee) !== scen.broker_fee_pct) {
+      try { await api.patch(`/admin/scenarios/${scen.id}`, { broker_fee_pct: parseFloat(fee) }); } catch { /* ignore */ }
+    }
+    const res = await api.get(`/admin/scenarios/${scen.id}/fee-agreement/preview.pdf`, { responseType: "blob" });
+    const url = URL.createObjectURL(res.data);
+    window.open(url, "_blank");
+  };
+
+  const send = async () => {
+    if (!canSend) return;
+    if (feeStatus && feeStatus.status === "sent") {
+      if (!window.confirm("A signature request is already pending. Send a new one? The old link will stop working.")) return;
+    }
+    setBusy(true);
+    try {
+      await api.post(`/admin/scenarios/${scen.id}/fee-agreement/send`, { broker_fee_pct: parseFloat(fee) });
+      toast.success("Sent to borrower for signature");
+      loadStatus();
+      onReload && onReload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Send failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancel = async () => {
+    if (!window.confirm("Cancel the pending signature request? The client's link will stop working.")) return;
+    try {
+      await api.post(`/admin/scenarios/${scen.id}/fee-agreement/cancel`);
+      toast.success("Canceled");
+      loadStatus();
+      onReload && onReload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Cancel failed");
+    }
+  };
+
+  const isSigned = feeDoc?.status === "reviewed" && !!feeDoc?.file_id;
+  const isSent = !isSigned && feeStatus?.status === "sent";
+
+  const downloadSigned = async () => {
+    if (!feeDoc?.file?.id) return;
+    const res = await api.get(`/files/${feeDoc.file.id}`, { responseType: "blob" });
+    const url = URL.createObjectURL(res.data);
+    window.open(url, "_blank");
+  };
+
+  return (
+    <div className="byrd-card p-5 border-l-4 border-l-[#C89434]" data-testid="fee-agreement-card">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-md bg-[#F3EEE0] text-[#C89434] grid place-items-center border border-[#E4DFD1]">
+              <PenLine size={14} />
+            </div>
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Fee Agreement</div>
+              <div className="font-serif text-xl font-bold leading-tight">Broker fee &amp; e-signature</div>
+            </div>
+          </div>
+          <p className="text-sm text-[#6B6558] mt-2 max-w-xl">
+            Signed fee agreement must be in place before we shop this deal. Enter the fee, preview the draft,
+            then send to the borrower — Byrd &amp; CO countersigns automatically once they sign.
+          </p>
+        </div>
+        <FeeStatusBadge signed={isSigned} sent={isSent} feeStatus={feeStatus} feeDoc={feeDoc} />
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-[180px_1fr] gap-4">
+        <div>
+          <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Broker Fee %</label>
+          <div className="mt-1 relative">
+            <input
+              type="number"
+              min="0.01"
+              max="10"
+              step="0.05"
+              value={fee}
+              onChange={(e) => setFee(e.target.value)}
+              placeholder="e.g. 1.25"
+              disabled={isSigned}
+              data-testid="fee-pct-input"
+              className="w-full h-11 pl-3 pr-8 rounded-md border border-[#E4DFD1] bg-white text-sm disabled:bg-[#F3EEE0] disabled:cursor-not-allowed"
+            />
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-[#6B6558]">%</div>
+          </div>
+          <div className="text-[11px] text-[#6B6558] mt-1">Of total loan amount, paid at closing.</div>
+        </div>
+        <div className="flex items-end gap-2 flex-wrap">
+          {!isSigned && (
+            <>
+              <button
+                onClick={preview}
+                disabled={!scen.client_id}
+                className="byrd-btn byrd-btn-outline"
+                data-testid="fee-preview-btn"
+                title={scen.client_id ? "" : "Link a client to this scenario first"}
+              >
+                <FileText size={14} /> View Draft
+              </button>
+              {isSent ? (
+                <>
+                  <button
+                    onClick={send}
+                    disabled={busy || !canSend}
+                    className="byrd-btn byrd-btn-dark"
+                    data-testid="fee-resend-btn"
+                  >
+                    <RefreshCw size={14} /> {busy ? "Sending…" : "Resend"}
+                  </button>
+                  <button
+                    onClick={cancel}
+                    className="byrd-btn byrd-btn-outline text-[#8A1F1A] border-[#E38380] hover:bg-[#FADCDA]"
+                    data-testid="fee-cancel-btn"
+                  >
+                    <X size={14} /> Cancel Request
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={send}
+                  disabled={busy || !canSend}
+                  className="byrd-btn byrd-btn-dark"
+                  data-testid="fee-send-btn"
+                >
+                  <Send size={14} /> {busy ? "Sending…" : "Send for Signature"}
+                </button>
+              )}
+            </>
+          )}
+          {isSigned && (
+            <>
+              <button
+                onClick={downloadSigned}
+                className="byrd-btn byrd-btn-dark"
+                data-testid="fee-download-signed-btn"
+              >
+                <Download size={14} /> Download Signed
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {!scen.client_id && (
+        <div className="mt-3 text-[12px] text-[#8A1F1A] inline-flex items-center gap-1">
+          <AlertCircle size={12} /> Link a client to this scenario before sending the fee agreement.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FeeStatusBadge({ signed, sent, feeStatus, feeDoc }) {
+  if (signed) {
+    const when = feeDoc?.updated_at ? feeDoc.updated_at.slice(0, 10) : "";
+    return (
+      <div className="inline-flex items-center gap-1.5 rounded-full border border-[#245C25] bg-[#E5F0E5] text-[#245C25] px-3 py-1 text-[11px] font-semibold" data-testid="fee-status-signed">
+        <ShieldCheck size={12} /> Signed{when && ` · ${when}`}
+      </div>
+    );
+  }
+  if (sent) {
+    const when = feeStatus?.created_at ? feeStatus.created_at.slice(0, 10) : "";
+    return (
+      <div className="inline-flex items-center gap-1.5 rounded-full border border-[#C89434] bg-[#FBEFD3] text-[#7A5410] px-3 py-1 text-[11px] font-semibold" data-testid="fee-status-sent">
+        <Clock size={12} /> Awaiting borrower{when && ` · sent ${when}`}
+      </div>
+    );
+  }
+  return (
+    <div className="inline-flex items-center gap-1.5 rounded-full border border-[#E4DFD1] bg-white text-[#6B6558] px-3 py-1 text-[11px]" data-testid="fee-status-not-sent">
+      Not sent
+    </div>
+  );
+}
+
+
 function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility, onCopyDocs, onReload }) {
-  const docs = scen.docs || scen.client_docs || [];
+  const allDocs = scen.docs || scen.client_docs || [];
+  // Split the pinned fee-agreement line out — it renders in its own card at the top
+  const feeAgreementDoc = allDocs.find((d) => d.label === "Signed Fee Agreement");
+  const docs = allDocs.filter((d) => d.label !== "Signed Fee Agreement");
   const [copyOpen, setCopyOpen] = useState(false);
   const uploaded = docs.filter((d) => d.file_id).length;
   const reviewed = docs.filter((d) => d.status === "reviewed").length;
@@ -656,6 +863,8 @@ function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility,
 
   return (
     <div className="space-y-4">
+      <FeeAgreementCard scen={scen} feeDoc={feeAgreementDoc} onReload={onReload} />
+
       <div className="byrd-card p-5 flex items-center justify-between flex-wrap gap-3">
         <div className="min-w-0">
           <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Documents for this scenario</div>

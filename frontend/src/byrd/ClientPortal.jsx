@@ -215,6 +215,7 @@ export default function ClientPortal() {
                               <div className="space-y-2">
                                 {list.map((d) => {
                                   const hasFile = !!d.file;
+                                  const isFeeAgreement = d.label === "Signed Fee Agreement";
                                   const iconMap = {
                                     pending: <Circle size={16} className="text-[#6B6558]" />,
                                     uploaded: <FileText size={16} className="text-[#23446E]" />,
@@ -225,7 +226,7 @@ export default function ClientPortal() {
                                     <div
                                       key={d.id}
                                       data-testid={`client-doc-${d.id}`}
-                                      className="border border-[#E4DFD1] rounded-md p-3 md:p-4 flex flex-col md:flex-row md:items-center gap-3 bg-white"
+                                      className={`border ${isFeeAgreement ? "border-[#C89434] bg-[#FBEFD3]/40" : "border-[#E4DFD1] bg-white"} rounded-md p-3 md:p-4 flex flex-col md:flex-row md:items-center gap-3`}
                                     >
                                       <div className="w-9 h-9 shrink-0 rounded-md bg-[#F3EEE0] border border-[#E4DFD1] grid place-items-center">
                                         {iconMap[d.status]}
@@ -234,6 +235,9 @@ export default function ClientPortal() {
                                         <div className="flex items-center gap-2 flex-wrap">
                                           <div className="font-semibold">{d.label}</div>
                                           {d.required && <span className="text-[10px] font-mono uppercase text-[#C89434] tracking-widest">Required</span>}
+                                          {isFeeAgreement && (
+                                            <span className="text-[10px] font-mono uppercase text-[#7A5410] tracking-widest">Managed by Byrd &amp; CO</span>
+                                          )}
                                         </div>
                                         {hasFile && (
                                           <div className="text-xs text-[#6B6558] mt-1 truncate">
@@ -241,7 +245,9 @@ export default function ClientPortal() {
                                           </div>
                                         )}
                                         {d.notes && (
-                                          <div className="text-xs text-[#8A1F1A] mt-1">Note from broker: {d.notes}</div>
+                                          <div className={`text-xs mt-1 ${isFeeAgreement ? "text-[#6B6558]" : "text-[#8A1F1A]"}`}>
+                                            {isFeeAgreement ? "" : "Note from broker: "}{d.notes}
+                                          </div>
                                         )}
                                       </div>
                                       <div className="flex items-center gap-2 flex-wrap">
@@ -262,24 +268,26 @@ export default function ClientPortal() {
                                             <Download size={12} /> View
                                           </a>
                                         )}
-                                        <label
-                                          className={`byrd-btn h-9 px-3 text-xs cursor-pointer ${
-                                            hasFile ? "byrd-btn-outline" : "byrd-btn-primary"
-                                          }`}
-                                          data-testid={`upload-${d.id}`}
-                                        >
-                                          <Upload size={12} />
-                                          {uploading === d.id ? "Uploading…" : hasFile ? "Replace" : "Upload"}
-                                          <input
-                                            type="file" className="hidden"
-                                            onChange={(e) => {
-                                              const f = e.target.files?.[0];
-                                              if (f) handleUpload(d.id, f);
-                                              e.target.value = "";
-                                            }}
-                                            disabled={uploading === d.id}
-                                          />
-                                        </label>
+                                        {!isFeeAgreement && (
+                                          <label
+                                            className={`byrd-btn h-9 px-3 text-xs cursor-pointer ${
+                                              hasFile ? "byrd-btn-outline" : "byrd-btn-primary"
+                                            }`}
+                                            data-testid={`upload-${d.id}`}
+                                          >
+                                            <Upload size={12} />
+                                            {uploading === d.id ? "Uploading…" : hasFile ? "Replace" : "Upload"}
+                                            <input
+                                              type="file" className="hidden"
+                                              onChange={(e) => {
+                                                const f = e.target.files?.[0];
+                                                if (f) handleUpload(d.id, f);
+                                                e.target.value = "";
+                                              }}
+                                              disabled={uploading === d.id}
+                                            />
+                                          </label>
+                                        )}
                                       </div>
                                     </div>
                                   );
