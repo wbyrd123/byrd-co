@@ -2785,6 +2785,106 @@ async def _crm_snapshot_for_assistant() -> dict:
     }
 
 
+STALLED_STATUSES = ("draft", "shopping")
+STALLED_DAYS_THRESHOLD = 7
+STALLED_DOC_PCT_THRESHOLD = 30  # <30% uploaded
+STALLED_SNOOZE_DAYS = 7
+
+
+def _iso_days_ago(iso: Optional[str], now: datetime) -> Optional[int]:
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00")) if isinstance(iso, str) else iso
+        return (now - dt).days
+    except Exception:
+        return None
+
+
+async def _stalled_scenarios_for_admin(admin_id: str) -> list[dict]:
+    """Return scenarios that look silently stuck for THIS admin's dashboard.
+    Criteria (all must hold):
+      - status in draft/shopping
+      - last activity (max of scenario.updated_at and latest doc.updated_at) is >= 7 days ago
+      - upload pct < 30% (0 counts as 0% — never uploaded)
+      - not snoozed by this admin
+    Sorted by days_since_activity descending (most stuck first)."""
+    now = datetime.now(timezone.utc)
+    scens = await db.scenarios.find(
+        {"status": {"$in": list(STALLED_STATUSES)}},
+        {"_id": 0, "id": 1, "name": 1, "status": 1, "client_id": 1, "loan_request": 1, "updated_at": 1},
+    ).to_list(500)
+    if not scens:
+        return []
+    scen_ids = [s["id"] for s in scens]
+
+    # Roll up doc counts per scenario in one pass
+    doc_stats: dict[str, dict] = {sid: {"total": 0, "uploaded": 0, "last_activity": None} for sid in scen_ids}
+    async for d in db.client_docs.find(
+        {"scenario_id": {"$in": scen_ids}},
+        {"_id": 0, "scenario_id": 1, "status": 1, "updated_at": 1},
+    ):
+        b = doc_stats[d["scenario_id"]]
+        b["total"] += 1
+        if d.get("status") in ("uploaded", "reviewed"):
+            b["uploaded"] += 1
+        ua = d.get("updated_at")
+        if ua and (b["last_activity"] is None or ua > b["last_activity"]):
+            b["last_activity"] = ua
+
+    # Load client names for enrichment
+    client_ids = list({s.get("client_id") for s in scens if s.get("client_id")})
+    clients_by_id: dict[str, dict] = {}
+    if client_ids:
+        async for u in db.users.find({"id": {"$in": client_ids}}, {"_id": 0, "id": 1, "name": 1, "email": 1}):
+            clients_by_id[u["id"]] = u
+
+    # Per-admin snoozes
+    snooze_map: dict[str, str] = {}
+    async for sd in db.scenario_snoozes.find({"admin_id": admin_id}, {"_id": 0, "scenario_id": 1, "snoozed_until": 1}):
+        snooze_map[sd["scenario_id"]] = sd.get("snoozed_until", "")
+
+    stalled: list[dict] = []
+    for s in scens:
+        # Effective last activity = max(scenario.updated_at, latest doc.updated_at)
+        d_stats = doc_stats.get(s["id"], {"total": 0, "uploaded": 0, "last_activity": None})
+        last_scen = s.get("updated_at")
+        last_doc = d_stats["last_activity"]
+        candidates = [x for x in [last_scen, last_doc] if x]
+        latest = max(candidates) if candidates else None
+        days_since = _iso_days_ago(latest, now)
+        if days_since is None or days_since < STALLED_DAYS_THRESHOLD:
+            continue
+        total = d_stats["total"]
+        uploaded = d_stats["uploaded"]
+        pct = int(round((uploaded / total) * 100)) if total else 0
+        if pct >= STALLED_DOC_PCT_THRESHOLD:
+            continue
+        # Honor snooze
+        snoozed_until = snooze_map.get(s["id"])
+        if snoozed_until:
+            days_left = _iso_days_ago(snoozed_until, now)
+            if days_left is not None and days_left < 0:
+                # snoozed_until is in the future → skip
+                continue
+        client = clients_by_id.get(s.get("client_id") or "") if s.get("client_id") else None
+        stalled.append({
+            "scenario_id": s["id"],
+            "scenario_name": s.get("name") or "Untitled",
+            "status": s.get("status"),
+            "loan_type": (s.get("loan_request") or {}).get("loan_type"),
+            "client_id": s.get("client_id"),
+            "client_name": (client or {}).get("name"),
+            "client_email": (client or {}).get("email"),
+            "days_since_activity": days_since,
+            "doc_total": total,
+            "doc_uploaded": uploaded,
+            "doc_pct": pct,
+        })
+    stalled.sort(key=lambda x: x["days_since_activity"], reverse=True)
+    return stalled
+
+
 ASSISTANT_SYSTEM_PROMPT = """You are the personal assistant to a commercial real estate broker at Byrd & CO.
 You are warm, concise, and proactive. You address the broker by first name.
 
@@ -2797,6 +2897,8 @@ At the top of every turn you receive:
 - A snapshot of the shared **Contacts CRM** (rolodex): total, tag breakdown, unsubscribed count,
   and up to 15 STALE contacts (haven't been contacted in 60+ days, with valid emails). You also
   see when the last marketing email went out (days_since_last_marketing).
+- A list of **STALLED SCENARIOS** — active deals (draft/shopping) that haven't moved in 7+ days
+  AND have less than 30% docs uploaded. This is where deals silently die.
 
 # What you do
 1. Have a natural conversation. Keep responses short and friendly.
@@ -2827,6 +2929,14 @@ At the top of every turn you receive:
     and bulk sending); the broker will review and send from there. Pick a `target_tags` filter
     when it fits (e.g. `["referral"]` or `["past sponsor"]`); use `[]` to target everyone with
     a valid email.
+12. **Pipeline coaching (stalled deals).** Look at `stalled_scenarios`. If any exist, the FIRST time
+    in a conversation, mention them in ONE gentle line — pick the top 1-2 by days_since_activity
+    (e.g. "Also — Rod's MF Refi hasn't moved in 12 days and only 2/17 docs are up. Want me to draft
+    a follow-up to him?"). Do NOT list all of them. Do NOT repeat the reminder every turn.
+    If the broker says yes to a follow-up, DRAFT an `email_draft` addressed to `client_email` with
+    a warm, one-paragraph nudge — not pushy — asking if they need help getting the remaining docs
+    uploaded. If the broker says "snooze it" or "not now", acknowledge without emitting any block
+    (the UI has a snooze button for that).
 
 # Response format
 Write your natural-language reply first. Then, ONLY IF you have structured actions to take,
@@ -2897,7 +3007,7 @@ Rules:
 """
 
 
-def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[dict], teammates: List[dict], crm: dict) -> str:
+def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[dict], teammates: List[dict], crm: dict, stalled: List[dict]) -> str:
     today = datetime.now(timezone.utc)
     slim_tasks = [
         {
@@ -2932,6 +3042,7 @@ def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[d
         "teammates": slim_teammates,
         "contacts_stats": crm.get("contacts_stats", {}),
         "stale_contacts": crm.get("stale_contacts", []),
+        "stalled_scenarios": stalled[:8],  # cap to keep prompt lean
     }
     return (
         "Here is the current state (READ ONLY — do not echo this back):\n\n"
@@ -3197,10 +3308,11 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
         {"_id": 0, "id": 1, "name": 1, "email": 1},
     ).to_list(50)
     crm = await _crm_snapshot_for_assistant()
+    stalled = await _stalled_scenarios_for_admin(admin["id"])
 
     session_id = f"assistant::{admin['id']}"
     chat = _make_scenario_ai_chat(session_id, ASSISTANT_SYSTEM_PROMPT)
-    turn_context = _assistant_turn_context(admin, open_tasks, clients, teammates, crm)
+    turn_context = _assistant_turn_context(admin, open_tasks, clients, teammates, crm, stalled)
     user_text = f"{turn_context}\n\nBroker message:\n{body.message}"
 
     async def event_gen():
@@ -3454,6 +3566,36 @@ async def assistant_marketing_accept(sid: str, admin=Depends(require_admin)):
         )
         doc["status"] = "accepted"
     return doc
+
+
+# ---------- Stalled scenarios (pipeline coach) ----------
+@api.get("/admin/assistant/stalled-scenarios")
+async def assistant_stalled_scenarios(admin=Depends(require_admin)):
+    """Deals in draft/shopping status with 7+ days of inactivity AND <30% docs uploaded.
+    Per-admin snoozes are respected. Sorted worst-first."""
+    scens = await _stalled_scenarios_for_admin(admin["id"])
+    return {"scenarios": scens, "count": len(scens)}
+
+
+@api.post("/admin/assistant/stalled-scenarios/{scenario_id}/snooze")
+async def assistant_stalled_snooze(scenario_id: str, admin=Depends(require_admin)):
+    """Silence this scenario in the stalled banner for 7 days (per admin)."""
+    scen = await db.scenarios.find_one({"id": scenario_id}, {"_id": 0, "id": 1})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    until = (datetime.now(timezone.utc) + timedelta(days=STALLED_SNOOZE_DAYS)).isoformat()
+    await db.scenario_snoozes.update_one(
+        {"admin_id": admin["id"], "scenario_id": scenario_id},
+        {"$set": {
+            "admin_id": admin["id"],
+            "scenario_id": scenario_id,
+            "snoozed_until": until,
+            "snoozed_at": now_iso(),
+        }},
+        upsert=True,
+    )
+    return {"ok": True, "snoozed_until": until}
+
 
 
 class EmailTestRequest(BaseModel):

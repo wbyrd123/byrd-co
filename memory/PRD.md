@@ -37,6 +37,13 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
 - P3: Real Marketplace (lender self-onboarding + term-sheet capture)
 
+### Personal Assistant × pipeline coach (stalled deals) — SHIPPED 2026-02
+- New backend helper `_stalled_scenarios_for_admin(admin_id)` — flags scenarios in draft/shopping status where the latest activity (max of scenario.updated_at and any doc.updated_at) is 7+ days ago AND fewer than 30% of docs are uploaded.
+- Injected into the assistant turn context (`stalled_scenarios`, capped at 8) — Claude can answer "which deals are stuck?" and, per the updated system prompt, will gently mention the top 1-2 the first time in a conversation and offer to draft a follow-up email.
+- **Stalled deals banner** on `/admin/assistant` (below the marketing nudge) — subtle red-tinted card that lists each stuck deal with `{days_silent} · {uploaded}/{total} docs ({pct}%)`. Three per-row actions: **Draft follow-up** (prefills a fully-specified prompt into the assistant chat box), **Open** (deep-link to the scenario), **Snooze** (7-day per-admin silence via `scenario_snoozes` collection).
+- New endpoints: `GET /admin/assistant/stalled-scenarios`, `POST /admin/assistant/stalled-scenarios/{id}/snooze`.
+- Stalled list auto-refreshes after every assistant chat turn — if the broker completes an action inside chat, the banner updates instantly.
+
 ### Scenario-owned document folders + client delete — SHIPPED 2026-02
 - **Structural change:** document checklists moved from client → scenario. Each loan (Purchase, Refi, Construction, Bridge, SBA) has its own folder now, so a client with two deals (e.g. hotel purchase + MF refi) sees two independent doc lists.
 - **Preset checklists** picked at scenario creation: Purchase, Refinance, Construction, Bridge, SBA, or Blank. Broker can then add/remove lines per scenario.

@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import {
   Sparkles, Send, RotateCcw, Check, Mail, User, Calendar, X, AlertCircle,
   ChevronRight, Edit3, Plus, ArrowRight, Users as UsersIcon, Reply,
-  Megaphone, TrendingUp, RefreshCw,
+  Megaphone, TrendingUp, RefreshCw, Clock, ExternalLink,
 } from "lucide-react";
 
 const firstName = (u) => (u?.name || u?.email || "there").split(" ")[0].split("@")[0];
@@ -32,6 +32,8 @@ export default function AdminAssistant() {
   const [teammates, setTeammates] = useState([]);
   const [mktStatus, setMktStatus] = useState(null); // { days_since_last_marketing, needs_suggestion, pending_suggestion, ... }
   const [mktBusy, setMktBusy] = useState(false);
+  const [stalled, setStalled] = useState([]);
+  const [stalledLoaded, setStalledLoaded] = useState(false);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [streaming, setStreaming] = useState("");
@@ -98,8 +100,37 @@ export default function AdminAssistant() {
     if (user) loadAll();
     api.get("/admin/assistant/teammates").then((r) => setTeammates(r.data)).catch(() => {});
     api.get("/admin/assistant/marketing-status").then((r) => setMktStatus(r.data)).catch(() => {});
+    api.get("/admin/assistant/stalled-scenarios")
+      .then((r) => { setStalled(r.data.scenarios || []); setStalledLoaded(true); })
+      .catch(() => setStalledLoaded(true));
     return () => controllerRef.current?.abort();
   }, [user]);
+
+  const refreshStalled = () =>
+    api.get("/admin/assistant/stalled-scenarios")
+      .then((r) => setStalled(r.data.scenarios || []))
+      .catch(() => {});
+
+  const snoozeStalled = async (scenarioId, name) => {
+    try {
+      await api.post(`/admin/assistant/stalled-scenarios/${scenarioId}/snooze`);
+      toast.success(`Snoozed "${name}" for 7 days`);
+      refreshStalled();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Snooze failed");
+    }
+  };
+
+  const draftFollowup = (s) => {
+    // Send a natural-language message to the assistant asking it to draft a follow-up
+    if (!s.client_email) {
+      toast.error("No email on file for this client — add one first");
+      return;
+    }
+    const msg = `Draft a warm, one-paragraph follow-up email to ${s.client_name || "the borrower"} (${s.client_email}) about their "${s.scenario_name}" deal — it's been ${s.days_since_activity} days with only ${s.doc_uploaded}/${s.doc_total} docs uploaded. Ask if they need help getting the rest across the finish line.`;
+    setInput(msg);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  };
 
   const refreshMktStatus = () =>
     api.get("/admin/assistant/marketing-status").then((r) => setMktStatus(r.data)).catch(() => {});
@@ -217,6 +248,7 @@ export default function AdminAssistant() {
             setStreaming("");
             // Refresh tasks + marketing status (Claude may have proposed a new suggestion)
             api.get("/admin/assistant/tasks").then((r) => setBuckets(r.data));
+            refreshStalled();
             if (evt.marketing_suggestion) refreshMktStatus();
           } else if (evt.type === "error") {
             throw new Error(evt.message);
@@ -388,6 +420,14 @@ export default function AdminAssistant() {
             onGenerate={generateSuggestion}
             onAccept={acceptSuggestion}
             onDismiss={dismissSuggestion}
+          />
+
+          {/* Stalled deals — pipeline coach */}
+          <StalledDealsBanner
+            deals={stalled}
+            loaded={stalledLoaded}
+            onDraft={draftFollowup}
+            onSnooze={snoozeStalled}
           />
 
           <div ref={scrollerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-[#FBF8F1]">
@@ -589,6 +629,102 @@ function Bubble({ m, onSendEmail, onCreateClient, onAcceptSuggestion, onDismissS
     </div>
   );
 }
+
+function StalledDealsBanner({ deals, loaded, onDraft, onSnooze }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!loaded || !deals || deals.length === 0) return null;
+  const top = deals[0];
+  const rest = deals.slice(1);
+
+  return (
+    <div className="border-b border-[#E4DFD1] px-4 py-3 bg-[#FADCDA]/25" data-testid="stalled-deals-banner">
+      <div className="flex items-start gap-2">
+        <div className="w-8 h-8 shrink-0 rounded-full bg-[#FADCDA] text-[#8A1F1A] grid place-items-center border border-[#E38380]">
+          <Clock size={14} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="font-serif text-sm font-bold text-[#8A1F1A]">
+            {deals.length} deal{deals.length === 1 ? "" : "s"} silently stuck.
+          </div>
+          <div className="text-[11px] text-[#6B6558] mt-0.5">
+            Draft / shopping for 7+ days with less than 30% of docs uploaded. This is where deals go to die.
+          </div>
+
+          <StalledRow deal={top} onDraft={onDraft} onSnooze={onSnooze} />
+
+          {rest.length > 0 && !expanded && (
+            <button
+              onClick={() => setExpanded(true)}
+              className="mt-1 text-[11px] text-[#7A5410] hover:text-[#1A1A1A] underline"
+              data-testid="stalled-show-more"
+            >
+              + {rest.length} more
+            </button>
+          )}
+          {expanded && rest.map((d) => (
+            <StalledRow key={d.scenario_id} deal={d} onDraft={onDraft} onSnooze={onSnooze} />
+          ))}
+          {expanded && rest.length > 0 && (
+            <button
+              onClick={() => setExpanded(false)}
+              className="mt-1 text-[11px] text-[#6B6558] hover:text-[#1A1A1A] underline"
+              data-testid="stalled-show-less"
+            >
+              Show less
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function StalledRow({ deal, onDraft, onSnooze }) {
+  return (
+    <div className="mt-2 border border-[#E4DFD1] bg-white rounded-md p-2.5 flex items-center justify-between gap-2 flex-wrap" data-testid={`stalled-row-${deal.scenario_id}`}>
+      <div className="min-w-0 flex-1">
+        <div className="font-semibold text-sm truncate">
+          {deal.scenario_name}
+          {deal.client_name && <span className="text-[#6B6558] font-normal"> · {deal.client_name}</span>}
+        </div>
+        <div className="text-[11px] text-[#6B6558] mt-0.5 flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[#8A1F1A]">{deal.days_since_activity}d silent</span>
+          <span>·</span>
+          <span className="font-mono">{deal.doc_uploaded}/{deal.doc_total} docs ({deal.doc_pct}%)</span>
+          {deal.loan_type && <span className="byrd-chip byrd-chip-gold text-[9px]">{deal.loan_type}</span>}
+        </div>
+      </div>
+      <div className="flex items-center gap-1 flex-wrap shrink-0">
+        <button
+          onClick={() => onDraft(deal)}
+          className="h-7 px-2 rounded-md border border-[#E4DFD1] hover:bg-[#F3EEE0] text-[11px] inline-flex items-center gap-1"
+          data-testid={`stalled-draft-${deal.scenario_id}`}
+          disabled={!deal.client_email}
+          title={deal.client_email ? "Draft a follow-up email via the assistant" : "No email on file for this client"}
+        >
+          <Mail size={11} /> Draft follow-up
+        </button>
+        <a
+          href={`/admin/scenarios/${deal.scenario_id}`}
+          className="h-7 px-2 rounded-md border border-[#E4DFD1] hover:bg-[#F3EEE0] text-[11px] inline-flex items-center gap-1 text-[#2A2A2A]"
+          data-testid={`stalled-open-${deal.scenario_id}`}
+        >
+          <ExternalLink size={11} /> Open
+        </a>
+        <button
+          onClick={() => onSnooze(deal.scenario_id, deal.scenario_name)}
+          className="h-7 px-2 rounded-md border border-[#E4DFD1] hover:bg-[#F3EEE0] text-[11px] text-[#6B6558] inline-flex items-center gap-1"
+          data-testid={`stalled-snooze-${deal.scenario_id}`}
+          title="Silence for 7 days"
+        >
+          <X size={11} /> Snooze
+        </button>
+      </div>
+    </div>
+  );
+}
+
 
 function MarketingNudge({ status, busy, onGenerate, onAccept, onDismiss }) {
   if (!status) return null;
