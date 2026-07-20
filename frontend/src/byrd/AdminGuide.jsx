@@ -301,6 +301,9 @@ export default function AdminGuide() {
         </Step>
 
         <Step n="3" title="What the borrower sees.">
+          <p>Two ways to sign — both use the same token so the borrower can pick whichever is easier:</p>
+          <p><b>From the email:</b> big "Review &amp; Sign" button in the Postmark email you triggered.</p>
+          <p><b>From their portal:</b> when they log in, the pinned "Signed Fee Agreement" row shows a gold <b>Sign Now</b> button that opens the same signing page.</p>
           <p>The signing page (public, token-gated at <InlineCode>/fee-agreement/{"{token}"}</InlineCode>) shows the full PDF on the left and a summary sidebar on the right (borrower, entity, property, type, loan, fee, date, broker). To sign they:</p>
           <p>1. Type their full legal name &mdash; a cursive-style preview renders live so they see their signature.</p>
           <p>2. Tick the consent checkbox (which explicitly restates the fee %).</p>
@@ -309,8 +312,9 @@ export default function AdminGuide() {
 
         <Step n="4" title="Byrd & CO countersigns automatically.">
           <p>The moment the borrower submits, the backend:</p>
-          <p>&mdash; Fills the signature block in the PDF with both parties' typed names (italic script font), the borrower's signing timestamp and IP for audit, and Wayne or Caleb's name on the broker side.</p>
-          <p>&mdash; Stores that fully-executed PDF as the file on the <b>Signed Fee Agreement</b> line, marks it <b>Reviewed</b>.</p>
+          <p>&mdash; Fills the signature block with both parties' typed names (italic script font).</p>
+          <p>&mdash; Appends a <b>Certificate of Completion</b> as the last page: document title/date, fee %, borrower typed name / email / UTC timestamp / IP / browser, broker signer / method, plus an ESIGN Act + Texas UETA citation stating the electronic signatures have the same legal effect as ink.</p>
+          <p>&mdash; Stores that fully-executed PDF as the file on the <b>Signed Fee Agreement</b> line, marks it <b>Reviewed</b>, and records a SHA-256 hash of the executed document for tamper-evidence.</p>
           <p>&mdash; Emails a confirmation to the borrower and a "signed" alert to the broker who sent it.</p>
           <p>The Documents tab card flips to <b>Signed &middot; {"{date}"}</b> with a <b>Download Signed</b> button. Same signed PDF is downloadable by the borrower from their portal too.</p>
         </Step>

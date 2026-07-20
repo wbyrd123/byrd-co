@@ -9,6 +9,7 @@ Powers:
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import hashlib
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -1028,9 +1029,19 @@ async def client_me(user=Depends(require_client)):
         if file_ids:
             async for f in db.client_files.find({"id": {"$in": file_ids}}, {"_id": 0, "data_b64": 0}):
                 files_by_id[f["id"]] = f
+        # Fetch pending fee agreements so we can surface a Sign Now action on the portal line
+        pending_by_scen: Dict[str, str] = {}
+        async for fa in db.fee_agreements.find(
+            {"scenario_id": {"$in": scen_ids}, "status": "sent"},
+            {"_id": 0, "scenario_id": 1, "token": 1},
+        ):
+            pending_by_scen[fa["scenario_id"]] = fa["token"]
         for d in docs:
             if d.get("file_id") and d["file_id"] in files_by_id:
                 d["file"] = files_by_id[d["file_id"]]
+            # Expose the signing token ONLY on the borrower's own pinned fee-agreement line
+            if d.get("label") == FEE_AGREEMENT_DOC_LABEL and d["scenario_id"] in pending_by_scen:
+                d["pending_sign_token"] = pending_by_scen[d["scenario_id"]]
             docs_by_scen.setdefault(d["scenario_id"], []).append(d)
     out_scenarios = []
     for s in scenarios:
@@ -2209,13 +2220,110 @@ def render_fee_agreement_pdf(
     story.append(Spacer(1, 4))
     story.append(sig_t)
 
-    if signatures and signatures.get("borrower_signed_ip"):
-        story.append(Spacer(1, 6))
+    # Certificate of Completion — appended only for the fully-executed copy
+    if signatures and signatures.get("borrower_name") and signatures.get("broker_name"):
+        from reportlab.platypus import PageBreak
+        story.append(PageBreak())
+        cert_h = ParagraphStyle("cert_h", parent=ss["Heading1"], fontName="Helvetica-Bold",
+                                fontSize=13, alignment=1, spaceAfter=6, textColor=colors.HexColor("#1A1A1A"))
+        cert_sub = ParagraphStyle("cert_sub", parent=ss["BodyText"], fontName="Helvetica",
+                                  fontSize=9, alignment=1, leading=12, textColor=colors.HexColor("#6B6558"),
+                                  spaceAfter=14)
+        cert_lbl = ParagraphStyle("cert_lbl", parent=ss["BodyText"], fontName="Helvetica-Bold",
+                                  fontSize=9, leading=11, textColor=colors.HexColor("#6B6558"))
+        cert_val = ParagraphStyle("cert_val", parent=ss["BodyText"], fontName="Helvetica",
+                                  fontSize=9.5, leading=12, textColor=colors.HexColor("#1A1A1A"))
+
+        story.append(Paragraph("CERTIFICATE OF COMPLETION", cert_h))
         story.append(Paragraph(
-            f"<font size='7.5' color='#6B6558'>Signature audit: borrower signed electronically at "
-            f"{signatures.get('borrower_signed_at','')} (IP {signatures['borrower_signed_ip']}). "
-            f"Broker countersigned electronically at {signatures.get('broker_signed_at','')}.</font>",
-            body,
+            f"Electronic Signature Audit &middot; Byrd &amp; CO &middot; Generated "
+            f"{datetime.now(timezone.utc).strftime('%B %d, %Y at %H:%M:%S UTC')}",
+            cert_sub,
+        ))
+
+        doc_title = signatures.get("document_title") or "Byrd & CO Fee Agreement"
+        header_rows = [
+            [Paragraph("<b>Document</b>", cert_lbl), Paragraph(doc_title, cert_val)],
+            [Paragraph("<b>Agreement Date</b>", cert_lbl), Paragraph(agreement_date or "", cert_val)],
+            [Paragraph("<b>Broker Fee</b>", cert_lbl),
+             Paragraph(f"{fee_pct:g}% of total loan amount" if fee_pct is not None else "—", cert_val)],
+            [Paragraph("<b>Broker</b>", cert_lbl),
+             Paragraph(f"Byrd &amp; CO ({admin_signer.get('email') or ''})", cert_val)],
+            [Paragraph("<b>Borrower</b>", cert_lbl),
+             Paragraph(f"{client.get('name') or ''} ({client.get('email') or ''})", cert_val)],
+        ]
+        ht = Table(header_rows, colWidths=[1.6 * inch, 5.1 * inch])
+        ht.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4DFD1")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#EFE9DA")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(ht)
+        story.append(Spacer(1, 12))
+
+        # Borrower signature event
+        story.append(Paragraph("<b>Borrower — Signature Event</b>",
+                               ParagraphStyle("bh", parent=ss["Heading3"], fontName="Helvetica-Bold",
+                                              fontSize=10.5, textColor=colors.HexColor("#1A1A1A"), spaceAfter=4)))
+        borrower_rows = [
+            [Paragraph("<b>Typed Name</b>", cert_lbl), Paragraph(signatures.get("borrower_name") or "", cert_val)],
+            [Paragraph("<b>Email</b>", cert_lbl), Paragraph(signatures.get("borrower_email") or client.get("email") or "", cert_val)],
+            [Paragraph("<b>Signed At (UTC)</b>", cert_lbl), Paragraph(signatures.get("borrower_signed_at") or "", cert_val)],
+            [Paragraph("<b>IP Address</b>", cert_lbl), Paragraph(signatures.get("borrower_signed_ip") or "—", cert_val)],
+            [Paragraph("<b>Browser / Device</b>", cert_lbl),
+             Paragraph((signatures.get("borrower_signed_user_agent") or "—")[:200], cert_val)],
+            [Paragraph("<b>Method</b>", cert_lbl),
+             Paragraph("Byrd &amp; CO web portal — typed-name electronic signature with express affirmative consent.", cert_val)],
+        ]
+        bt = Table(borrower_rows, colWidths=[1.6 * inch, 5.1 * inch])
+        bt.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4DFD1")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#EFE9DA")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(bt)
+        story.append(Spacer(1, 12))
+
+        # Broker signature event
+        story.append(Paragraph("<b>Broker — Signature Event</b>",
+                               ParagraphStyle("bh2", parent=ss["Heading3"], fontName="Helvetica-Bold",
+                                              fontSize=10.5, textColor=colors.HexColor("#1A1A1A"), spaceAfter=4)))
+        broker_rows = [
+            [Paragraph("<b>Signed On Behalf Of</b>", cert_lbl), Paragraph("Byrd &amp; CO", cert_val)],
+            [Paragraph("<b>Signer</b>", cert_lbl),
+             Paragraph(f"{signatures.get('broker_name','')} ({signatures.get('broker_email') or admin_signer.get('email') or ''})", cert_val)],
+            [Paragraph("<b>Signed At (UTC)</b>", cert_lbl), Paragraph(signatures.get("broker_signed_at") or "", cert_val)],
+            [Paragraph("<b>Method</b>", cert_lbl),
+             Paragraph("Countersigned automatically by Byrd &amp; CO upon receipt of borrower's affirmative electronic signature.", cert_val)],
+        ]
+        bkt = Table(broker_rows, colWidths=[1.6 * inch, 5.1 * inch])
+        bkt.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4DFD1")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#EFE9DA")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(bkt)
+        story.append(Spacer(1, 14))
+
+        story.append(Paragraph(
+            "<font size='8' color='#6B6558'>This Certificate of Completion is issued by Byrd &amp; CO as evidence "
+            "that both parties executed the foregoing Commercial Loan Broker Fee Agreement electronically. "
+            "The typed-name electronic signatures captured above satisfy the requirements of the U.S. ESIGN Act "
+            "(15 U.S.C. &sect;7001 et seq.) and the Texas Uniform Electronic Transactions Act (Tex. Bus. &amp; Com. "
+            "Code Ann. Ch. 322), and carry the same legal effect as a handwritten (&ldquo;wet&rdquo;) signature.</font>",
+            cert_val,
         ))
 
     doc.build(story)
@@ -2466,8 +2574,12 @@ async def public_fee_agreement_pdf(token: str):
             "borrower_name": fa.get("borrower_signed_name"),
             "borrower_signed_at": fa.get("borrower_signed_at"),
             "borrower_signed_ip": fa.get("borrower_signed_ip"),
+            "borrower_signed_user_agent": fa.get("borrower_signed_user_agent"),
+            "borrower_email": fa.get("borrower_email_at_send"),
             "broker_name": fa.get("broker_signed_name"),
             "broker_signed_at": fa.get("broker_signed_at"),
+            "broker_email": fa.get("sent_by_admin_email"),
+            "document_title": f"Byrd & CO Fee Agreement — {scen.get('name') or ''}",
         }
     pdf = render_fee_agreement_pdf(
         scen, client, admin_signer, fa["broker_fee_pct"],
@@ -2501,14 +2613,19 @@ async def public_fee_agreement_sign(token: str, body: PublicSignBody, request: R
 
     now = datetime.now(timezone.utc).isoformat()
     ip = (request.client.host if request.client else "") or ""
+    user_agent = request.headers.get("user-agent", "")[:400]
     signatures = {
         "borrower_name": body.typed_name.strip(),
         "borrower_signed_at": now,
         "borrower_signed_ip": ip,
+        "borrower_signed_user_agent": user_agent,
+        "borrower_email": client.get("email"),
         "broker_name": admin_signer.get("name") or "Wayne Byrd",
         "broker_signed_at": now,
+        "broker_email": admin_signer.get("email"),
+        "document_title": f"Byrd & CO Fee Agreement — {scen.get('name') or ''}",
     }
-    # Render the fully-executed PDF and save it into the doc line
+    # Render the fully-executed PDF (Certificate of Completion appended)
     pdf_bytes = render_fee_agreement_pdf(
         scen, client, admin_signer, fa["broker_fee_pct"],
         agreement_date=fa["agreement_date"], signatures=signatures,
@@ -2547,9 +2664,11 @@ async def public_fee_agreement_sign(token: str, body: PublicSignBody, request: R
             "borrower_signed_name": signatures["borrower_name"],
             "borrower_signed_at": signatures["borrower_signed_at"],
             "borrower_signed_ip": ip,
+            "borrower_signed_user_agent": user_agent,
             "broker_signed_name": signatures["broker_name"],
             "broker_signed_at": signatures["broker_signed_at"],
             "signed_file_id": file_id,
+            "signed_pdf_sha256": hashlib.sha256(pdf_bytes).hexdigest(),
         }},
     )
 

@@ -37,14 +37,15 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
 - P3: Real Marketplace (lender self-onboarding + term-sheet capture)
 
-### Fee Agreement E-Signature — SHIPPED 2026-02
+### Fee Agreement E-Signature — SHIPPED 2026-02 (+ portal signing + certificate v2)
 - New **Broker fee & e-signature** card at the top of every scenario's Documents tab. Enter fee %, preview draft PDF (pre-fills borrower name/email/entity, property address+type, loan purpose, agreement date, broker), then send.
-- **Send** creates a pinned system-managed "Signed Fee Agreement" doc line (order = -1000, hidden from lenders, protected from deletion + not user-uploadable) and a one-time signing token; emails the borrower a signing link.
+- **Send** creates a pinned system-managed "Signed Fee Agreement" doc line (order = -1000, hidden from lenders, protected from deletion + not user-uploadable) and a one-time signing token; emails the borrower a signing link via Postmark.
+- **Two signing entry points**, both using the same token: (1) the emailed **Review & Sign** button, (2) a **Sign Now** button on the pinned line inside the borrower's own portal (the `pending_sign_token` is exposed to the borrower only for their own doc).
 - Public signing page at `/fee-agreement/{token}` — no auth. Full PDF preview + summary sidebar + typed-name signature form with cursive-style live preview. Consent checkbox restates the fee %.
-- On submit, backend renders the fully-executed PDF (both parties' names in italic script, borrower's IP + timestamp for audit, broker auto-countersigned with the admin who sent it), stores it on the doc line, marks it Reviewed. Confirmation email to borrower + heads-up to broker.
+- On submit, backend renders the fully-executed PDF, appends a **Certificate of Completion** page (document title/date, fee %, borrower typed name/email/UTC timestamp/IP/User-Agent, broker signer/method, ESIGN Act + Texas UETA legal citation), stores it on the doc line as Reviewed, saves a **SHA-256 hash** of the executed PDF for tamper-evidence, and emails confirmations.
 - Resend / Cancel available while pending. Signed state shows a "Download Signed" button on the admin card and a "Signed & Executed" panel to the borrower.
 - New endpoints: `GET /admin/scenarios/{sid}/fee-agreement/preview.pdf`, `POST /admin/scenarios/{sid}/fee-agreement/send`, `GET /admin/scenarios/{sid}/fee-agreement`, `POST /admin/scenarios/{sid}/fee-agreement/cancel`, `GET /fee-agreement/{token}`, `GET /fee-agreement/{token}/preview.pdf`, `POST /fee-agreement/{token}/sign`.
-- New Mongo collection: `fee_agreements`. New scenario field: `broker_fee_pct` (0-10). New doc-line flag: `system: true`.
+- New Mongo collection: `fee_agreements`. New scenario field: `broker_fee_pct` (0-10). New doc-line flag: `system: true`. Audit fields on `fee_agreements`: `borrower_signed_ip`, `borrower_signed_user_agent`, `signed_pdf_sha256`.
 
 ### Personal Assistant × pipeline coach (stalled deals) — SHIPPED 2026-02
 - New backend helper `_stalled_scenarios_for_admin(admin_id)` — flags scenarios in draft/shopping status where the latest activity (max of scenario.updated_at and any doc.updated_at) is 7+ days ago AND fewer than 30% of docs are uploaded.

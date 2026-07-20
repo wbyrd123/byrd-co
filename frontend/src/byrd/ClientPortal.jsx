@@ -7,7 +7,7 @@ import { StatusChip, readFileAsBase64, fmtSize } from "@/byrd/docHelpers";
 import { toast } from "sonner";
 import {
   LogOut, Upload, FileText, Download, Phone, Mail, CheckCircle2, Circle, CircleAlert,
-  ChevronDown, ChevronRight,
+  ChevronDown, ChevronRight, PenLine,
 } from "lucide-react";
 
 const groupByCategory = (docs) => {
@@ -216,6 +216,7 @@ export default function ClientPortal() {
                                 {list.map((d) => {
                                   const hasFile = !!d.file;
                                   const isFeeAgreement = d.label === "Signed Fee Agreement";
+                                  const pendingSignToken = d.pending_sign_token;
                                   const iconMap = {
                                     pending: <Circle size={16} className="text-[#6B6558]" />,
                                     uploaded: <FileText size={16} className="text-[#23446E]" />,
@@ -266,6 +267,16 @@ export default function ClientPortal() {
                                             data-testid={`view-${d.id}`}
                                           >
                                             <Download size={12} /> View
+                                          </a>
+                                        )}
+                                        {isFeeAgreement && pendingSignToken && (
+                                          <a
+                                            href={`/fee-agreement/${pendingSignToken}`}
+                                            target="_blank" rel="noopener noreferrer"
+                                            className="byrd-btn byrd-btn-primary h-9 px-3 text-xs"
+                                            data-testid={`sign-now-${d.id}`}
+                                          >
+                                            <PenLine size={12} /> Sign Now
                                           </a>
                                         )}
                                         {!isFeeAgreement && (
