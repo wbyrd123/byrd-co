@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, API_BASE } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import {
   Sparkles, Send, RotateCcw, Check, Mail, User, Calendar, X, AlertCircle,
   ChevronRight, Edit3, Plus, ArrowRight, Users as UsersIcon, Reply,
+  Megaphone, TrendingUp, RefreshCw,
 } from "lucide-react";
 
 const firstName = (u) => (u?.name || u?.email || "there").split(" ")[0].split("@")[0];
@@ -24,9 +26,12 @@ const dueColor = (iso, today) => {
 
 export default function AdminAssistant() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [buckets, setBuckets] = useState({ overdue: [], due_today: [], upcoming: [], done: [], dismissed: [] });
   const [teammates, setTeammates] = useState([]);
+  const [mktStatus, setMktStatus] = useState(null); // { days_since_last_marketing, needs_suggestion, pending_suggestion, ... }
+  const [mktBusy, setMktBusy] = useState(false);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [streaming, setStreaming] = useState("");
@@ -92,8 +97,56 @@ export default function AdminAssistant() {
   useEffect(() => {
     if (user) loadAll();
     api.get("/admin/assistant/teammates").then((r) => setTeammates(r.data)).catch(() => {});
+    api.get("/admin/assistant/marketing-status").then((r) => setMktStatus(r.data)).catch(() => {});
     return () => controllerRef.current?.abort();
   }, [user]);
+
+  const refreshMktStatus = () =>
+    api.get("/admin/assistant/marketing-status").then((r) => setMktStatus(r.data)).catch(() => {});
+
+  const generateSuggestion = async () => {
+    if (mktBusy) return;
+    setMktBusy(true);
+    try {
+      const r = await api.post("/admin/assistant/marketing-suggestion/generate");
+      setMktStatus((s) => ({ ...(s || {}), pending_suggestion: r.data, needs_suggestion: false }));
+      toast.success("Draft ready — review below");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Draft failed");
+    } finally {
+      setMktBusy(false);
+    }
+  };
+
+  const dismissSuggestion = async (sid) => {
+    try {
+      await api.post(`/admin/assistant/marketing-suggestion/${sid}/dismiss`);
+      toast.success("Dismissed — I'll wait a week before nudging again");
+      refreshMktStatus();
+      // Also clear any inline suggestion cards in chat that reference this id
+      setMessages((m) => m.map((x) =>
+        x.marketing_suggestion?.id === sid ? { ...x, _suggestionDismissed: true } : x
+      ));
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed");
+    }
+  };
+
+  const acceptSuggestion = async (suggestion) => {
+    try {
+      await api.post(`/admin/assistant/marketing-suggestion/${suggestion.id}/accept`);
+    } catch {
+      // non-fatal — the CRM prefill still works
+    }
+    // Hand off to Contacts CRM with the draft prefilled
+    sessionStorage.setItem("byrd_mkt_prefill", JSON.stringify({
+      subject: suggestion.subject,
+      body: suggestion.body,
+      target_tags: suggestion.target_tags || [],
+      suggestion_id: suggestion.id,
+    }));
+    navigate("/admin/contacts?compose=1");
+  };
 
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: "smooth" });
@@ -143,7 +196,7 @@ export default function AdminAssistant() {
           try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
           if (evt.type === "token") {
             liveBuf += evt.content;
-            const cutIdx = liveBuf.search(/```(new_tasks|complete_tasks|email_draft|suggest_client)/);
+            const cutIdx = liveBuf.search(/```(new_tasks|complete_tasks|email_draft|suggest_client|handoffs|marketing_suggestion)/);
             setStreaming(cutIdx >= 0 ? liveBuf.slice(0, cutIdx) : liveBuf);
           } else if (evt.type === "done") {
             setMessages((m) => [
@@ -157,12 +210,14 @@ export default function AdminAssistant() {
                 created_tasks: evt.created_tasks,
                 completed_task_ids: evt.completed_task_ids,
                 handoffs_sent: evt.handoffs_sent,
+                marketing_suggestion: evt.marketing_suggestion,
                 created_at: new Date().toISOString(),
               },
             ]);
             setStreaming("");
-            // Refresh tasks
+            // Refresh tasks + marketing status (Claude may have proposed a new suggestion)
             api.get("/admin/assistant/tasks").then((r) => setBuckets(r.data));
+            if (evt.marketing_suggestion) refreshMktStatus();
           } else if (evt.type === "error") {
             throw new Error(evt.message);
           }
@@ -326,6 +381,15 @@ export default function AdminAssistant() {
             </button>
           </div>
 
+          {/* Marketing nudge / pending suggestion */}
+          <MarketingNudge
+            status={mktStatus}
+            busy={mktBusy}
+            onGenerate={generateSuggestion}
+            onAccept={acceptSuggestion}
+            onDismiss={dismissSuggestion}
+          />
+
           <div ref={scrollerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-[#FBF8F1]">
             {messages.map((m) => (
               <Bubble
@@ -333,6 +397,8 @@ export default function AdminAssistant() {
                 m={m}
                 onSendEmail={sendEmail}
                 onCreateClient={createClientFromSuggestion}
+                onAcceptSuggestion={acceptSuggestion}
+                onDismissSuggestion={dismissSuggestion}
               />
             ))}
 
@@ -420,7 +486,7 @@ export default function AdminAssistant() {
   );
 }
 
-function Bubble({ m, onSendEmail, onCreateClient }) {
+function Bubble({ m, onSendEmail, onCreateClient, onAcceptSuggestion, onDismissSuggestion }) {
   const isUser = m.role === "user";
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -510,10 +576,131 @@ function Bubble({ m, onSendEmail, onCreateClient }) {
             <Check size={11} /> Client added — invite link copied to clipboard
           </div>
         )}
+
+        {!isUser && m.marketing_suggestion && !m._suggestionDismissed && (
+          <MarketingSuggestionCard
+            suggestion={m.marketing_suggestion}
+            onAccept={onAcceptSuggestion}
+            onDismiss={onDismissSuggestion}
+            compact
+          />
+        )}
       </div>
     </div>
   );
 }
+
+function MarketingNudge({ status, busy, onGenerate, onAccept, onDismiss }) {
+  if (!status) return null;
+  const pending = status.pending_suggestion;
+  const needs = status.needs_suggestion;
+  if (!pending && !needs) return null;
+
+  if (pending) {
+    return (
+      <div className="border-b border-[#E4DFD1] px-4 py-3 bg-[#FBEFD3]/50">
+        <MarketingSuggestionCard
+          suggestion={pending}
+          onAccept={onAccept}
+          onDismiss={onDismiss}
+          onRegenerate={onGenerate}
+          regenBusy={busy}
+        />
+      </div>
+    );
+  }
+
+  const days = status.days_since_last_marketing;
+  const label = days == null
+    ? "You haven't sent a marketing email yet."
+    : `It's been ${days} day${days === 1 ? "" : "s"} since your last marketing email.`;
+  return (
+    <div className="border-b border-[#E4DFD1] px-4 py-3 bg-[#FBEFD3]/50 flex items-center justify-between gap-3 flex-wrap" data-testid="marketing-nudge">
+      <div className="flex items-start gap-2 min-w-0 flex-1">
+        <div className="w-8 h-8 rounded-full bg-[#F3EEE0] text-[#7A5410] grid place-items-center border border-[#E4DFD1] shrink-0">
+          <Megaphone size={14} />
+        </div>
+        <div className="min-w-0">
+          <div className="font-serif text-sm font-bold text-[#7A5410]">{label}</div>
+          <div className="text-[11px] text-[#6B6558] mt-0.5">
+            Want me to draft one you can review and send from the CRM?
+          </div>
+        </div>
+      </div>
+      <button
+        onClick={onGenerate}
+        disabled={busy}
+        className="byrd-btn byrd-btn-dark h-9 px-3 text-xs shrink-0"
+        data-testid="marketing-draft-btn"
+      >
+        {busy ? "Drafting…" : <><Sparkles size={12} /> Draft one</>}
+      </button>
+    </div>
+  );
+}
+
+
+function MarketingSuggestionCard({ suggestion, onAccept, onDismiss, onRegenerate, regenBusy, compact }) {
+  const tagLabel = (suggestion.target_tags && suggestion.target_tags.length)
+    ? suggestion.target_tags.map((t) => `#${t}`).join(" ")
+    : "Everyone with a valid email";
+  return (
+    <div className="border border-[#C89434] bg-white rounded-lg p-3 shadow-sm" data-testid="marketing-suggestion-card">
+      <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+        <div className="inline-flex items-center gap-2 text-[#7A5410]">
+          <Megaphone size={13} />
+          <span className="text-xs font-semibold uppercase tracking-widest font-mono">Marketing draft</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {onRegenerate && (
+            <button
+              onClick={onRegenerate}
+              disabled={regenBusy}
+              className="text-[11px] text-[#6B6558] inline-flex items-center gap-1 hover:text-[#1A1A1A]"
+              data-testid="marketing-regen"
+            >
+              <RefreshCw size={11} className={regenBusy ? "animate-spin" : ""} />
+              {regenBusy ? "Drafting…" : "Regenerate"}
+            </button>
+          )}
+          <button
+            onClick={() => onDismiss(suggestion.id)}
+            className="text-[11px] text-[#6B6558] inline-flex items-center gap-1 hover:text-[#8A1F1A]"
+            data-testid="marketing-dismiss"
+          >
+            <X size={11} /> Dismiss
+          </button>
+          <button
+            onClick={() => onAccept(suggestion)}
+            className="byrd-btn byrd-btn-dark h-8 px-3 text-[11px]"
+            data-testid="marketing-open-in-crm"
+          >
+            <ArrowRight size={11} /> Open in CRM
+          </button>
+        </div>
+      </div>
+      <div className="text-xs">
+        <div className="mb-1">
+          <span className="text-[#6B6558]">Subject:</span>{" "}
+          <span className="font-semibold text-[#2A2A2A]">{suggestion.subject}</span>
+        </div>
+        <div className="mb-2">
+          <span className="text-[#6B6558]">Target:</span>{" "}
+          <span className="font-mono text-[11px] text-[#7A5410]">{tagLabel}</span>
+        </div>
+        <div className={`whitespace-pre-wrap bg-[#FBF8F1] border border-[#E4DFD1] rounded-md p-2 text-[#2A2A2A] leading-relaxed ${compact ? "max-h-40 overflow-y-auto" : ""}`}>
+          {suggestion.body}
+        </div>
+        {suggestion.rationale && (
+          <div className="mt-2 text-[11px] text-[#6B6558] italic border-l-2 border-[#E4DFD1] pl-2">
+            <TrendingUp size={10} className="inline mr-1" /> {suggestion.rationale}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function EmailDraftCard({ draft, sent, error, onSend }) {
   const [d, setD] = useState(draft);

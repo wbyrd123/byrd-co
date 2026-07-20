@@ -33,10 +33,19 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 ## Backlog
 - P0: Redeploy production to activate Postmark env vars
 - P1: Automatic reminder emails when client docs missing X days
-- P1: Dashboard "Email Status" indicator
-- P1: **Contacts CRM with assistant marketing integration** (see below)
+- P2: Postmark inbound routing → route replies back into Personal Assistant
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
 - P3: Real Marketplace (lender self-onboarding + term-sheet capture)
+
+### Personal Assistant × CRM (marketing awareness) — SHIPPED 2026-02
+- Assistant turn context now injects a compact CRM snapshot: total contacts, tag counts, unsubscribed count, days_since_last_marketing, last marketing subject, and up to 15 stale contacts (never contacted OR contacted 60+ days ago, valid email, not unsubscribed).
+- System prompt updated: Claude answers rolodex queries ("who haven't I contacted in 60 days?"), and when 30+ days have passed since the last marketing send, mentions it once and offers to draft a marketing email.
+- New `marketing_suggestion` fenced block: Claude drafts marketing emails with `{{first_name}}` + `{{admin_first_name}}` merge tags and a `target_tags` filter. Marketing drafts are separated from `email_draft` (which is transactional 1:1 only).
+- **Automatic 30-day cadence:** `GET /admin/assistant/marketing-status` returns `needs_suggestion` = true when 30+ days have passed (or never sent), unless a dismissal happened in the last 7 days (quiet window).
+- Assistant page renders a **Marketing Nudge** banner + a **Marketing Suggestion Card** with subject, target audience, body preview, rationale, and three actions: **Regenerate**, **Dismiss** (starts 7-day quiet window), **Open in CRM** (accepts + hands off to Contacts).
+- **Open in CRM** flow: navigates to `/admin/contacts?compose=1` with the draft cached in sessionStorage; the CRM auto-opens the ComposeDialog with subject/body pre-filled, target contacts pre-selected by tag (or everyone-with-email when `target_tags=[]`), and a "Draft from your Assistant" banner shown at the top.
+- New endpoints: `GET /admin/assistant/marketing-status`, `POST /admin/assistant/marketing-suggestion/generate`, `POST /admin/assistant/marketing-suggestion/{id}/dismiss`, `POST /admin/assistant/marketing-suggestion/{id}/accept`.
+- New Mongo collection: `marketing_suggestions` (pending/accepted/dismissed/superseded states).
 
 ### P1 · Contacts CRM with Personal Assistant integration — SHIPPED 2026-02
 **Delivered:**

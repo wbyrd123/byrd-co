@@ -2436,6 +2436,78 @@ def _today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+async def _crm_snapshot_for_assistant() -> dict:
+    """Compact CRM state for the personal assistant prompt.
+    Returns totals, tag counts, unsubscribed count, days_since_last_marketing,
+    and up to 15 stale contacts (never contacted OR contacted >60d ago, must have email,
+    must not be unsubscribed).
+    """
+    now = datetime.now(timezone.utc)
+    suppressed = {u["email"].lower() async for u in db.contact_unsubscribes.find({}, {"email": 1}) if u.get("email")}
+    contacts = await db.contacts.find({}, {"_id": 0}).to_list(5000)
+    total = len(contacts)
+    unsub_count = 0
+    tag_counts: dict[str, int] = {}
+    stale: list[dict] = []
+    for c in contacts:
+        em = (c.get("email") or "").lower()
+        is_unsub = bool(em and em in suppressed)
+        if is_unsub:
+            unsub_count += 1
+        for t in c.get("tags") or []:
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+        if not em or is_unsub:
+            continue
+        lca = c.get("last_contact_at")
+        days_since: Optional[int] = None
+        if lca:
+            try:
+                dt = datetime.fromisoformat(lca.replace("Z", "+00:00")) if isinstance(lca, str) else lca
+                days_since = (now - dt).days
+            except Exception:
+                days_since = None
+        if days_since is None or days_since >= 60:
+            stale.append({
+                "name": c.get("name"),
+                "email": c.get("email"),
+                "tags": c.get("tags") or [],
+                "days_since_contact": days_since,  # None = never
+                "last_contact_channel": c.get("last_contact_channel"),
+            })
+    # Sort: never-contacted first, then oldest first
+    stale.sort(key=lambda x: (-1 if x["days_since_contact"] is None else -x["days_since_contact"]), reverse=True)
+    stale = stale[:15]
+
+    # Last marketing send (global — shared rolodex)
+    last_mkt = await db.assistant_emails.find_one(
+        {"tag": "marketing", "status": "sent"}, {"_id": 0}, sort=[("sent_at", -1)]
+    )
+    days_since_last: Optional[int] = None
+    last_mkt_summary: Optional[dict] = None
+    if last_mkt:
+        try:
+            dt = datetime.fromisoformat(last_mkt["sent_at"].replace("Z", "+00:00"))
+            days_since_last = (now - dt).days
+        except Exception:
+            pass
+        last_mkt_summary = {
+            "subject": last_mkt.get("subject"),
+            "sent_at": last_mkt.get("sent_at"),
+            "days_ago": days_since_last,
+        }
+
+    return {
+        "contacts_stats": {
+            "total": total,
+            "unsubscribed": unsub_count,
+            "tag_counts": tag_counts,
+            "days_since_last_marketing": days_since_last,  # None = never
+            "last_marketing": last_mkt_summary,
+        },
+        "stale_contacts": stale,
+    }
+
+
 ASSISTANT_SYSTEM_PROMPT = """You are the personal assistant to a commercial real estate broker at Byrd & CO.
 You are warm, concise, and proactive. You address the broker by first name.
 
@@ -2445,6 +2517,9 @@ At the top of every turn you receive:
 - The broker's CURRENT open task list (with due dates and any linked client)
 - The broker's client roster (name + email, for quick recognition)
 - The broker's teammates (other admins on the account) — you can hand tasks off to them by name
+- A snapshot of the shared **Contacts CRM** (rolodex): total, tag breakdown, unsubscribed count,
+  and up to 15 STALE contacts (haven't been contacted in 60+ days, with valid emails). You also
+  see when the last marketing email went out (days_since_last_marketing).
 
 # What you do
 1. Have a natural conversation. Keep responses short and friendly.
@@ -2463,6 +2538,18 @@ At the top of every turn you receive:
    when writing the handoff title/note; the recipient will see who it's from automatically.
 7. When the broker tells you something is done, mark the matching open task complete.
 8. Never expose task IDs in visible chat — only in the structured blocks.
+9. **Marketing awareness.** Look at `days_since_last_marketing` in the CRM snapshot. If it's been
+   30+ days (or `null` = never sent), gently mention that in your reply the FIRST time you notice it
+   in a conversation, and offer to draft a marketing email. Do NOT nag repeatedly.
+10. **Answer CRM questions from the snapshot.** If the broker asks "who haven't I contacted in 60
+    days?" or "who's overdue for outreach?" — use the `stale_contacts` list. If they ask about
+    someone by name and they're in `stale_contacts` or `contacts_stats.tag_counts`, use that.
+11. **Drafting a marketing email.** If the broker asks you to draft a marketing/newsletter/blast
+    email (or accepts your offer to draft one), emit a `marketing_suggestion` block — NOT an
+    `email_draft`. Marketing sends go through the Contacts CRM (which handles unsubscribe footers
+    and bulk sending); the broker will review and send from there. Pick a `target_tags` filter
+    when it fits (e.g. `["referral"]` or `["past sponsor"]`); use `[]` to target everyone with
+    a valid email.
 
 # Response format
 Write your natural-language reply first. Then, ONLY IF you have structured actions to take,
@@ -2507,19 +2594,33 @@ append fenced blocks at the end of your message:
 ]
 ```
 
+```marketing_suggestion
+{
+  "subject": "Q1 rate snapshot — a quick note",
+  "body": "Hi {{first_name}},\\n\\nQuick update on the commercial debt market...\\n\\nBest,\\n{{admin_first_name}}",
+  "target_tags": ["referral"],
+  "rationale": "It's been 34 days since the last send; referral sources typically expect a quarterly rate note."
+}
+```
+
 Rules:
 - Only include blocks you're actually proposing. Never emit empty ones.
 - Never emit `complete_tasks` unless you're matching a task from the "OPEN TASKS" list.
 - Never emit `email_draft` unless the broker asked you to email someone.
+- Never emit `email_draft` for a MARKETING/BLAST email — use `marketing_suggestion` instead.
 - `handoffs.to_name` MUST match a first name from the teammates list exactly.
 - `handoffs.note` should be a complete, self-contained message the teammate can read cold —
    include phone numbers, addresses, deal specifics the broker mentioned.
 - Dates in `due_date` MUST be ISO format YYYY-MM-DD.
+- `marketing_suggestion.body` MUST include the `{{first_name}}` merge tag at least once and sign
+   off with `{{admin_first_name}}` — the CRM will personalize per recipient.
+- `marketing_suggestion.target_tags` — use tags that actually appear in the CRM `tag_counts`.
+   Use `[]` to target the whole rolodex (any contact with a valid email).
 - Keep quotes/apostrophes safe in JSON (escape with \\").
 """
 
 
-def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[dict], teammates: List[dict]) -> str:
+def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[dict], teammates: List[dict], crm: dict) -> str:
     today = datetime.now(timezone.utc)
     slim_tasks = [
         {
@@ -2552,6 +2653,8 @@ def _assistant_turn_context(admin: dict, open_tasks: List[dict], clients: List[d
         "open_tasks": slim_tasks,
         "clients": slim_clients,
         "teammates": slim_teammates,
+        "contacts_stats": crm.get("contacts_stats", {}),
+        "stale_contacts": crm.get("stale_contacts", []),
     }
     return (
         "Here is the current state (READ ONLY — do not echo this back):\n\n"
@@ -2580,6 +2683,7 @@ def _split_assistant_response(full_text: str) -> dict:
     raw_email = _grab("email_draft")
     raw_client = _grab("suggest_client")
     raw_handoffs = _grab("handoffs")
+    raw_marketing = _grab("marketing_suggestion")
 
     new_tasks = None
     if raw_new:
@@ -2656,8 +2760,25 @@ def _split_assistant_response(full_text: str) -> dict:
         except Exception:
             pass
 
+    marketing_suggestion = None
+    if raw_marketing:
+        try:
+            parsed = json.loads(raw_marketing)
+            if isinstance(parsed, dict) and parsed.get("subject") and parsed.get("body"):
+                tt = parsed.get("target_tags") or []
+                if not isinstance(tt, list):
+                    tt = []
+                marketing_suggestion = {
+                    "subject": str(parsed["subject"])[:200],
+                    "body": str(parsed["body"])[:20000],
+                    "target_tags": [str(t) for t in tt if str(t).strip()],
+                    "rationale": (parsed.get("rationale") or "")[:800],
+                }
+        except Exception:
+            pass
+
     chat_text = full_text
-    for marker in ("new_tasks", "complete_tasks", "email_draft", "suggest_client", "handoffs"):
+    for marker in ("new_tasks", "complete_tasks", "email_draft", "suggest_client", "handoffs", "marketing_suggestion"):
         needle = f"```{marker}"
         idx = chat_text.find(needle)
         if idx >= 0:
@@ -2671,6 +2792,7 @@ def _split_assistant_response(full_text: str) -> dict:
         "email_draft": email_draft,
         "suggest_client": suggest_client,
         "handoffs": handoffs,
+        "marketing_suggestion": marketing_suggestion,
     }
 
 
@@ -2755,7 +2877,33 @@ async def _apply_assistant_actions(admin: dict, parsed: dict) -> dict:
                 "due_date": h.get("due_date"),
             })
 
-    return {"created": applied_new, "completed": applied_complete, "handoffs": applied_handoffs}
+    return {"created": applied_new, "completed": applied_complete, "handoffs": applied_handoffs, "marketing_suggestion": None}
+
+
+async def _persist_marketing_suggestion(admin_id: str, sug: dict, source: str) -> dict:
+    """Store a Claude-generated marketing suggestion. Supersedes any older pending ones
+    (there should only be one pending at a time — regenerate replaces)."""
+    now = now_iso()
+    await db.marketing_suggestions.update_many(
+        {"status": "pending"},
+        {"$set": {"status": "superseded", "superseded_at": now}},
+    )
+    doc = {
+        "id": str(uuid.uuid4()),
+        "admin_id": admin_id,
+        "subject": sug["subject"],
+        "body": sug["body"],
+        "target_tags": sug.get("target_tags") or [],
+        "rationale": sug.get("rationale") or "",
+        "status": "pending",
+        "source": source,
+        "created_at": now,
+        "dismissed_at": None,
+        "accepted_at": None,
+    }
+    await db.marketing_suggestions.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
 
 
 @api.post("/admin/assistant/chat")
@@ -2771,10 +2919,11 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
         {"role": "admin", "id": {"$ne": admin["id"]}},
         {"_id": 0, "id": 1, "name": 1, "email": 1},
     ).to_list(50)
+    crm = await _crm_snapshot_for_assistant()
 
     session_id = f"assistant::{admin['id']}"
     chat = _make_scenario_ai_chat(session_id, ASSISTANT_SYSTEM_PROMPT)
-    turn_context = _assistant_turn_context(admin, open_tasks, clients, teammates)
+    turn_context = _assistant_turn_context(admin, open_tasks, clients, teammates, crm)
     user_text = f"{turn_context}\n\nBroker message:\n{body.message}"
 
     async def event_gen():
@@ -2801,6 +2950,10 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
         full_text = "".join(buf)
         parsed = _split_assistant_response(full_text)
         applied = await _apply_assistant_actions(admin, parsed)
+        if parsed.get("marketing_suggestion"):
+            applied["marketing_suggestion"] = await _persist_marketing_suggestion(
+                admin["id"], parsed["marketing_suggestion"], "assistant_chat"
+            )
 
         assistant_msg_id = str(uuid.uuid4())
         await db.assistant_messages.insert_one({
@@ -2813,6 +2966,7 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
             "created_tasks": applied["created"],
             "completed_task_ids": applied["completed"],
             "handoffs_sent": applied["handoffs"],
+            "marketing_suggestion": applied.get("marketing_suggestion"),
             "created_at": now_iso(),
         })
 
@@ -2825,6 +2979,7 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
             "created_tasks": applied["created"],
             "completed_task_ids": applied["completed"],
             "handoffs_sent": applied["handoffs"],
+            "marketing_suggestion": applied.get("marketing_suggestion"),
         }
         yield f"data: {json.dumps(done_payload)}\n\n"
 
@@ -2847,6 +3002,181 @@ async def assistant_messages(admin=Depends(require_admin)):
 async def assistant_reset(admin=Depends(require_admin)):
     await db.assistant_messages.delete_many({"admin_id": admin["id"]})
     return {"ok": True}
+
+
+# ----- Marketing reminders / suggestions -----
+
+MARKETING_INTERVAL_DAYS = 30
+DISMISS_QUIET_DAYS = 7  # after dismiss, don't nag for a week
+
+
+async def _latest_pending_suggestion() -> Optional[dict]:
+    doc = await db.marketing_suggestions.find_one(
+        {"status": "pending"}, {"_id": 0}, sort=[("created_at", -1)]
+    )
+    return doc
+
+
+async def _recent_dismissal_active() -> bool:
+    """True if a dismissal happened within DISMISS_QUIET_DAYS — suppresses new auto-nudges."""
+    doc = await db.marketing_suggestions.find_one(
+        {"status": "dismissed"}, {"_id": 0, "dismissed_at": 1}, sort=[("dismissed_at", -1)]
+    )
+    if not doc or not doc.get("dismissed_at"):
+        return False
+    try:
+        dt = datetime.fromisoformat(doc["dismissed_at"].replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - dt).days < DISMISS_QUIET_DAYS
+    except Exception:
+        return False
+
+
+@api.get("/admin/assistant/marketing-status")
+async def assistant_marketing_status(admin=Depends(require_admin)):
+    crm = await _crm_snapshot_for_assistant()
+    stats = crm["contacts_stats"]
+    days_since = stats.get("days_since_last_marketing")
+    quiet = await _recent_dismissal_active()
+    # Nudge if never sent OR 30+ days ago, unless a fresh dismissal is still in the quiet window
+    needs_suggestion = (days_since is None or days_since >= MARKETING_INTERVAL_DAYS) and not quiet
+    pending = await _latest_pending_suggestion()
+    return {
+        "days_since_last_marketing": days_since,
+        "last_marketing": stats.get("last_marketing"),
+        "needs_suggestion": needs_suggestion,
+        "interval_days": MARKETING_INTERVAL_DAYS,
+        "quiet_until_next_nudge": quiet,
+        "total_contacts": stats.get("total", 0),
+        "tag_counts": stats.get("tag_counts", {}),
+        "pending_suggestion": pending,
+    }
+
+
+@api.post("/admin/assistant/marketing-suggestion/generate")
+async def assistant_marketing_generate(admin=Depends(require_admin)):
+    """Ask Claude for a fresh marketing email draft based on current CRM state.
+    Non-streaming, one-shot. Supersedes any prior pending suggestion."""
+    crm = await _crm_snapshot_for_assistant()
+    stats = crm["contacts_stats"]
+    admin_first = (admin.get("name") or admin.get("email", "").split("@")[0]).split(" ")[0]
+    today = datetime.now(timezone.utc)
+    month_name = today.strftime("%B")
+    days_since = stats.get("days_since_last_marketing")
+    last_subject = (stats.get("last_marketing") or {}).get("subject") or "none"
+
+    prompt_ctx = {
+        "today": today.date().isoformat(),
+        "month": month_name,
+        "admin_first_name": admin_first,
+        "days_since_last_marketing": days_since,
+        "last_marketing_subject": last_subject,
+        "total_contacts": stats.get("total", 0),
+        "tag_counts": stats.get("tag_counts", {}),
+        "stale_contact_count": len(crm.get("stale_contacts", [])),
+    }
+    system = (
+        "You draft marketing emails for a boutique commercial real estate brokerage (Byrd & CO). "
+        "Wayne and Caleb Byrd are the brokers. Tone: warm, brief, professional — like a personal note "
+        "from a trusted broker, NOT a marketing blast. No emoji. No superlatives. 120–180 words max in "
+        "the body. Sign off with the merge tag {{admin_first_name}}. Always include the {{first_name}} "
+        "merge tag in the salutation.\n\n"
+        "You MUST respond with a single JSON object and nothing else. Schema:\n"
+        '{ "subject": "...", "body": "...", "target_tags": ["..."], "rationale": "..." }\n\n'
+        "Rules:\n"
+        "- `subject` under 60 chars, no ALL CAPS, no clickbait.\n"
+        "- `body` MUST contain {{first_name}} and {{admin_first_name}}. Use \\n for newlines.\n"
+        "- `target_tags` should be a subset of the CRM tag_counts provided (or [] for everyone).\n"
+        "- `rationale` = one sentence explaining why this angle, given the current month/season and "
+        "how long it's been since the last send.\n"
+        "- Do NOT reuse the exact previous subject line.\n"
+    )
+    user = (
+        "Current CRM state:\n"
+        f"```json\n{json.dumps(prompt_ctx, indent=2)}\n```\n\n"
+        "Draft one marketing email now."
+    )
+    chat = _make_scenario_ai_chat(
+        f"mkt-suggest::{admin['id']}::{uuid.uuid4()}", system
+    )
+    try:
+        buf: list[str] = []
+        async for ev in chat.stream_message(UserMessage(text=user)):
+            if isinstance(ev, TextDelta):
+                buf.append(ev.content)
+            elif isinstance(ev, StreamDone):
+                break
+        raw = "".join(buf).strip()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Draft generation failed: {str(e)[:200]}")
+
+    # Robust JSON extraction — Claude sometimes wraps in ```json fences
+    text = raw
+    if "```" in text:
+        # Grab the inside of the first fenced block
+        start = text.find("```")
+        after = text.find("\n", start)
+        end = text.find("```", after + 1)
+        if after >= 0 and end > 0:
+            text = text[after + 1:end].strip()
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        # Last resort: find the first {...} block
+        s = text.find("{")
+        e = text.rfind("}")
+        if s < 0 or e < 0:
+            raise HTTPException(status_code=502, detail="AI returned no parsable JSON")
+        try:
+            parsed = json.loads(text[s:e + 1])
+        except Exception:
+            raise HTTPException(status_code=502, detail="AI returned invalid JSON")
+
+    subj = (parsed.get("subject") or "").strip()
+    body = (parsed.get("body") or "").strip()
+    if not subj or not body:
+        raise HTTPException(status_code=502, detail="AI draft missing subject or body")
+    tags_val = parsed.get("target_tags") or []
+    if not isinstance(tags_val, list):
+        tags_val = []
+
+    stored = await _persist_marketing_suggestion(
+        admin["id"],
+        {
+            "subject": subj[:200],
+            "body": body[:20000],
+            "target_tags": [str(t) for t in tags_val if str(t).strip()],
+            "rationale": (parsed.get("rationale") or "")[:800],
+        },
+        "auto_generate",
+    )
+    return stored
+
+
+@api.post("/admin/assistant/marketing-suggestion/{sid}/dismiss")
+async def assistant_marketing_dismiss(sid: str, admin=Depends(require_admin)):
+    res = await db.marketing_suggestions.update_one(
+        {"id": sid, "status": "pending"},
+        {"$set": {"status": "dismissed", "dismissed_at": now_iso(), "dismissed_by_admin_id": admin["id"]}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Suggestion not found or already handled")
+    return {"ok": True}
+
+
+@api.post("/admin/assistant/marketing-suggestion/{sid}/accept")
+async def assistant_marketing_accept(sid: str, admin=Depends(require_admin)):
+    """Marks a suggestion accepted so it won't show again. Returns the draft so the caller
+    can route the user to the CRM composer to pick recipients + send."""
+    doc = await db.marketing_suggestions.find_one({"id": sid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+    if doc.get("status") == "pending":
+        await db.marketing_suggestions.update_one(
+            {"id": sid},
+            {"$set": {"status": "accepted", "accepted_at": now_iso(), "accepted_by_admin_id": admin["id"]}},
+        )
+        doc["status"] = "accepted"
+    return doc
 
 
 class EmailTestRequest(BaseModel):

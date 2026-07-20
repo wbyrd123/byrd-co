@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Contact as ContactIcon, Plus, Upload, Send, Trash2, Edit3, X, Mail, Phone,
-  MessageSquare, Tag, Search, Check, AlertCircle, FileText,
+  MessageSquare, Tag, Search, Check, AlertCircle, FileText, Sparkles,
 } from "lucide-react";
 
 const fmtRelative = (iso) => {
@@ -30,14 +31,49 @@ export default function AdminContacts() {
   const [selected, setSelected] = useState(new Set());
   const [dialog, setDialog] = useState(null); // null | "new" | "import" | "compose" | contact-id
   const [loading, setLoading] = useState(true);
+  const [prefill, setPrefill] = useState(null); // { subject, body, target_tags, suggestion_id }
+  const location = useLocation();
+  const navigate = useNavigate();
 
   const load = async () => {
     setLoading(true);
     const r = await api.get("/admin/contacts");
     setContacts(r.data);
     setLoading(false);
+    return r.data;
   };
   useEffect(() => { load(); }, []);
+
+  // Handle inbound prefill from Assistant marketing suggestions.
+  // sessionStorage carries the draft; ?compose=1 in the URL is the signal to open.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get("compose") !== "1") return;
+    const raw = sessionStorage.getItem("byrd_mkt_prefill");
+    if (!raw) return;
+    let draft;
+    try { draft = JSON.parse(raw); } catch { return; }
+    sessionStorage.removeItem("byrd_mkt_prefill");
+    // Wait for contacts to load, then pre-select by target tags
+    (async () => {
+      const list = contacts.length ? contacts : await load();
+      const targets = new Set((draft.target_tags || []).map((t) => t.toLowerCase()));
+      if (targets.size > 0) {
+        const matched = list.filter((c) =>
+          c.email && !c.unsubscribed && (c.tags || []).some((t) => targets.has(t.toLowerCase()))
+        );
+        setSelected(new Set(matched.map((c) => c.id)));
+      } else {
+        // Empty target_tags → everyone with a valid, subscribed email
+        const matched = list.filter((c) => c.email && !c.unsubscribed);
+        setSelected(new Set(matched.map((c) => c.id)));
+      }
+      setPrefill(draft);
+      setDialog("compose");
+      // Strip the compose param so a refresh doesn't re-trigger
+      navigate("/admin/contacts", { replace: true });
+    })();
+  }, [location.search]);
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
@@ -158,8 +194,9 @@ export default function AdminContacts() {
       {dialog === "compose" && (
         <ComposeDialog
           contacts={contacts.filter((c) => selected.has(c.id))}
-          onClose={() => setDialog(null)}
-          onSent={() => { setDialog(null); setSelected(new Set()); load(); }}
+          prefill={prefill}
+          onClose={() => { setDialog(null); setPrefill(null); }}
+          onSent={() => { setDialog(null); setPrefill(null); setSelected(new Set()); load(); }}
         />
       )}
     </div>
@@ -259,10 +296,10 @@ function ImportDialog({ onClose, onDone }) {
   );
 }
 
-function ComposeDialog({ contacts, onClose, onSent }) {
+function ComposeDialog({ contacts, prefill, onClose, onSent }) {
   const [templates, setTemplates] = useState([]);
-  const [subject, setSubject] = useState("");
-  const [body, setBody] = useState("");
+  const [subject, setSubject] = useState(prefill?.subject || "");
+  const [body, setBody] = useState(prefill?.body || "");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   useEffect(() => { api.get("/admin/email-templates").then((r) => setTemplates(r.data)); }, []);
@@ -288,6 +325,11 @@ function ComposeDialog({ contacts, onClose, onSent }) {
       <div onClick={(e) => e.stopPropagation()} className="bg-white rounded-lg border border-[#E4DFD1] shadow-2xl w-full max-w-2xl max-h-[92vh] flex flex-col">
         <div className="px-6 py-4 border-b border-[#E4DFD1] flex items-center justify-between"><div><div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Marketing Email · {contacts.length} recipient{contacts.length === 1 ? "" : "s"}</div><h2 className="font-serif text-2xl font-bold mt-1">Compose</h2></div><button onClick={onClose} className="w-9 h-9 grid place-items-center rounded-md border border-[#E4DFD1]"><X size={16} /></button></div>
         <div className="px-6 py-4 space-y-3 overflow-y-auto">
+          {prefill && (
+            <div className="rounded-md border border-[#C89434] bg-[#FBEFD3]/60 text-[#7A5410] text-xs px-3 py-2 inline-flex items-center gap-2" data-testid="prefill-banner">
+              <Sparkles size={12} /> Draft from your Assistant — review, edit, then send when it feels right.
+            </div>
+          )}
           <div className="text-xs text-[#6B6558]">
             {contacts.length} selected · {validEmails.length} will receive · {contacts.filter((c) => c.unsubscribed).length} unsubscribed · {contacts.filter((c) => !c.email).length} missing email
           </div>
