@@ -37,6 +37,16 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
 - P3: Real Marketplace (lender self-onboarding + term-sheet capture)
 
+### Scenario-owned document folders + client delete — SHIPPED 2026-02
+- **Structural change:** document checklists moved from client → scenario. Each loan (Purchase, Refi, Construction, Bridge, SBA) has its own folder now, so a client with two deals (e.g. hotel purchase + MF refi) sees two independent doc lists.
+- **Preset checklists** picked at scenario creation: Purchase, Refinance, Construction, Bridge, SBA, or Blank. Broker can then add/remove lines per scenario.
+- **Copy between scenarios**: when a doc (like Personal Tax Returns) is relevant for two deals for the same client, the broker can copy the line + the uploaded file from one scenario into another with a picker dialog. Each copy is independent (re-uploading in one doesn't touch the other).
+- **Client portal reshape**: borrower now sees one collapsible section per scenario, each with its own progress bar, category grouping, and upload controls.
+- **Delete client**: new "Delete client" button on the client detail page. Blocks with a 409 if any scenarios exist ("Delete or reassign them first"), otherwise clean-deletes user + invite + any orphan doc records.
+- **Lender visibility** simplified: per-doc `lender_visibility` field (Hidden / On Request / Included) replaces the old `scenario.attached_docs` array. Per-share overrides continue to work by doc_id, no lender-facing breakage.
+- **Migration**: one-time startup step wiped legacy client-level docs + files (fresh start per user's request) and cleared stale `attached_docs`/`doc_grants`/`doc_overrides` on all scenarios.
+- New endpoints: `GET /admin/scenarios/doc-templates`, `POST/PATCH/DELETE /admin/scenarios/{sid}/docs[/{did}]`, `GET /admin/scenarios/{sid}/docs/copy-source`, `POST /admin/scenarios/{sid}/docs/copy`, `DELETE /admin/clients/{id}`.
+
 ### Personal Assistant × CRM (marketing awareness) — SHIPPED 2026-02
 - Assistant turn context now injects a compact CRM snapshot: total contacts, tag counts, unsubscribed count, days_since_last_marketing, last marketing subject, and up to 15 stale contacts (never contacted OR contacted 60+ days ago, valid email, not unsubscribed).
 - System prompt updated: Claude answers rolodex queries ("who haven't I contacted in 60 days?"), and when 30+ days have passed since the last marketing send, mentions it once and offers to draft a marketing email.

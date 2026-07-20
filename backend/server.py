@@ -116,26 +116,102 @@ def sanitize_user(u: dict) -> dict:
 
 
 # ================ Startup: seed admins & default doc template ================
-DEFAULT_DOC_TEMPLATE = [
+# ---------- Document checklist templates (per-scenario) ----------
+# Each template seeds a new scenario's document folder. The broker picks one at scenario creation.
+# Keep labels short and clear — brokers can rename or add lines after seeding.
+
+_PERSONAL_CORE = [
     {"label": "Personal Financial Statement", "category": "Personal", "required": True},
     {"label": "Personal Tax Returns — Year 1", "category": "Personal", "required": True},
     {"label": "Personal Tax Returns — Year 2", "category": "Personal", "required": True},
     {"label": "Personal Tax Returns — Year 3", "category": "Personal", "required": True},
+    {"label": "Resume / Bio", "category": "Personal", "required": True},
+    {"label": "Government-Issued ID", "category": "Personal", "required": True},
+]
+
+_BUSINESS_CORE = [
+    {"label": "Entity Docs (LLC / EIN)", "category": "Business", "required": True},
     {"label": "Business Tax Returns — Year 1", "category": "Business", "required": True},
     {"label": "Business Tax Returns — Year 2", "category": "Business", "required": True},
     {"label": "Business Tax Returns — Year 3", "category": "Business", "required": True},
-    {"label": "Resume", "category": "Personal", "required": True},
-    {"label": "Government-Issued ID", "category": "Personal", "required": True},
     {"label": "Bank Statements (3 months)", "category": "Financial", "required": True},
-    {"label": "Entity Docs (LLC / EIN)", "category": "Business", "required": True},
-    {"label": "Rent Roll", "category": "Property", "required": False},
-    {"label": "Operating Statements / T-12", "category": "Property", "required": False},
-    {"label": "Property Photos", "category": "Property", "required": False},
-    {"label": "Purchase Contract", "category": "Property", "required": False},
-    {"label": "Appraisal", "category": "Property", "required": False},
-    {"label": "Insurance Certificate", "category": "Property", "required": False},
-    {"label": "Construction Budget", "category": "Property", "required": False},
 ]
+
+DOC_TEMPLATES: Dict[str, dict] = {
+    "purchase": {
+        "label": "Purchase — Standard",
+        "description": "Personal + business + property basics + purchase contract.",
+        "items": _PERSONAL_CORE + _BUSINESS_CORE + [
+            {"label": "Purchase Contract / LOI", "category": "Property", "required": True},
+            {"label": "Rent Roll (if any)", "category": "Property", "required": False},
+            {"label": "Trailing 12-Month P&L (T-12)", "category": "Property", "required": True},
+            {"label": "Property Photos", "category": "Property", "required": False},
+            {"label": "Environmental Report / Phase I", "category": "Property", "required": False},
+            {"label": "Insurance Quote", "category": "Property", "required": False},
+        ],
+    },
+    "refinance": {
+        "label": "Refinance — Standard",
+        "description": "Personal + business + rent roll + T-12 + existing loan payoff.",
+        "items": _PERSONAL_CORE + _BUSINESS_CORE + [
+            {"label": "Current Rent Roll", "category": "Property", "required": True},
+            {"label": "Trailing 12-Month P&L (T-12)", "category": "Property", "required": True},
+            {"label": "Existing Loan Statement / Payoff Quote", "category": "Property", "required": True},
+            {"label": "Recent Appraisal (if available)", "category": "Property", "required": False},
+            {"label": "Property Photos", "category": "Property", "required": False},
+            {"label": "Insurance Certificate", "category": "Property", "required": False},
+        ],
+    },
+    "construction": {
+        "label": "Construction — Standard",
+        "description": "Personal + business + budget + plans + GC docs + land contract.",
+        "items": _PERSONAL_CORE + _BUSINESS_CORE + [
+            {"label": "Land Purchase Contract / Deed", "category": "Property", "required": True},
+            {"label": "Detailed Construction Budget", "category": "Property", "required": True},
+            {"label": "Architectural Plans & Specs", "category": "Property", "required": True},
+            {"label": "GC Agreement / Bid", "category": "Property", "required": True},
+            {"label": "GC Resume / License", "category": "Property", "required": True},
+            {"label": "Pro Forma (Stabilized)", "category": "Property", "required": True},
+            {"label": "Feasibility / Market Study", "category": "Property", "required": False},
+            {"label": "Environmental Report / Phase I", "category": "Property", "required": False},
+        ],
+    },
+    "bridge": {
+        "label": "Bridge / Value-Add",
+        "description": "Personal + business + business plan + T-12 + capex plan.",
+        "items": _PERSONAL_CORE + _BUSINESS_CORE + [
+            {"label": "Business Plan / Investment Memo", "category": "Property", "required": True},
+            {"label": "Current Rent Roll", "category": "Property", "required": True},
+            {"label": "Trailing 12-Month P&L (T-12)", "category": "Property", "required": True},
+            {"label": "Capex / Renovation Budget", "category": "Property", "required": True},
+            {"label": "Pro Forma (Stabilized)", "category": "Property", "required": True},
+            {"label": "Purchase Contract (if acquiring)", "category": "Property", "required": False},
+            {"label": "Property Photos", "category": "Property", "required": False},
+        ],
+    },
+    "sba": {
+        "label": "SBA 7(a) / 504",
+        "description": "Personal + business + 3-yr financials + SBA-specific forms.",
+        "items": _PERSONAL_CORE + _BUSINESS_CORE + [
+            {"label": "Year-to-Date P&L and Balance Sheet", "category": "Business", "required": True},
+            {"label": "Business Debt Schedule", "category": "Business", "required": True},
+            {"label": "SBA Form 1919 — Borrower Info", "category": "Business", "required": True},
+            {"label": "SBA Form 413 — Personal Financial Statement", "category": "Personal", "required": True},
+            {"label": "Purchase Contract / LOI (if applicable)", "category": "Property", "required": False},
+            {"label": "Business Plan", "category": "Business", "required": True},
+            {"label": "Property Appraisal (if owner-occ)", "category": "Property", "required": False},
+        ],
+    },
+    "blank": {
+        "label": "Blank — start empty",
+        "description": "No lines seeded. Add each item manually.",
+        "items": [],
+    },
+}
+
+# Kept for the invite endpoint's backward-compat signature (no longer seeds anything).
+DEFAULT_DOC_TEMPLATE: List[dict] = []
+DEFAULT_SCENARIO_TEMPLATE_KEY = "purchase"
 
 
 @app.on_event("startup")
@@ -161,6 +237,26 @@ async def seed():
             # Ensure role is admin (idempotent)
             if existing.get("role") != "admin":
                 await db.users.update_one({"id": existing["id"]}, {"$set": {"role": "admin"}})
+
+    # One-time migration: docs moved from client to scenario. Wipe legacy client-level docs
+    # and any scenario references to them so we start fresh.
+    flag = await db.system_flags.find_one({"key": "docs_scenario_migration_v1"})
+    if not flag:
+        del_docs = await db.client_docs.delete_many({})
+        del_files = await db.client_files.delete_many({})
+        # Clear stale doc-attachment fields on scenarios and shares
+        await db.scenarios.update_many({}, {"$set": {"attached_docs": []}})
+        await db.scenario_shares.update_many({}, {"$set": {"doc_grants": [], "doc_overrides": {}}})
+        await db.system_flags.insert_one({
+            "key": "docs_scenario_migration_v1",
+            "applied_at": now_iso(),
+            "deleted_client_docs": del_docs.deleted_count,
+            "deleted_client_files": del_files.deleted_count,
+        })
+        logger.info(
+            "Scenario-docs migration applied: dropped %s client_docs and %s client_files",
+            del_docs.deleted_count, del_files.deleted_count,
+        )
 
 
 # ================ Models ================
@@ -744,7 +840,6 @@ async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=D
         raise HTTPException(status_code=400, detail="A user with this email already exists")
     user_id = str(uuid.uuid4())
     token = uuid.uuid4().hex + uuid.uuid4().hex
-    template = body.doc_template or DEFAULT_DOC_TEMPLATE
     now = now_iso()
     await db.users.insert_one({
         "id": user_id,
@@ -766,21 +861,7 @@ async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=D
         "created_at": now,
         "used_at": None,
     })
-    # Seed doc checklist
-    for i, item in enumerate(template):
-        await db.client_docs.insert_one({
-            "id": str(uuid.uuid4()),
-            "client_id": user_id,
-            "label": item.get("label", "Document"),
-            "category": item.get("category", "Other"),
-            "required": item.get("required", True),
-            "status": "pending",
-            "notes": "",
-            "file_id": None,
-            "order": i,
-            "created_at": now,
-            "updated_at": now,
-        })
+    # Document checklists now live on each SCENARIO (not the client). Nothing to seed here.
     # Email the invite link to the client (non-blocking, safe if Postmark down)
     invite_url = f"{public_base_url()}/portal/invite/{token}" if public_base_url() else f"/portal/invite/{token}"
     user_stub = {"name": body.name, "email": body.email.lower()}
@@ -837,7 +918,8 @@ async def accept_invite(token: str, body: InviteAccept):
 
 # ================ Admin: clients ================
 async def _client_summary(client_id: str) -> dict:
-    docs = await db.client_docs.find({"client_id": client_id}, {"_id": 0}).to_list(500)
+    """Aggregate doc-status counts across every scenario belonging to this client."""
+    docs = await db.client_docs.find({"client_id": client_id}, {"_id": 0}).to_list(2000)
     total = len(docs)
     counts = {"pending": 0, "uploaded": 0, "reviewed": 0, "rejected": 0}
     for d in docs:
@@ -881,86 +963,93 @@ async def admin_get_client(client_id: str, admin=Depends(require_admin)):
     u = await db.users.find_one({"id": client_id, "role": "client"}, {"_id": 0, "password_hash": 0})
     if not u:
         raise HTTPException(status_code=404, detail="Client not found")
-    u.pop("loan_type", None)  # legacy field — loan_type now lives on the scenario
-    docs = await db.client_docs.find({"client_id": client_id}, {"_id": 0}).sort("order", 1).to_list(500)
-    # Attach file metadata (without content) for docs that have uploads
-    for d in docs:
-        if d.get("file_id"):
-            f = await db.client_files.find_one({"id": d["file_id"]}, {"_id": 0, "data_b64": 0})
-            d["file"] = f
+    u.pop("loan_type", None)  # legacy — loan_type now lives on each scenario
     invite = await db.invites.find_one({"user_id": client_id}, {"_id": 0})
     scenarios = await db.scenarios.find(
         {"client_id": client_id},
         {"_id": 0, "id": 1, "name": 1, "status": 1, "loan_request": 1, "updated_at": 1, "created_at": 1},
     ).sort("updated_at", -1).to_list(200)
-    # Slim loan_request down to just loan_type + loan_amount for the client page
+    scen_ids = [s["id"] for s in scenarios]
+    doc_counts_by_scen: Dict[str, dict] = {sid: {"total": 0, "uploaded": 0, "reviewed": 0} for sid in scen_ids}
+    if scen_ids:
+        async for d in db.client_docs.find({"scenario_id": {"$in": scen_ids}}, {"_id": 0, "scenario_id": 1, "status": 1}):
+            b = doc_counts_by_scen.setdefault(d["scenario_id"], {"total": 0, "uploaded": 0, "reviewed": 0})
+            b["total"] += 1
+            if d.get("status") == "uploaded":
+                b["uploaded"] += 1
+            elif d.get("status") == "reviewed":
+                b["reviewed"] += 1
     for s in scenarios:
         lr = s.pop("loan_request", None) or {}
         s["loan_type"] = lr.get("loan_type")
         s["loan_amount"] = lr.get("loan_amount")
-    return {"client": u, "docs": docs, "invite": invite, "scenarios": scenarios}
+        s["doc_counts"] = doc_counts_by_scen.get(s["id"], {"total": 0, "uploaded": 0, "reviewed": 0})
+    return {"client": u, "invite": invite, "scenarios": scenarios}
 
 
-@api.post("/admin/clients/{client_id}/docs")
-async def admin_add_doc(client_id: str, body: DocCreate, admin=Depends(require_admin)):
+@api.delete("/admin/clients/{client_id}")
+async def admin_delete_client(client_id: str, admin=Depends(require_admin)):
+    """Delete a client. BLOCKS if any scenarios exist — broker must archive/delete those first."""
     u = await db.users.find_one({"id": client_id, "role": "client"})
     if not u:
         raise HTTPException(status_code=404, detail="Client not found")
-    # Determine next order
-    last = await db.client_docs.find({"client_id": client_id}).sort("order", -1).to_list(1)
-    next_order = (last[0]["order"] + 1) if last else 0
-    now = now_iso()
-    doc = {
-        "id": str(uuid.uuid4()),
-        "client_id": client_id,
-        "label": body.label,
-        "category": body.category or "Other",
-        "required": body.required,
-        "status": "pending",
-        "notes": "",
-        "file_id": None,
-        "order": next_order,
-        "created_at": now,
-        "updated_at": now,
-    }
-    await db.client_docs.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
-
-
-@api.patch("/admin/clients/{client_id}/docs/{doc_id}")
-async def admin_update_doc(client_id: str, doc_id: str, body: DocUpdate, admin=Depends(require_admin)):
-    update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
-    if not update:
-        raise HTTPException(status_code=400, detail="Nothing to update")
-    update["updated_at"] = now_iso()
-    res = await db.client_docs.update_one({"id": doc_id, "client_id": client_id}, {"$set": update})
-    if res.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Doc not found")
-    d = await db.client_docs.find_one({"id": doc_id}, {"_id": 0})
-    return d
-
-
-@api.delete("/admin/clients/{client_id}/docs/{doc_id}")
-async def admin_delete_doc(client_id: str, doc_id: str, admin=Depends(require_admin)):
-    d = await db.client_docs.find_one({"id": doc_id, "client_id": client_id})
-    if not d:
-        raise HTTPException(status_code=404, detail="Doc not found")
-    if d.get("file_id"):
-        await db.client_files.delete_one({"id": d["file_id"]})
-    await db.client_docs.delete_one({"id": doc_id})
+    scen_count = await db.scenarios.count_documents({"client_id": client_id})
+    if scen_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This client has {scen_count} loan scenario{'s' if scen_count != 1 else ''}. Delete or reassign them first, then delete the client.",
+        )
+    orphan_docs = await db.client_docs.find({"client_id": client_id}, {"_id": 0, "file_id": 1}).to_list(2000)
+    file_ids = [d["file_id"] for d in orphan_docs if d.get("file_id")]
+    if file_ids:
+        await db.client_files.delete_many({"id": {"$in": file_ids}})
+    await db.client_docs.delete_many({"client_id": client_id})
+    await db.invites.delete_many({"user_id": client_id})
+    await db.users.delete_one({"id": client_id})
     return {"ok": True}
 
 
 # ================ Client portal ================
 @api.get("/client/me")
 async def client_me(user=Depends(require_client)):
-    docs = await db.client_docs.find({"client_id": user["id"]}, {"_id": 0}).sort("order", 1).to_list(500)
-    for d in docs:
-        if d.get("file_id"):
-            f = await db.client_files.find_one({"id": d["file_id"]}, {"_id": 0, "data_b64": 0})
-            d["file"] = f
-    return {"user": user, "docs": docs}
+    """Borrower view — docs grouped by scenario. Each scenario gets its own checklist."""
+    scenarios = await db.scenarios.find(
+        {"client_id": user["id"]},
+        {"_id": 0, "id": 1, "name": 1, "status": 1, "loan_request": 1, "property_info": 1, "created_at": 1},
+    ).sort("created_at", 1).to_list(200)
+    scen_ids = [s["id"] for s in scenarios]
+    docs_by_scen: Dict[str, list] = {sid: [] for sid in scen_ids}
+    if scen_ids:
+        docs = await db.client_docs.find(
+            {"scenario_id": {"$in": scen_ids}}, {"_id": 0},
+        ).sort("order", 1).to_list(5000)
+        file_ids = [d["file_id"] for d in docs if d.get("file_id")]
+        files_by_id: Dict[str, dict] = {}
+        if file_ids:
+            async for f in db.client_files.find({"id": {"$in": file_ids}}, {"_id": 0, "data_b64": 0}):
+                files_by_id[f["id"]] = f
+        for d in docs:
+            if d.get("file_id") and d["file_id"] in files_by_id:
+                d["file"] = files_by_id[d["file_id"]]
+            docs_by_scen.setdefault(d["scenario_id"], []).append(d)
+    out_scenarios = []
+    for s in scenarios:
+        lr = s.get("loan_request") or {}
+        prop = s.get("property_info") or {}
+        location = ""
+        if prop.get("city") and prop.get("state"):
+            location = f"{prop['city']}, {prop['state']}"
+        out_scenarios.append({
+            "id": s["id"],
+            "name": s.get("name") or "Scenario",
+            "status": s.get("status"),
+            "loan_type": lr.get("loan_type"),
+            "loan_amount": lr.get("loan_amount"),
+            "property_type": prop.get("property_type"),
+            "location": location,
+            "docs": docs_by_scen.get(s["id"], []),
+        })
+    return {"user": user, "scenarios": out_scenarios}
 
 
 @api.post("/client/docs/{doc_id}/upload")
@@ -974,7 +1063,6 @@ async def client_upload(doc_id: str, body: DocUploadInput, user=Depends(require_
         raise HTTPException(status_code=400, detail="Invalid base64")
     if len(raw) > MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_MB}MB limit")
-    # If replacing an existing file, remove old
     if d.get("file_id"):
         await db.client_files.delete_one({"id": d["file_id"]})
     file_id = str(uuid.uuid4())
@@ -982,6 +1070,7 @@ async def client_upload(doc_id: str, body: DocUploadInput, user=Depends(require_
         "id": file_id,
         "doc_id": doc_id,
         "client_id": user["id"],
+        "scenario_id": d.get("scenario_id"),
         "filename": body.filename,
         "content_type": body.content_type,
         "size": len(raw),
@@ -1124,6 +1213,12 @@ class ScenarioCreate(BaseModel):
     attached_docs: List[AttachedDoc] = Field(default_factory=list)
     notes: Optional[str] = ""
     business_plan: Optional[str] = ""
+    doc_template: Optional[str] = None  # Key from DOC_TEMPLATES; defaults to "purchase"
+
+
+class ScenarioDocCopy(BaseModel):
+    source_scenario_id: str
+    doc_ids: List[str] = Field(min_length=1)
 
 
 class ScenarioUpdate(BaseModel):
@@ -1582,21 +1677,54 @@ def _clean_scenario(doc: dict) -> dict:
     return doc
 
 
+@api.get("/admin/scenarios/doc-templates")
+async def list_doc_templates(admin=Depends(require_admin)):
+    """Preset checklists a broker can pick when starting a new scenario."""
+    return [
+        {"key": k, "label": v["label"], "description": v["description"], "item_count": len(v["items"])}
+        for k, v in DOC_TEMPLATES.items()
+    ]
+
+
 @api.post("/admin/scenarios")
 async def create_scenario(body: ScenarioCreate, admin=Depends(require_admin)):
     if body.client_id:
         client = await db.users.find_one({"id": body.client_id, "role": "client"})
         if not client:
             raise HTTPException(status_code=400, detail="Client not found")
+    payload = body.model_dump()
+    template_key = payload.pop("doc_template", None) or DEFAULT_SCENARIO_TEMPLATE_KEY
+    if template_key not in DOC_TEMPLATES:
+        template_key = DEFAULT_SCENARIO_TEMPLATE_KEY
+    sid = str(uuid.uuid4())
+    now = now_iso()
     doc = {
-        "id": str(uuid.uuid4()),
+        "id": sid,
         "broker_id": admin["id"],
         "status": "draft",
-        **body.model_dump(),
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
+        **payload,
+        "doc_template": template_key,
+        "created_at": now,
+        "updated_at": now,
     }
     await db.scenarios.insert_one(doc)
+    # Seed scenario doc checklist from the chosen template
+    template_items = DOC_TEMPLATES[template_key]["items"]
+    for i, item in enumerate(template_items):
+        await db.client_docs.insert_one({
+            "id": str(uuid.uuid4()),
+            "scenario_id": sid,
+            "client_id": body.client_id,  # denormalized so the borrower can query their own docs
+            "label": item.get("label", "Document"),
+            "category": item.get("category", "Other"),
+            "required": item.get("required", True),
+            "status": "pending",
+            "notes": "",
+            "file_id": None,
+            "order": i,
+            "created_at": now,
+            "updated_at": now,
+        })
     return _clean_scenario(doc)
 
 
@@ -1621,15 +1749,15 @@ async def get_scenario(sid: str, admin=Depends(require_admin)):
     if d.get("client_id"):
         client = await db.users.find_one({"id": d["client_id"]}, {"_id": 0, "password_hash": 0})
         d["client"] = client
-        # attach client docs (for the picker)
-        client_docs = await db.client_docs.find({"client_id": d["client_id"]}, {"_id": 0}).sort("order", 1).to_list(500)
-        for cd in client_docs:
-            if cd.get("file_id"):
-                f = await db.client_files.find_one({"id": cd["file_id"]}, {"_id": 0, "data_b64": 0})
-                cd["file"] = f
-        d["client_docs"] = client_docs
-    else:
-        d["client_docs"] = []
+    # Docs now live on the scenario itself
+    docs = await db.client_docs.find({"scenario_id": sid}, {"_id": 0}).sort("order", 1).to_list(500)
+    for cd in docs:
+        if cd.get("file_id"):
+            f = await db.client_files.find_one({"id": cd["file_id"]}, {"_id": 0, "data_b64": 0})
+            cd["file"] = f
+    d["docs"] = docs
+    # Backward-compat alias used by older callers/AI code paths
+    d["client_docs"] = docs
     d["shares"] = await db.scenario_shares.find({"scenario_id": sid}, {"_id": 0}).sort("created_at", -1).to_list(200)
     return d
 
@@ -1653,9 +1781,168 @@ async def delete_scenario(sid: str, admin=Depends(require_admin)):
     res = await db.scenarios.delete_one({"id": sid})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Not found")
+    # Cascade: drop scenario docs + their files + share metadata
+    docs = await db.client_docs.find({"scenario_id": sid}, {"_id": 0, "file_id": 1}).to_list(2000)
+    file_ids = [d["file_id"] for d in docs if d.get("file_id")]
+    if file_ids:
+        await db.client_files.delete_many({"id": {"$in": file_ids}})
+    await db.client_docs.delete_many({"scenario_id": sid})
     await db.scenario_shares.delete_many({"scenario_id": sid})
     await db.share_views.delete_many({"scenario_id": sid})
     return {"ok": True}
+
+
+# ---------- Scenario document checklist ----------
+@api.post("/admin/scenarios/{sid}/docs")
+async def scenario_add_doc(sid: str, body: DocCreate, admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0, "client_id": 1})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    last = await db.client_docs.find({"scenario_id": sid}).sort("order", -1).to_list(1)
+    next_order = (last[0]["order"] + 1) if last else 0
+    now = now_iso()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "scenario_id": sid,
+        "client_id": scen.get("client_id"),
+        "label": body.label,
+        "category": body.category or "Other",
+        "required": body.required,
+        "status": "pending",
+        "notes": "",
+        "file_id": None,
+        "order": next_order,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.client_docs.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/admin/scenarios/{sid}/docs/{doc_id}")
+async def scenario_update_doc(sid: str, doc_id: str, body: DocUpdate, admin=Depends(require_admin)):
+    update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = now_iso()
+    res = await db.client_docs.update_one({"id": doc_id, "scenario_id": sid}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Doc not found")
+    d = await db.client_docs.find_one({"id": doc_id}, {"_id": 0})
+    return d
+
+
+@api.delete("/admin/scenarios/{sid}/docs/{doc_id}")
+async def scenario_delete_doc(sid: str, doc_id: str, admin=Depends(require_admin)):
+    d = await db.client_docs.find_one({"id": doc_id, "scenario_id": sid})
+    if not d:
+        raise HTTPException(status_code=404, detail="Doc not found")
+    if d.get("file_id"):
+        await db.client_files.delete_one({"id": d["file_id"]})
+    await db.client_docs.delete_one({"id": doc_id})
+    # Clean up any share overrides that pointed to this doc
+    await db.scenario_shares.update_many(
+        {"scenario_id": sid},
+        {"$unset": {f"doc_overrides.{doc_id}": ""}, "$pull": {"doc_grants": doc_id}},
+    )
+    return {"ok": True}
+
+
+@api.get("/admin/scenarios/{sid}/docs/copy-source")
+async def scenario_docs_copy_source(sid: str, admin=Depends(require_admin)):
+    """List sibling scenarios (same client) whose docs can be copied into this scenario."""
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0, "client_id": 1})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    if not scen.get("client_id"):
+        return []
+    siblings = await db.scenarios.find(
+        {"client_id": scen["client_id"], "id": {"$ne": sid}},
+        {"_id": 0, "id": 1, "name": 1, "loan_request": 1, "created_at": 1},
+    ).sort("created_at", -1).to_list(200)
+    result = []
+    for s in siblings:
+        docs = await db.client_docs.find(
+            {"scenario_id": s["id"]}, {"_id": 0},
+        ).sort("order", 1).to_list(500)
+        for d in docs:
+            if d.get("file_id"):
+                f = await db.client_files.find_one({"id": d["file_id"]}, {"_id": 0, "data_b64": 0})
+                d["file"] = f
+        if not docs:
+            continue
+        result.append({
+            "scenario_id": s["id"],
+            "scenario_name": s.get("name") or "Untitled",
+            "loan_type": (s.get("loan_request") or {}).get("loan_type"),
+            "docs": docs,
+        })
+    return result
+
+
+@api.post("/admin/scenarios/{sid}/docs/copy")
+async def scenario_docs_copy(sid: str, body: ScenarioDocCopy, admin=Depends(require_admin)):
+    """Copy selected doc lines from another scenario into this one. Duplicates the file too
+    (each scenario keeps its own audit trail so re-uploading in one doesn't affect the other)."""
+    dest = await db.scenarios.find_one({"id": sid}, {"_id": 0, "client_id": 1})
+    if not dest:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    source = await db.scenarios.find_one({"id": body.source_scenario_id}, {"_id": 0, "client_id": 1})
+    if not source:
+        raise HTTPException(status_code=404, detail="Source scenario not found")
+    if source.get("client_id") != dest.get("client_id"):
+        raise HTTPException(status_code=400, detail="Can only copy docs between scenarios for the same client")
+    source_docs = await db.client_docs.find(
+        {"scenario_id": body.source_scenario_id, "id": {"$in": body.doc_ids}}, {"_id": 0},
+    ).to_list(500)
+    if not source_docs:
+        raise HTTPException(status_code=404, detail="No matching docs to copy")
+    # Compute next order for this scenario
+    last = await db.client_docs.find({"scenario_id": sid}).sort("order", -1).to_list(1)
+    next_order = (last[0]["order"] + 1) if last else 0
+    now = now_iso()
+    copied = []
+    for sd in source_docs:
+        new_doc_id = str(uuid.uuid4())
+        new_file_id = None
+        # Deep-copy the file if present so each scenario is self-contained
+        if sd.get("file_id"):
+            f = await db.client_files.find_one({"id": sd["file_id"]}, {"_id": 0})
+            if f:
+                new_file_id = str(uuid.uuid4())
+                await db.client_files.insert_one({
+                    "id": new_file_id,
+                    "doc_id": new_doc_id,
+                    "client_id": dest.get("client_id"),
+                    "scenario_id": sid,
+                    "filename": f.get("filename"),
+                    "content_type": f.get("content_type"),
+                    "size": f.get("size"),
+                    "data_b64": f.get("data_b64"),
+                    "uploaded_at": now,
+                    "copied_from_doc_id": sd["id"],
+                })
+        new_doc = {
+            "id": new_doc_id,
+            "scenario_id": sid,
+            "client_id": dest.get("client_id"),
+            "label": sd.get("label", "Document"),
+            "category": sd.get("category", "Other"),
+            "required": sd.get("required", True),
+            "status": "uploaded" if new_file_id else "pending",
+            "notes": sd.get("notes", ""),
+            "file_id": new_file_id,
+            "order": next_order,
+            "created_at": now,
+            "updated_at": now,
+            "copied_from_doc_id": sd["id"],
+        }
+        next_order += 1
+        await db.client_docs.insert_one(new_doc)
+        new_doc.pop("_id", None)
+        copied.append(new_doc)
+    return {"ok": True, "copied": copied, "count": len(copied)}
 
 
 @api.get("/admin/scenarios/{sid}/pdf")
@@ -1677,34 +1964,28 @@ async def scenario_pdf(sid: str, admin=Depends(require_admin)):
 
 @api.get("/admin/scenarios/{sid}/docs.zip")
 async def admin_scenario_docs_zip(sid: str, admin=Depends(require_admin)):
-    """Bundle every attached document (that has an uploaded file) into a single ZIP."""
+    """Bundle every uploaded document on this scenario into a single ZIP."""
     import zipfile
     from io import BytesIO
     scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
     if not scen:
         raise HTTPException(status_code=404, detail="Scenario not found")
-    attached = scen.get("attached_docs") or []
-    doc_ids = [a["doc_id"] for a in attached]
-    if not doc_ids:
-        raise HTTPException(status_code=404, detail="No documents attached")
-    docs = await db.client_docs.find({"id": {"$in": doc_ids}}, {"_id": 0}).to_list(500)
+    docs = await db.client_docs.find(
+        {"scenario_id": sid, "file_id": {"$ne": None}}, {"_id": 0},
+    ).sort("order", 1).to_list(500)
     if not docs:
-        raise HTTPException(status_code=404, detail="No documents found")
+        raise HTTPException(status_code=404, detail="No documents uploaded yet")
     buf = BytesIO()
     used_names = set()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for cd in docs:
-            if not cd.get("file_id"):
-                continue
             f = await db.client_files.find_one({"id": cd["file_id"]})
             if not f:
                 continue
             raw = base64.b64decode(f["data_b64"])
-            # Prefix filename with the checklist label so lenders see logical names
             label = (cd.get("label") or "document").replace("/", "-").replace("\\", "-").strip()
             base_name = f["filename"] or "file"
             name = f"{label} - {base_name}"
-            # Deduplicate
             n, i = name, 1
             while n in used_names:
                 stem, dot, ext = name.rpartition(".")
@@ -1938,7 +2219,7 @@ async def _require_view_session(token: str, session_token: Optional[str]):
 def _effective_doc_visibility(share: dict, attach_map: dict, doc_id: str) -> str:
     """Return effective visibility for a single doc on a specific share.
     Returns one of: 'included', 'on_request', 'hidden'.
-    Priority: per-share override > legacy per-share grant > scenario default."""
+    Priority: per-share override > legacy per-share grant > scenario doc default (on_request)."""
     overrides = share.get("doc_overrides") or {}
     if doc_id in overrides:
         v = overrides[doc_id]
@@ -1946,7 +2227,8 @@ def _effective_doc_visibility(share: dict, attach_map: dict, doc_id: str) -> str
     grants = share.get("doc_grants") or []
     if doc_id in grants:
         return "included"
-    scen_v = (attach_map.get(doc_id) or {}).get("visibility", "on_request")
+    # Default: doc's own lender_visibility field; fall back to on_request
+    scen_v = (attach_map.get(doc_id) or {}).get("lender_visibility", "on_request")
     return "included" if scen_v == "included" else "on_request"
 
 
@@ -1958,27 +2240,23 @@ async def lender_get_package(token: str, session_token: Optional[str] = None):
         raise HTTPException(status_code=404, detail="Scenario not found")
     metrics = compute_scenario_metrics(scen)
 
-    # Filter docs into included vs on-request vs hidden (per-share overrides applied)
-    attached = scen.get("attached_docs") or []
-    doc_map = {d["doc_id"]: d for d in attached}
-    client_docs = []
-    if scen.get("client_id"):
-        client_docs = await db.client_docs.find(
-            {"client_id": scen["client_id"], "id": {"$in": list(doc_map.keys())}}, {"_id": 0}
-        ).to_list(500)
+    # Every scenario doc is a candidate; the doc's own lender_visibility drives the default,
+    # and per-share overrides can flip individual docs to included/on_request/hidden.
+    scen_docs = await db.client_docs.find({"scenario_id": share["scenario_id"]}, {"_id": 0}).sort("order", 1).to_list(500)
+    doc_map = {d["id"]: d for d in scen_docs}
 
     docs_out = []
-    for cd in client_docs:
+    for cd in scen_docs:
         eff = _effective_doc_visibility(share, doc_map, cd["id"])
         if eff == "hidden":
-            continue  # lender never learns this doc exists
+            continue
         has_file = bool(cd.get("file_id"))
         viewable = has_file and eff == "included"
         docs_out.append({
             "id": cd["id"],
             "label": cd["label"],
             "category": cd.get("category"),
-            "visibility": doc_map[cd["id"]].get("visibility", "on_request"),
+            "visibility": cd.get("lender_visibility", "on_request"),
             "has_file": has_file,
             "viewable": viewable,
             "requires_request": eff == "on_request",
@@ -2013,19 +2291,17 @@ async def lender_get_doc(token: str, doc_id: str, session_token: Optional[str] =
     scen = await db.scenarios.find_one({"id": share["scenario_id"]})
     if not scen:
         raise HTTPException(status_code=404, detail="Scenario not found")
-    # Confirm doc is attached to scenario and effective visibility is 'included'
-    attached = scen.get("attached_docs") or []
-    attach_map = {d["doc_id"]: d for d in attached}
-    if doc_id not in attach_map:
+    # Doc must belong to this scenario
+    cd = await db.client_docs.find_one({"id": doc_id, "scenario_id": share["scenario_id"]})
+    if not cd:
         raise HTTPException(status_code=404, detail="Doc not part of this package")
+    attach_map = {doc_id: cd}
     eff = _effective_doc_visibility(share, attach_map, doc_id)
     if eff == "hidden":
         raise HTTPException(status_code=404, detail="Doc not part of this package")
     if eff != "included":
         raise HTTPException(status_code=403, detail="Access not granted for this document yet")
-    # Fetch file
-    cd = await db.client_docs.find_one({"id": doc_id})
-    if not cd or not cd.get("file_id"):
+    if not cd.get("file_id"):
         raise HTTPException(status_code=404, detail="Document not uploaded")
     f = await db.client_files.find_one({"id": cd["file_id"]})
     if not f:
@@ -2080,16 +2356,17 @@ async def lender_docs_zip(token: str, session_token: Optional[str] = None):
     scen = await db.scenarios.find_one({"id": share["scenario_id"]})
     if not scen:
         raise HTTPException(status_code=404, detail="Scenario not found")
-    attached = scen.get("attached_docs") or []
-    attach_map = {d["doc_id"]: d for d in attached}
-    # Only docs whose effective visibility is 'included' are bundled
+    scen_docs = await db.client_docs.find(
+        {"scenario_id": share["scenario_id"]}, {"_id": 0},
+    ).sort("order", 1).to_list(500)
+    attach_map = {d["id"]: d for d in scen_docs}
     allowed_ids = [
         did for did in attach_map
         if _effective_doc_visibility(share, attach_map, did) == "included"
     ]
     if not allowed_ids:
         raise HTTPException(status_code=404, detail="No documents available to download")
-    docs = await db.client_docs.find({"id": {"$in": allowed_ids}}, {"_id": 0}).to_list(500)
+    docs = [d for d in scen_docs if d["id"] in allowed_ids]
     buf = BytesIO()
     used_names = set()
     included_names = []

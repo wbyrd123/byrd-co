@@ -7,6 +7,7 @@ import { StatusChip, readFileAsBase64, fmtSize } from "@/byrd/docHelpers";
 import { toast } from "sonner";
 import {
   LogOut, Upload, FileText, Download, Phone, Mail, CheckCircle2, Circle, CircleAlert,
+  ChevronDown, ChevronRight,
 } from "lucide-react";
 
 const groupByCategory = (docs) => {
@@ -24,6 +25,8 @@ export default function ClientPortal() {
   const nav = useNavigate();
   const [data, setData] = useState(null);
   const [uploading, setUploading] = useState(null);
+  // Track which scenario cards are collapsed (default: open)
+  const [collapsed, setCollapsed] = useState({});
 
   const load = () => api.get("/client/me").then((r) => setData(r.data));
 
@@ -56,14 +59,16 @@ export default function ClientPortal() {
     return <div className="min-h-screen bg-[#FBF8F1] grid place-items-center text-sm text-[#6B6558]">Loading portal…</div>;
   }
 
-  const docs = data.docs;
-  const total = docs.length;
-  const uploadedOrReviewed = docs.filter((d) => ["uploaded", "reviewed"].includes(d.status)).length;
-  const reviewed = docs.filter((d) => d.status === "reviewed").length;
-  const rejected = docs.filter((d) => d.status === "rejected").length;
-  const pct = total ? Math.round((reviewed / total) * 100) : 0;
+  const scenarios = data.scenarios || [];
+  // Aggregate totals across scenarios for the header progress
+  const allDocs = scenarios.flatMap((s) => s.docs || []);
+  const totalAll = allDocs.length;
+  const reviewedAll = allDocs.filter((d) => d.status === "reviewed").length;
+  const rejectedAll = allDocs.filter((d) => d.status === "rejected").length;
+  const uploadedAll = allDocs.filter((d) => ["uploaded", "reviewed"].includes(d.status)).length;
+  const pctAll = totalAll ? Math.round((reviewedAll / totalAll) * 100) : 0;
 
-  const grouped = groupByCategory(docs);
+  const toggle = (sid) => setCollapsed((c) => ({ ...c, [sid]: !c[sid] }));
 
   return (
     <div className="min-h-screen bg-[#FBF8F1]">
@@ -102,113 +107,192 @@ export default function ClientPortal() {
               Hi, {user?.name?.split(" ")[0]}.
             </h1>
             <p className="text-[#6B6558] mt-3 max-w-xl">
-              This is your private checklist. Upload each item requested by your loan officer. We&apos;ll mark them
-              reviewed as soon as they clear our desk.
+              Each of your loans has its own checklist below. Upload each item on the deal it belongs to —
+              we&apos;ll mark items reviewed as they clear our desk.
             </p>
 
-            {/* Progress card */}
-            <div className="byrd-card p-6 md:p-7 mt-8" data-testid="client-progress">
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div>
-                  <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">Progress</div>
-                  <div className="font-serif text-2xl font-bold mt-1">
-                    {reviewed}/{total} reviewed
+            {/* Overall progress card (visible when 2+ scenarios) */}
+            {scenarios.length > 1 && totalAll > 0 && (
+              <div className="byrd-card p-6 md:p-7 mt-8" data-testid="client-progress-total">
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div>
+                    <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">Across all deals</div>
+                    <div className="font-serif text-2xl font-bold mt-1">
+                      {reviewedAll}/{totalAll} reviewed
+                    </div>
+                  </div>
+                  <div className="flex gap-2 text-xs">
+                    <span className="byrd-chip">{allDocs.filter(d => d.status === "pending").length} pending</span>
+                    <span className="byrd-chip byrd-chip-blue">{uploadedAll} uploaded</span>
+                    {rejectedAll > 0 && <span className="byrd-chip byrd-chip-red">{rejectedAll} rejected</span>}
                   </div>
                 </div>
-                <div className="flex gap-2 text-xs">
-                  <span className="byrd-chip">{docs.filter(d => d.status === "pending").length} pending</span>
-                  <span className="byrd-chip byrd-chip-blue">{uploadedOrReviewed} uploaded</span>
-                  {rejected > 0 && <span className="byrd-chip byrd-chip-red">{rejected} rejected</span>}
+                <div className="mt-4 h-2 bg-[#F3EEE0] rounded-full overflow-hidden">
+                  <div className="h-full bg-[#C89434] transition-[width] duration-500" style={{ width: `${pctAll}%` }} />
                 </div>
               </div>
-              <div className="mt-4 h-2 bg-[#F3EEE0] rounded-full overflow-hidden">
-                <div className="h-full bg-[#C89434] transition-[width] duration-500" style={{ width: `${pct}%` }} />
-              </div>
-            </div>
+            )}
 
-            {/* Doc groups */}
+            {/* Empty state */}
+            {scenarios.length === 0 && (
+              <div className="byrd-card p-10 text-center mt-8" data-testid="client-no-scenarios">
+                <div className="w-14 h-14 mx-auto rounded-full bg-[#F3EEE0] grid place-items-center text-[#C89434]">
+                  <FileText size={22} />
+                </div>
+                <h3 className="font-serif text-2xl font-bold mt-4">You&apos;re all set up.</h3>
+                <p className="text-[#6B6558] mt-2 max-w-md mx-auto">
+                  When Wayne or Caleb starts a loan scenario for you, it&apos;ll show up here with its own
+                  document checklist to complete.
+                </p>
+              </div>
+            )}
+
+            {/* Per-scenario checklists */}
             <div className="mt-8 space-y-8">
-              {Object.entries(grouped).map(([cat, list]) => (
-                <div key={cat} data-testid={`client-cat-${cat}`}>
-                  <div className="flex items-baseline justify-between mb-3">
-                    <h3 className="font-serif text-2xl font-bold">{cat}</h3>
-                    <div className="font-mono text-xs text-[#6B6558]">{list.length} items</div>
-                  </div>
-                  <div className="space-y-3">
-                    {list.map((d) => {
-                      const hasFile = !!d.file;
-                      const iconMap = {
-                        pending: <Circle size={16} className="text-[#6B6558]" />,
-                        uploaded: <FileText size={16} className="text-[#23446E]" />,
-                        reviewed: <CheckCircle2 size={16} className="text-[#245C25]" />,
-                        rejected: <CircleAlert size={16} className="text-[#8A1F1A]" />,
-                      };
-                      return (
-                        <div
-                          key={d.id}
-                          data-testid={`client-doc-${d.id}`}
-                          className="byrd-card p-4 md:p-5 flex flex-col md:flex-row md:items-center gap-4"
-                        >
-                          <div className="w-10 h-10 shrink-0 rounded-md bg-[#F3EEE0] border border-[#E4DFD1] grid place-items-center">
-                            {iconMap[d.status]}
+              {scenarios.map((s) => {
+                const docs = s.docs || [];
+                const total = docs.length;
+                const reviewed = docs.filter((d) => d.status === "reviewed").length;
+                const uploaded = docs.filter((d) => ["uploaded", "reviewed"].includes(d.status)).length;
+                const rejected = docs.filter((d) => d.status === "rejected").length;
+                const pct = total ? Math.round((reviewed / total) * 100) : 0;
+                const isCollapsed = !!collapsed[s.id];
+                const grouped = groupByCategory(docs);
+
+                return (
+                  <section key={s.id} className="byrd-card p-5 md:p-6" data-testid={`client-scenario-${s.id}`}>
+                    <button
+                      onClick={() => toggle(s.id)}
+                      className="w-full flex items-start justify-between gap-3 text-left"
+                      data-testid={`client-scenario-toggle-${s.id}`}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <div className="w-8 h-8 rounded-full bg-[#F3EEE0] text-[#C89434] grid place-items-center border border-[#E4DFD1] shrink-0">
+                            <FileText size={14} />
                           </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <div className="font-semibold">{d.label}</div>
-                              {d.required && <span className="text-[10px] font-mono uppercase text-[#C89434] tracking-widest">Required</span>}
+                          <div>
+                            <div className="font-serif text-xl md:text-2xl font-bold leading-tight">{s.name}</div>
+                            <div className="text-[11px] text-[#6B6558] mt-0.5 flex flex-wrap gap-2 items-center">
+                              {s.loan_type && <span className="byrd-chip byrd-chip-gold">{s.loan_type}</span>}
+                              {s.property_type && <span>{s.property_type}</span>}
+                              {s.location && <span>· {s.location}</span>}
                             </div>
-                            {hasFile && (
-                              <div className="text-xs text-[#6B6558] mt-1 truncate">
-                                {d.file.filename} · {fmtSize(d.file.size)}
-                              </div>
-                            )}
-                            {d.notes && (
-                              <div className="text-xs text-[#8A1F1A] mt-1">Note from broker: {d.notes}</div>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <StatusChip status={d.status} />
-                            {hasFile && (
-                              <a
-                                href={`${API_BASE}/files/${d.file.id}?tok=${localStorage.getItem("ac_token")}`}
-                                target="_blank" rel="noopener noreferrer"
-                                onClick={async (e) => {
-                                  e.preventDefault();
-                                  const res = await api.get(`/files/${d.file.id}`, { responseType: "blob" });
-                                  const url = URL.createObjectURL(res.data);
-                                  window.open(url, "_blank");
-                                }}
-                                className="byrd-btn byrd-btn-ghost h-9 px-3 text-xs"
-                                data-testid={`view-${d.id}`}
-                              >
-                                <Download size={12} /> View
-                              </a>
-                            )}
-                            <label
-                              className={`byrd-btn h-9 px-3 text-xs cursor-pointer ${
-                                hasFile ? "byrd-btn-outline" : "byrd-btn-primary"
-                              }`}
-                              data-testid={`upload-${d.id}`}
-                            >
-                              <Upload size={12} />
-                              {uploading === d.id ? "Uploading…" : hasFile ? "Replace" : "Upload"}
-                              <input
-                                type="file" className="hidden"
-                                onChange={(e) => {
-                                  const f = e.target.files?.[0];
-                                  if (f) handleUpload(d.id, f);
-                                  e.target.value = "";
-                                }}
-                                disabled={uploading === d.id}
-                              />
-                            </label>
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
+                      </div>
+                      <div className="flex items-center gap-3 shrink-0 pt-1">
+                        <div className="text-right">
+                          <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">Progress</div>
+                          <div className="font-semibold text-sm">{reviewed}/{total} reviewed</div>
+                        </div>
+                        {isCollapsed ? <ChevronRight size={18} className="text-[#6B6558]" /> : <ChevronDown size={18} className="text-[#6B6558]" />}
+                      </div>
+                    </button>
+
+                    <div className="mt-4 flex items-center gap-2 text-xs">
+                      <div className="flex-1 h-1.5 bg-[#F3EEE0] rounded-full overflow-hidden">
+                        <div className="h-full bg-[#C89434] transition-[width] duration-500" style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className="byrd-chip">{docs.filter((d) => d.status === "pending").length} pending</span>
+                      <span className="byrd-chip byrd-chip-blue">{uploaded} uploaded</span>
+                      {rejected > 0 && <span className="byrd-chip byrd-chip-red">{rejected} rejected</span>}
+                    </div>
+
+                    {!isCollapsed && (
+                      <div className="mt-6 space-y-6">
+                        {total === 0 ? (
+                          <div className="text-sm text-[#6B6558] py-6 text-center">
+                            Nothing on this deal&apos;s checklist yet — your broker will add items shortly.
+                          </div>
+                        ) : (
+                          Object.entries(grouped).map(([cat, list]) => (
+                            <div key={cat} data-testid={`client-cat-${s.id}-${cat}`}>
+                              <div className="flex items-baseline justify-between mb-2">
+                                <h4 className="font-serif text-lg font-bold">{cat}</h4>
+                                <div className="font-mono text-[10px] text-[#6B6558]">{list.length} items</div>
+                              </div>
+                              <div className="space-y-2">
+                                {list.map((d) => {
+                                  const hasFile = !!d.file;
+                                  const iconMap = {
+                                    pending: <Circle size={16} className="text-[#6B6558]" />,
+                                    uploaded: <FileText size={16} className="text-[#23446E]" />,
+                                    reviewed: <CheckCircle2 size={16} className="text-[#245C25]" />,
+                                    rejected: <CircleAlert size={16} className="text-[#8A1F1A]" />,
+                                  };
+                                  return (
+                                    <div
+                                      key={d.id}
+                                      data-testid={`client-doc-${d.id}`}
+                                      className="border border-[#E4DFD1] rounded-md p-3 md:p-4 flex flex-col md:flex-row md:items-center gap-3 bg-white"
+                                    >
+                                      <div className="w-9 h-9 shrink-0 rounded-md bg-[#F3EEE0] border border-[#E4DFD1] grid place-items-center">
+                                        {iconMap[d.status]}
+                                      </div>
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <div className="font-semibold">{d.label}</div>
+                                          {d.required && <span className="text-[10px] font-mono uppercase text-[#C89434] tracking-widest">Required</span>}
+                                        </div>
+                                        {hasFile && (
+                                          <div className="text-xs text-[#6B6558] mt-1 truncate">
+                                            {d.file.filename} · {fmtSize(d.file.size)}
+                                          </div>
+                                        )}
+                                        {d.notes && (
+                                          <div className="text-xs text-[#8A1F1A] mt-1">Note from broker: {d.notes}</div>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <StatusChip status={d.status} />
+                                        {hasFile && (
+                                          <a
+                                            href={`${API_BASE}/files/${d.file.id}?tok=${localStorage.getItem("ac_token")}`}
+                                            target="_blank" rel="noopener noreferrer"
+                                            onClick={async (e) => {
+                                              e.preventDefault();
+                                              const res = await api.get(`/files/${d.file.id}`, { responseType: "blob" });
+                                              const url = URL.createObjectURL(res.data);
+                                              window.open(url, "_blank");
+                                            }}
+                                            className="byrd-btn byrd-btn-ghost h-9 px-3 text-xs"
+                                            data-testid={`view-${d.id}`}
+                                          >
+                                            <Download size={12} /> View
+                                          </a>
+                                        )}
+                                        <label
+                                          className={`byrd-btn h-9 px-3 text-xs cursor-pointer ${
+                                            hasFile ? "byrd-btn-outline" : "byrd-btn-primary"
+                                          }`}
+                                          data-testid={`upload-${d.id}`}
+                                        >
+                                          <Upload size={12} />
+                                          {uploading === d.id ? "Uploading…" : hasFile ? "Replace" : "Upload"}
+                                          <input
+                                            type="file" className="hidden"
+                                            onChange={(e) => {
+                                              const f = e.target.files?.[0];
+                                              if (f) handleUpload(d.id, f);
+                                              e.target.value = "";
+                                            }}
+                                            disabled={uploading === d.id}
+                                          />
+                                        </label>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
             </div>
           </div>
 
@@ -236,6 +320,7 @@ export default function ClientPortal() {
             <div className="byrd-card p-6 bg-[#1A1A1A] text-[#FBF8F1]">
               <div className="font-mono text-[11px] uppercase tracking-widest text-[#E5B968]">// Quick Tips</div>
               <ul className="mt-3 text-sm space-y-2 list-disc list-inside text-[#C9C1AF]">
+                <li>Each loan has its own list — upload each doc to the right deal.</li>
                 <li>PDFs are ideal — up to 15 MB per file.</li>
                 <li>Replacing an upload overwrites the previous version.</li>
                 <li>Rejected? Check the broker note and re-upload.</li>

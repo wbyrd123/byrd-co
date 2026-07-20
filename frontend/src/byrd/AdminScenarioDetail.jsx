@@ -180,16 +180,36 @@ export default function AdminScenarioDetail() {
     load();
   };
 
-  const toggleAttachDoc = async (docId, currentAttached, newVisibility) => {
-    const list = [...(scen.attached_docs || [])];
-    const idx = list.findIndex((x) => x.doc_id === docId);
-    if (currentAttached && newVisibility === "remove") {
-      if (idx >= 0) list.splice(idx, 1);
-    } else {
-      const entry = { doc_id: docId, visibility: newVisibility };
-      if (idx >= 0) list[idx] = entry; else list.push(entry);
-    }
-    await patch({ attached_docs: list });
+  const toggleDocVisibility = async (docId, newVis) => {
+    // newVis: "included" | "on_request" | "hidden"
+    await api.patch(`/admin/scenarios/${id}/docs/${docId}`, { lender_visibility: newVis });
+    load();
+  };
+
+  const addDocLine = async (item) => {
+    await api.post(`/admin/scenarios/${id}/docs`, item);
+    load();
+  };
+
+  const updateDocLine = async (docId, patch) => {
+    await api.patch(`/admin/scenarios/${id}/docs/${docId}`, patch);
+    load();
+  };
+
+  const removeDocLine = async (docId, label) => {
+    if (!window.confirm(`Remove "${label}"? Any uploaded file will be deleted.`)) return;
+    await api.delete(`/admin/scenarios/${id}/docs/${docId}`);
+    toast.success("Removed");
+    load();
+  };
+
+  const copyDocs = async (sourceScenarioId, docIds) => {
+    const res = await api.post(`/admin/scenarios/${id}/docs/copy`, {
+      source_scenario_id: sourceScenarioId,
+      doc_ids: docIds,
+    });
+    toast.success(`Copied ${res.data.count} document${res.data.count === 1 ? "" : "s"}`);
+    load();
   };
 
   const del = async () => {
@@ -339,7 +359,15 @@ export default function AdminScenarioDetail() {
       )}
 
       {tab === "docs" && (
-        <DocsTab scen={scen} onToggle={toggleAttachDoc} />
+        <DocsTab
+          scen={scen}
+          onAddDoc={addDocLine}
+          onUpdateDoc={updateDocLine}
+          onRemoveDoc={removeDocLine}
+          onToggleVisibility={toggleDocVisibility}
+          onCopyDocs={copyDocs}
+          onReload={load}
+        />
       )}
 
       {tab === "lenders" && (
@@ -619,86 +647,368 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
 }
 
 // --------------- DOCS TAB ---------------
-function DocsTab({ scen, onToggle }) {
-  const attached = scen.attached_docs || [];
-  const attachedMap = {};
-  attached.forEach((a) => { attachedMap[a.doc_id] = a.visibility; });
-  const clientDocs = scen.client_docs || [];
-
-  if (!scen.client_id) {
-    return (
-      <div className="byrd-card p-8 text-center">
-        <div className="text-sm text-[#6B6558]">Link a client to this scenario in the Package tab to attach their documents.</div>
-      </div>
-    );
-  }
-  if (clientDocs.length === 0) {
-    return (
-      <div className="byrd-card p-8 text-center">
-        <div className="text-sm text-[#6B6558]">This client has no documents yet. Ask them to upload via their portal.</div>
-      </div>
-    );
-  }
-
-  const uploaded = clientDocs.filter((d) => d.file_id);
+function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility, onCopyDocs, onReload }) {
+  const docs = scen.docs || scen.client_docs || [];
+  const [copyOpen, setCopyOpen] = useState(false);
+  const uploaded = docs.filter((d) => d.file_id).length;
+  const reviewed = docs.filter((d) => d.status === "reviewed").length;
+  const pct = docs.length ? Math.round((reviewed / docs.length) * 100) : 0;
 
   return (
     <div className="space-y-4">
-      <div className="byrd-card p-6">
-        <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// How this works</div>
-        <p className="text-sm mt-1">
-          Attach the client&apos;s uploaded docs to this scenario. Tag each as
-          <b> Included</b> (rides with the lender link) or <b>On Request</b> (lender must ask; you approve per lender).
-          Personal / financial docs should stay On Request. Property docs are safe to Include.
-        </p>
+      <div className="byrd-card p-5 flex items-center justify-between flex-wrap gap-3">
+        <div className="min-w-0">
+          <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Documents for this scenario</div>
+          <div className="font-serif text-lg font-bold mt-0.5">
+            {docs.length} lines · {uploaded} uploaded · {reviewed} reviewed
+          </div>
+          <div className="mt-2 h-1.5 bg-[#F3EEE0] rounded-full overflow-hidden max-w-md">
+            <div className="h-full bg-[#C89434] transition-[width] duration-500" style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+        {scen.client_id && (
+          <button
+            onClick={() => setCopyOpen(true)}
+            className="byrd-btn byrd-btn-outline"
+            data-testid="copy-from-scenario-btn"
+          >
+            <Copy size={14} /> Copy from Another Scenario
+          </button>
+        )}
       </div>
 
+      <AddDocForm onAdd={onAddDoc} />
+
       <div className="byrd-card overflow-hidden">
-        <div className="hidden md:grid grid-cols-[2fr_1fr_1fr_1.5fr] border-b border-[#E4DFD1] bg-[#FBF8F1]">
-          {["Document", "Category", "Uploaded", "Include in Package"].map((h) => (
+        <div className="hidden md:grid grid-cols-[2fr_.9fr_1fr_1.4fr_1.2fr] border-b border-[#E4DFD1] bg-[#FBF8F1]">
+          {["Document", "Category", "Status", "File / Notes", "Lender Visibility"].map((h) => (
             <div key={h} className="px-4 py-3 text-[11px] uppercase font-mono tracking-widest text-[#6B6558]">{h}</div>
           ))}
         </div>
-        {uploaded.map((d) => {
-          const current = attachedMap[d.id];
-          return (
-            <div key={d.id} className="grid grid-cols-1 md:grid-cols-[2fr_1fr_1fr_1.5fr] border-b border-[#E4DFD1] last:border-b-0 items-center" data-testid={`attach-row-${d.id}`}>
-              <div className="px-4 py-3">
-                <div className="font-semibold text-sm">{d.label}</div>
-                {d.file && <div className="text-xs text-[#6B6558]">{d.file.filename}</div>}
-              </div>
-              <div className="px-4 py-3 text-xs text-[#6B6558]">{d.category}</div>
-              <div className="px-4 py-3">
-                {d.status === "reviewed" ? <span className="byrd-chip byrd-chip-green">Reviewed</span> :
-                 d.status === "uploaded" ? <span className="byrd-chip byrd-chip-blue">Uploaded</span> :
-                 <span className="byrd-chip">{d.status}</span>}
-              </div>
-              <div className="px-4 py-3">
-                <div className="inline-flex rounded-md border border-[#E4DFD1] overflow-hidden text-xs">
-                  {[
-                    { v: "remove", label: "Off", icon: EyeOff },
-                    { v: "on_request", label: "On Request", icon: Eye },
-                    { v: "included", label: "Included", icon: Check },
-                  ].map((opt) => {
-                    const active = current === opt.v || (opt.v === "remove" && !current);
-                    return (
-                      <button
-                        key={opt.v}
-                        onClick={() => onToggle(d.id, !!current, opt.v)}
-                        data-testid={`attach-${d.id}-${opt.v}`}
-                        className={`px-3 h-9 flex items-center gap-1 ${
-                          active ? "bg-[#1A1A1A] text-white" : "bg-white text-[#2A2A2A] hover:bg-[#F3EEE0]"
-                        }`}
-                      >
-                        <opt.icon size={12} /> {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+        {docs.length === 0 && (
+          <div className="p-8 text-center text-sm text-[#6B6558]">
+            No document lines yet. Add one above, or copy from another scenario.
+          </div>
+        )}
+        {docs.map((d) => (
+          <ScenarioDocRow
+            key={d.id}
+            doc={d}
+            scenarioId={scen.id}
+            onUpdate={onUpdateDoc}
+            onRemove={() => onRemoveDoc(d.id, d.label)}
+            onToggleVisibility={onToggleVisibility}
+            onReload={onReload}
+          />
+        ))}
+      </div>
+
+      {copyOpen && (
+        <CopyDocsDialog
+          scenarioId={scen.id}
+          onClose={() => setCopyOpen(false)}
+          onCopy={async (sid, ids) => { await onCopyDocs(sid, ids); setCopyOpen(false); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddDocForm({ onAdd }) {
+  const [label, setLabel] = useState("");
+  const [category, setCategory] = useState("Other");
+  const [required, setRequired] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!label.trim()) { toast.error("Give it a name"); return; }
+    setBusy(true);
+    try {
+      await onAdd({ label: label.trim(), category, required });
+      setLabel(""); setCategory("Other"); setRequired(true);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <form onSubmit={submit} className="byrd-card p-4 flex flex-col md:flex-row gap-3 md:items-end" data-testid="add-doc-form">
+      <div className="flex-1">
+        <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Document label</label>
+        <input value={label} onChange={(e) => setLabel(e.target.value)}
+          data-testid="add-doc-label"
+          className="mt-1 w-full h-10 px-3 rounded-md border border-[#E4DFD1] bg-white text-sm"
+          placeholder="e.g. STAR Report, PIP Budget, Franchise Agreement"
+        />
+      </div>
+      <div>
+        <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Category</label>
+        <select value={category} onChange={(e) => setCategory(e.target.value)}
+          data-testid="add-doc-category"
+          className="mt-1 w-full h-10 px-3 rounded-md border border-[#E4DFD1] bg-white text-sm">
+          <option>Personal</option>
+          <option>Business</option>
+          <option>Financial</option>
+          <option>Property</option>
+          <option>Other</option>
+        </select>
+      </div>
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} />
+        Required
+      </label>
+      <button type="submit" disabled={busy} className="byrd-btn byrd-btn-dark" data-testid="add-doc-submit">
+        <Plus size={14} /> Add Line
+      </button>
+    </form>
+  );
+}
+
+const DOC_STATUS_OPTIONS = [
+  { v: "pending", label: "Pending" },
+  { v: "uploaded", label: "Uploaded" },
+  { v: "reviewed", label: "Reviewed" },
+  { v: "rejected", label: "Rejected" },
+];
+
+function ScenarioDocRow({ doc, scenarioId, onUpdate, onRemove, onToggleVisibility, onReload }) {
+  const [notes, setNotes] = useState(doc.notes || "");
+  const [status, setStatus] = useState(doc.status);
+  const [dirty, setDirty] = useState(false);
+  const [uploading, setUploading] = useState(false);
+
+  useEffect(() => { setNotes(doc.notes || ""); setStatus(doc.status); setDirty(false); }, [doc.id, doc.status, doc.notes]);
+
+  const save = async () => { await onUpdate(doc.id, { status, notes }); setDirty(false); };
+  const quickStatus = async (s) => { setStatus(s); await onUpdate(doc.id, { status: s, notes }); setDirty(false); };
+
+  const downloadFile = async () => {
+    const res = await api.get(`/files/${doc.file.id}`, { responseType: "blob" });
+    const url = URL.createObjectURL(res.data);
+    window.open(url, "_blank");
+  };
+
+  const uploadFile = async (file) => {
+    if (!file) return;
+    if (file.size > 15 * 1024 * 1024) { toast.error("File exceeds 15 MB limit"); return; }
+    setUploading(true);
+    try {
+      const reader = new FileReader();
+      const b64 = await new Promise((resolve, reject) => {
+        reader.onload = () => {
+          const s = reader.result;
+          const idx = s.indexOf(",");
+          resolve(s.substring(idx + 1));
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      await api.post(`/client/docs/${doc.id}/upload`, {
+        filename: file.name,
+        content_type: file.type || "application/octet-stream",
+        data_b64: b64,
+      });
+      toast.success("Uploaded");
+      onReload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const currentVis = doc.lender_visibility || "on_request";
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-[2fr_.9fr_1fr_1.4fr_1.2fr] border-b border-[#E4DFD1] last:border-b-0 items-center" data-testid={`scen-doc-${doc.id}`}>
+      <div className="px-4 py-3">
+        <div className="font-semibold">{doc.label}</div>
+        {doc.required && <div className="text-[10px] font-mono uppercase text-[#C89434] tracking-widest mt-0.5">Required</div>}
+      </div>
+      <div className="px-4 py-3 text-sm text-[#6B6558]">{doc.category}</div>
+      <div className="px-4 py-3">
+        <select
+          value={status}
+          onChange={(e) => quickStatus(e.target.value)}
+          data-testid={`doc-status-${doc.id}`}
+          className="h-9 w-full px-2 rounded-md border border-[#E4DFD1] bg-white text-sm"
+        >
+          {DOC_STATUS_OPTIONS.map((o) => <option key={o.v} value={o.v}>{o.label}</option>)}
+        </select>
+      </div>
+      <div className="px-4 py-3">
+        {doc.file ? (
+          <div className="text-sm">
+            <button onClick={downloadFile} className="inline-flex items-center gap-1 text-[#1A1A1A] hover:text-[#C89434]" data-testid={`doc-download-${doc.id}`}>
+              <Download size={12} /> {doc.file.filename}
+            </button>
+            <div className="text-[11px] text-[#6B6558] mt-0.5">{formatSize(doc.file.size)}</div>
+          </div>
+        ) : (
+          <label className="inline-flex items-center gap-1 text-[11px] text-[#6B6558] cursor-pointer hover:text-[#1A1A1A]" data-testid={`doc-upload-${doc.id}`}>
+            <input type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile(f); e.target.value = ""; }} disabled={uploading} />
+            {uploading ? "Uploading…" : "Upload for client"}
+          </label>
+        )}
+        <input
+          value={notes}
+          onChange={(e) => { setNotes(e.target.value); setDirty(true); }}
+          onBlur={() => dirty && save()}
+          placeholder="Note (visible to client)"
+          data-testid={`doc-notes-${doc.id}`}
+          className="mt-2 w-full h-8 px-2 rounded-md border border-[#E4DFD1] bg-white text-xs"
+        />
+      </div>
+      <div className="px-4 py-3 flex items-center gap-2">
+        <div className="inline-flex rounded-md border border-[#E4DFD1] overflow-hidden text-[10px]" title="Lender visibility default">
+          {[
+            { v: "hidden", label: "Hidden", icon: EyeOff },
+            { v: "on_request", label: "Req.", icon: Eye },
+            { v: "included", label: "Included", icon: Check },
+          ].map((opt) => {
+            const active = currentVis === opt.v;
+            return (
+              <button
+                key={opt.v}
+                onClick={() => onToggleVisibility(doc.id, opt.v)}
+                data-testid={`viz-${doc.id}-${opt.v}`}
+                className={`px-2 h-8 inline-flex items-center gap-1 ${active ? "bg-[#1A1A1A] text-white" : "bg-white text-[#2A2A2A] hover:bg-[#F3EEE0]"}`}
+              >
+                <opt.icon size={10} /> {opt.label}
+              </button>
+            );
+          })}
+        </div>
+        <button
+          onClick={onRemove}
+          data-testid={`doc-remove-${doc.id}`}
+          className="w-8 h-8 grid place-items-center rounded-md border border-[#E4DFD1] hover:bg-[#FADCDA] hover:border-[#E38380] hover:text-[#8A1F1A] transition-colors"
+          title="Delete line"
+        >
+          <Trash2 size={12} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function formatSize(bytes) {
+  if (!bytes && bytes !== 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function CopyDocsDialog({ scenarioId, onClose, onCopy }) {
+  const [sources, setSources] = useState(null);
+  const [selectedScen, setSelectedScen] = useState(null); // scenario_id
+  const [picked, setPicked] = useState(new Set());
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.get(`/admin/scenarios/${scenarioId}/docs/copy-source`)
+      .then((r) => {
+        setSources(r.data);
+        if (r.data.length === 1) setSelectedScen(r.data[0].scenario_id);
+      })
+      .catch(() => setSources([]));
+  }, [scenarioId]);
+
+  const toggle = (docId) => {
+    const next = new Set(picked);
+    if (next.has(docId)) next.delete(docId); else next.add(docId);
+    setPicked(next);
+  };
+
+  const currentDocs = sources?.find((s) => s.scenario_id === selectedScen)?.docs || [];
+  const allSelected = currentDocs.length > 0 && currentDocs.every((d) => picked.has(d.id));
+  const toggleAll = () => {
+    if (allSelected) setPicked(new Set());
+    else setPicked(new Set(currentDocs.map((d) => d.id)));
+  };
+
+  const submit = async () => {
+    if (!selectedScen || picked.size === 0) return;
+    setBusy(true);
+    try {
+      await onCopy(selectedScen, Array.from(picked));
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={onClose} data-testid="copy-docs-dialog">
+      <div onClick={(e) => e.stopPropagation()} className="bg-white rounded-lg border border-[#E4DFD1] shadow-2xl w-full max-w-2xl max-h-[92vh] flex flex-col">
+        <div className="px-6 py-4 border-b border-[#E4DFD1] flex items-center justify-between">
+          <div>
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Copy Documents</div>
+            <h2 className="font-serif text-2xl font-bold mt-1">From another scenario</h2>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 grid place-items-center rounded-md border border-[#E4DFD1]"><X size={16} /></button>
+        </div>
+        <div className="px-6 py-4 space-y-3 overflow-y-auto flex-1">
+          {sources === null && <div className="text-sm text-[#6B6558]">Loading…</div>}
+          {sources && sources.length === 0 && (
+            <div className="text-sm text-[#6B6558] py-8 text-center">
+              This client has no other scenarios with documents yet.
             </div>
-          );
-        })}
+          )}
+          {sources && sources.length > 0 && (
+            <>
+              <div>
+                <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Source scenario</label>
+                <select
+                  value={selectedScen || ""}
+                  onChange={(e) => { setSelectedScen(e.target.value); setPicked(new Set()); }}
+                  data-testid="copy-source-scen"
+                  className="mt-1 w-full h-10 px-3 rounded-md border border-[#E4DFD1] bg-white text-sm"
+                >
+                  <option value="">— Pick a scenario —</option>
+                  {sources.map((s) => (
+                    <option key={s.scenario_id} value={s.scenario_id}>
+                      {s.scenario_name} ({s.docs.length} docs)
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {selectedScen && (
+                <>
+                  <div className="flex items-center justify-between text-xs text-[#6B6558]">
+                    <span>{picked.size} selected of {currentDocs.length}</span>
+                    <button onClick={toggleAll} className="underline hover:text-[#1A1A1A]" data-testid="copy-select-all">
+                      {allSelected ? "Clear all" : "Select all"}
+                    </button>
+                  </div>
+                  <div className="border border-[#E4DFD1] rounded-md overflow-hidden max-h-[45vh] overflow-y-auto">
+                    {currentDocs.map((d) => (
+                      <label
+                        key={d.id}
+                        className={`flex items-center gap-2 px-3 py-2 border-b border-[#E4DFD1] last:border-b-0 hover:bg-[#FBF8F1] cursor-pointer text-sm ${picked.has(d.id) ? "bg-[#FBEFD3]/50" : "bg-white"}`}
+                        data-testid={`copy-pick-${d.id}`}
+                      >
+                        <input type="checkbox" checked={picked.has(d.id)} onChange={() => toggle(d.id)} />
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium truncate">{d.label}</div>
+                          <div className="text-[11px] text-[#6B6558]">{d.category}{d.file ? ` · ${d.file.filename}` : " · not yet uploaded"}</div>
+                        </div>
+                        {d.file && <span className="byrd-chip byrd-chip-blue text-[10px]">File included</span>}
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+        <div className="px-6 py-4 border-t border-[#E4DFD1] flex items-center gap-2">
+          <button onClick={onClose} className="byrd-btn byrd-btn-outline flex-1">Cancel</button>
+          <button
+            onClick={submit}
+            disabled={busy || !selectedScen || picked.size === 0}
+            className="byrd-btn byrd-btn-dark flex-1"
+            data-testid="copy-submit"
+          >
+            {busy ? "Copying…" : `Copy ${picked.size} doc${picked.size === 1 ? "" : "s"}`}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -706,9 +1016,9 @@ function DocsTab({ scen, onToggle }) {
 
 // --------------- LENDERS TAB ---------------
 function LendersTab({ scen, lenders, matches, runMatch, onOpenSendDialog, onRevoke, onOpenEditVisibility, shareLenderId, setShareLenderId }) {
-  const attached = scen.attached_docs || [];
+  const scenDocs = scen.docs || scen.client_docs || [];
   const clientDocMap = {};
-  (scen.client_docs || []).forEach((d) => { clientDocMap[d.id] = d; });
+  scenDocs.forEach((d) => { clientDocMap[d.id] = d; });
 
   const copyLink = (token) => {
     const url = `${window.location.origin}/lender/scenario/${token}`;
@@ -721,15 +1031,15 @@ function LendersTab({ scen, lenders, matches, runMatch, onOpenSendDialog, onRevo
     const overrides = sh.doc_overrides || {};
     const grants = new Set(sh.doc_grants || []);
     let included = 0, onReq = 0, hidden = 0;
-    attached.forEach((a) => {
+    scenDocs.forEach((d) => {
       let eff;
-      if (a.doc_id in overrides) {
-        const v = overrides[a.doc_id];
+      if (d.id in overrides) {
+        const v = overrides[d.id];
         eff = v === "include" ? "included" : v === "hidden" ? "hidden" : "on_request";
-      } else if (grants.has(a.doc_id)) {
+      } else if (grants.has(d.id)) {
         eff = "included";
       } else {
-        eff = a.visibility === "included" ? "included" : "on_request";
+        eff = (d.lender_visibility || "on_request") === "included" ? "included" : "on_request";
       }
       if (eff === "included") included++;
       else if (eff === "on_request") onReq++;
@@ -851,18 +1161,16 @@ function LendersTab({ scen, lenders, matches, runMatch, onOpenSendDialog, onRevo
 
 // --------------- SHARE VISIBILITY DIALOG ---------------
 function ShareVisibilityDialog({ scen, dialog, onClose, onSubmit }) {
-  const attached = scen.attached_docs || [];
-  const clientDocs = scen.client_docs || [];
-  const clientDocMap = {};
-  clientDocs.forEach((d) => { clientDocMap[d.id] = d; });
+  const scenDocs = scen.docs || scen.client_docs || [];
 
-  // Build the row list (only attached docs that actually exist)
-  const rows = attached
-    .map((a) => ({ ...a, doc: clientDocMap[a.doc_id] }))
-    .filter((r) => r.doc);
+  // Every scenario doc is a candidate — the lender either sees it, must request it, or it's hidden.
+  const rows = scenDocs.map((d) => ({
+    doc_id: d.id,
+    doc: d,
+    default_visibility: d.lender_visibility || "on_request",
+  }));
 
-  // Compute the initial per-row visibility from either explicit override,
-  // legacy grant, or scenario visibility.
+  // Initial per-row state: explicit override > legacy grant > doc's own lender_visibility default.
   const initial = {};
   const startOverrides = dialog.overrides || {};
   const legacyGrants = new Set(dialog.share?.doc_grants || []);
@@ -872,7 +1180,7 @@ function ShareVisibilityDialog({ scen, dialog, onClose, onSubmit }) {
     } else if (legacyGrants.has(r.doc_id)) {
       initial[r.doc_id] = "include";
     } else {
-      initial[r.doc_id] = r.visibility === "included" ? "include" : "on_request";
+      initial[r.doc_id] = r.default_visibility === "included" ? "include" : (r.default_visibility === "hidden" ? "hidden" : "on_request");
     }
   });
 
@@ -952,7 +1260,7 @@ function ShareVisibilityDialog({ scen, dialog, onClose, onSubmit }) {
         <div className="overflow-y-auto flex-1 px-6 py-4 space-y-2">
           {rows.length === 0 && (
             <div className="text-sm text-[#6B6558] py-6 text-center">
-              No documents attached to this scenario yet. Attach some in the Documents tab first.
+              This scenario has no documents yet. Add lines in the Documents tab first.
             </div>
           )}
           {rows.map((r) => {
