@@ -34,5 +34,57 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - P0: Redeploy production to activate Postmark env vars
 - P1: Automatic reminder emails when client docs missing X days
 - P1: Dashboard "Email Status" indicator
+- P1: **Contacts CRM with assistant marketing integration** (see below)
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
 - P3: Real Marketplace (lender self-onboarding + term-sheet capture)
+
+### P1 · Contacts CRM with Personal Assistant integration — SHIPPED 2026-02
+**Delivered:**
+- Contacts CRUD (name, email, phone, contact_type multi-select, tags, notes, last_contact_at/channel)
+- CSV import (name, email, phone, contact_type, tags, notes headers accepted, comma/pipe multi-values)
+- Shared team address book (both Wayne + Caleb see all contacts)
+- Email templates admin (4 seeded: New Product Announcement, Rate Update, Quarterly Check-In, Referral Thank-You)
+- Bulk marketing send with `{{first_name}}` + `{{admin_first_name}}` personalization, unsubscribe footer, and per-recipient rendering (each gets their own email, not a CC blast)
+- Global unsubscribe suppression list with public `/unsubscribe?t=` page
+- Marketing sends respect suppression; transactional/assistant sends bypass it (loan correspondence is CAN-SPAM exempt)
+- Every send logged in `db.assistant_emails` with `tag=marketing` for the Email Delivery status widget
+
+**Still to do (next session — small enhancement):**
+- Wire Personal Assistant to the contacts collection: teach Claude to answer questions like "who haven't I talked to in 60 days?" and to propose bulk sends via a new structured block. Add contacts (name+email only) + template names to the assistant turn context.
+**Goal:** A lightweight CRM for Wayne/Caleb to manage relationships (referral sources, past sponsors, prospects) — separate from the tighter "Clients" area which is for active borrowers with document portals.
+
+**Data model** (per admin, private):
+- `name` (required)
+- `email`
+- `phone`
+- `contact_type` (multi-select: email · phone · text) — how they prefer to be reached
+- `last_contact_at` (date + auto-updated when assistant sends outreach)
+- `last_contact_channel` (email / phone / text) — matches what was actually used
+- `notes` (freeform)
+- `tags` (chips, e.g. "referral source", "past client", "warm lead")
+- `owner_admin_id` — Wayne or Caleb
+
+**UI:**
+- New sidebar item: **"Contacts"** with icon `Contact` from lucide
+- Roster table: name, email, phone, tags, last contact (colored: green <30d, gold 30-90d, red 90d+), preferred channel icons
+- Add/Edit dialog with the fields above
+- **Bulk selection** with a "Send Marketing Email" button that opens a compose flow
+
+**Assistant integration:**
+- Assistant's system prompt gains access to the current admin's contacts (name + email only, not phone/notes to keep tokens tight)
+- New assistant capabilities:
+  - "Draft a marketing email to my referral sources about the new SBA construction product" → Claude drafts one email + suggests recipients tagged "referral source"
+  - "Who haven't I talked to in 60 days?" → Claude answers from `last_contact_at`
+  - "Send Rod a follow-up about the docs" → routes through the existing email flow, but marks contact.last_contact_at + contact.last_contact_channel="email"
+- Bulk send: assistant proposes one templated email, admin approves once, sends to N recipients with proper `To:` personalization (each gets their own email, not a CC blast). Rate-limited to Postmark's plan cap.
+
+**Notes for build:**
+- Reuses the existing Postmark send infra (currently for assistant emails) — needs `bulk_send` variant that iterates + writes to `assistant_emails` log per recipient
+- Contact roster is private per admin (like Personal Assistant chat), so Wayne's Rolodex ≠ Caleb's
+- Should we let contacts be **imported from a CSV**? Common for onboarding an existing rolodex. Recommend yes as a Phase-1 optional feature.
+
+**Open questions to answer when we start:**
+1. Import from CSV on day one, or add later?
+2. Private per admin, or a shared team address book with visibility per record?
+3. Auto-suppress list — if a client marks unsubscribe, should other admins also be blocked from emailing them?
+4. Do you want basic template library ("New product announcement", "Rate update", "Quarterly check-in") or freeform only for MVP?

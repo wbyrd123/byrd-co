@@ -20,6 +20,8 @@ import uuid
 import json
 import bcrypt
 import jwt as pyjwt
+import re
+import time
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Literal, Dict
@@ -364,6 +366,337 @@ async def admin_reorder_testimonials(body: TestimonialReorder, admin=Depends(req
     for i, tid in enumerate(body.order):
         await db.testimonials.update_one({"id": tid}, {"$set": {"order": i, "updated_at": now_iso()}})
     return {"ok": True}
+
+
+# ================ Contacts CRM (shared team address book) ================
+class ContactCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = ""
+    contact_type: List[Literal["email", "phone", "text"]] = Field(default_factory=list)
+    notes: Optional[str] = ""
+    tags: List[str] = Field(default_factory=list)
+
+
+class ContactUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    contact_type: Optional[List[Literal["email", "phone", "text"]]] = None
+    notes: Optional[str] = None
+    tags: Optional[List[str]] = None
+    last_contact_at: Optional[str] = None
+    last_contact_channel: Optional[Literal["email", "phone", "text"]] = None
+
+
+class ContactCSVImport(BaseModel):
+    csv_text: str = Field(min_length=1, max_length=200000)
+
+
+class EmailTemplateCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=20000)
+
+
+class EmailTemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    subject: Optional[str] = None
+    body: Optional[str] = None
+
+
+class ContactBulkEmail(BaseModel):
+    contact_ids: List[str] = Field(min_length=1)
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=20000)
+
+
+_SEEDED_TEMPLATES = [
+    {
+        "name": "New Product Announcement",
+        "subject": "New commercial loan product from Byrd & CO",
+        "body": "Hi {{first_name}},\n\nWanted to give you an early heads-up on a new product we're now placing — quick summary, terms, and a link to the details below.\n\n[YOUR ANNOUNCEMENT HERE]\n\nHappy to hop on a call if it might fit anything on your desk.\n\nBest,\n{{admin_first_name}}",
+    },
+    {
+        "name": "Rate Update This Week",
+        "subject": "This week's commercial rates — Byrd & CO",
+        "body": "Hi {{first_name}},\n\nQuick rate snapshot for this week — feel free to forward or ping me with a scenario.\n\n[RATES]\n\nBest,\n{{admin_first_name}}",
+    },
+    {
+        "name": "Quarterly Check-In",
+        "subject": "Checking in — anything I can help with?",
+        "body": "Hi {{first_name}},\n\nJust a quarterly note — hope things are going well. Let me know if there's anything I can look at for you on the debt side (refi, acquisition, construction, bridge).\n\nBest,\n{{admin_first_name}}",
+    },
+    {
+        "name": "Referral Thank-You",
+        "subject": "Thanks for the introduction",
+        "body": "Hi {{first_name}},\n\nJust wanted to say thanks for the introduction — I'll take great care of them. I'll keep you posted on how it goes.\n\nBest,\n{{admin_first_name}}",
+    },
+]
+
+
+async def _seed_templates_if_empty():
+    if await db.email_templates.count_documents({}) > 0:
+        return
+    now = now_iso()
+    for t in _SEEDED_TEMPLATES:
+        await db.email_templates.insert_one({
+            "id": str(uuid.uuid4()),
+            **t,
+            "created_at": now,
+            "updated_at": now,
+        })
+
+
+def _first_name(full: Optional[str]) -> str:
+    if not full:
+        return ""
+    return full.strip().split(" ")[0]
+
+
+@api.get("/admin/contacts")
+async def contacts_list(admin=Depends(require_admin)):
+    docs = await db.contacts.find({}, {"_id": 0}).sort("name", 1).to_list(2000)
+    # Also enrich with suppression status
+    suppressed = {u["email"].lower() for u in await db.contact_unsubscribes.find({}, {"email": 1}).to_list(2000) if u.get("email")}
+    for c in docs:
+        c["unsubscribed"] = bool(c.get("email") and c["email"].lower() in suppressed)
+    return docs
+
+
+@api.post("/admin/contacts")
+async def contacts_create(body: ContactCreate, admin=Depends(require_admin)):
+    now = now_iso()
+    doc = {
+        "id": str(uuid.uuid4()),
+        **body.model_dump(),
+        "created_by_admin_id": admin["id"],
+        "last_contact_at": None,
+        "last_contact_channel": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.contacts.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/admin/contacts/{cid}")
+async def contacts_update(cid: str, body: ContactUpdate, admin=Depends(require_admin)):
+    update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = now_iso()
+    res = await db.contacts.update_one({"id": cid}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    doc = await db.contacts.find_one({"id": cid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/admin/contacts/{cid}")
+async def contacts_delete(cid: str, admin=Depends(require_admin)):
+    res = await db.contacts.delete_one({"id": cid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return {"ok": True}
+
+
+@api.post("/admin/contacts/import-csv")
+async def contacts_import_csv(body: ContactCSVImport, admin=Depends(require_admin)):
+    """Import contacts from a CSV. Expected headers (any subset, any order):
+    name, email, phone, contact_type, tags, notes.
+    contact_type + tags can be comma-or-pipe-separated within their cell."""
+    import csv, io
+    reader = csv.DictReader(io.StringIO(body.csv_text))
+    # Normalize headers to lowercase
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV has no header row")
+    header_map = {h: (h or "").strip().lower() for h in reader.fieldnames}
+    created = 0
+    skipped = 0
+    now = now_iso()
+    for row in reader:
+        norm = {header_map[k]: (v or "").strip() for k, v in row.items() if k}
+        name = norm.get("name") or norm.get("full name") or norm.get("contact") or ""
+        if not name:
+            skipped += 1
+            continue
+        email_val = norm.get("email") or None
+        phone_val = norm.get("phone") or ""
+        raw_types = norm.get("contact_type") or norm.get("preferred contact") or ""
+        types = [t.strip().lower() for t in re.split(r"[|,]", raw_types) if t.strip()]
+        types = [t for t in types if t in ("email", "phone", "text")]
+        raw_tags = norm.get("tags") or ""
+        tags = [t.strip() for t in re.split(r"[|,]", raw_tags) if t.strip()]
+        notes = norm.get("notes") or ""
+        await db.contacts.insert_one({
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "email": email_val,
+            "phone": phone_val,
+            "contact_type": types,
+            "tags": tags,
+            "notes": notes,
+            "created_by_admin_id": admin["id"],
+            "last_contact_at": None,
+            "last_contact_channel": None,
+            "created_at": now,
+            "updated_at": now,
+        })
+        created += 1
+    return {"ok": True, "created": created, "skipped": skipped}
+
+
+@api.get("/admin/email-templates")
+async def templates_list(admin=Depends(require_admin)):
+    await _seed_templates_if_empty()
+    docs = await db.email_templates.find({}, {"_id": 0}).sort("name", 1).to_list(200)
+    return docs
+
+
+@api.post("/admin/email-templates")
+async def templates_create(body: EmailTemplateCreate, admin=Depends(require_admin)):
+    now = now_iso()
+    doc = {"id": str(uuid.uuid4()), **body.model_dump(), "created_at": now, "updated_at": now}
+    await db.email_templates.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/admin/email-templates/{tid}")
+async def templates_update(tid: str, body: EmailTemplateUpdate, admin=Depends(require_admin)):
+    update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = now_iso()
+    res = await db.email_templates.update_one({"id": tid}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    doc = await db.email_templates.find_one({"id": tid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/admin/email-templates/{tid}")
+async def templates_delete(tid: str, admin=Depends(require_admin)):
+    res = await db.email_templates.delete_one({"id": tid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {"ok": True}
+
+
+@api.post("/admin/contacts/bulk-email")
+async def contacts_bulk_email(body: ContactBulkEmail, admin=Depends(require_admin)):
+    """Send a marketing email to N contacts. Personalizes {{first_name}} and {{admin_first_name}}.
+    Suppresses unsubscribed emails. Adds a compliant unsubscribe footer. Runs synchronously so
+    Postmark errors surface immediately."""
+    contacts = await db.contacts.find({"id": {"$in": body.contact_ids}}, {"_id": 0}).to_list(1000)
+    if not contacts:
+        raise HTTPException(status_code=404, detail="No contacts found for those IDs")
+    admin_email = admin.get("email") or ""
+    admin_name = admin.get("name") or "Byrd & CO"
+    admin_first = _first_name(admin_name)
+    # Load suppression set once
+    suppressed = {u["email"].lower() async for u in db.contact_unsubscribes.find({}, {"email": 1}) if u.get("email")}
+    base_url = os.environ.get("APP_PUBLIC_BASE_URL") or "https://byrd-co.com"
+
+    sent = 0
+    failed = 0
+    skipped_no_email = 0
+    skipped_unsubscribed = 0
+    errors: List[str] = []
+
+    for c in contacts:
+        if not c.get("email"):
+            skipped_no_email += 1
+            continue
+        email_lower = c["email"].lower()
+        if email_lower in suppressed:
+            skipped_unsubscribed += 1
+            continue
+
+        first = _first_name(c.get("name"))
+        subject = body.subject.replace("{{first_name}}", first).replace("{{admin_first_name}}", admin_first)
+        rendered = body.body.replace("{{first_name}}", first).replace("{{admin_first_name}}", admin_first)
+        # Build unsubscribe token (contact id + email)
+        unsub_token = pyjwt.encode(
+            {"email": c["email"], "cid": c["id"], "iat": int(time.time())},
+            JWT_SECRET, algorithm="HS256",
+        )
+        unsubscribe_url = f"{base_url.rstrip('/')}/unsubscribe?t={unsub_token}"
+        safe_body = rendered.replace("<", "&lt;").replace(">", "&gt;")
+        html = (
+            "<div style=\"font-family:Georgia,serif;max-width:640px;margin:auto;color:#1A1A1A;\">"
+            f"<div style=\"white-space:pre-wrap;font-family:Arial,sans-serif;font-size:14px;line-height:1.55;\">{safe_body}</div>"
+            "<hr style=\"margin:24px 0;border:none;border-top:1px solid #E4DFD1;\"/>"
+            f"<div style=\"font-family:Arial,sans-serif;font-size:12px;color:#6B6558;\">{admin_name}<br/>Byrd &amp; CO Commercial Real Estate Lending<br/>"
+            f"<a href=\"mailto:{admin_email}\" style=\"color:#6B6558;\">{admin_email}</a></div>"
+            f"<div style=\"font-family:Arial,sans-serif;font-size:11px;color:#8A8477;margin-top:12px;\">"
+            f"You're receiving this because we're in touch professionally. "
+            f"<a href=\"{unsubscribe_url}\" style=\"color:#8A8477;\">Unsubscribe from marketing emails</a>."
+            "</div></div>"
+        )
+        text_footer = f"\n\n---\n{admin_name}\nByrd & CO Commercial Real Estate Lending\n{admin_email}\n\nUnsubscribe from marketing: {unsubscribe_url}"
+        result = send_email(
+            c["email"], subject, html, rendered + text_footer, "marketing",
+            None, f"{admin_name} · Byrd & CO", admin_email or None,
+        )
+        status_v = "sent" if result.get("ok") else "failed"
+        if result.get("ok"):
+            sent += 1
+            await db.contacts.update_one(
+                {"id": c["id"]},
+                {"$set": {"last_contact_at": now_iso(), "last_contact_channel": "email"}},
+            )
+        else:
+            failed += 1
+            if result.get("error"):
+                errors.append(f"{c['email']}: {result['error']}")
+
+        await db.assistant_emails.insert_one({
+            "id": str(uuid.uuid4()),
+            "admin_id": admin["id"],
+            "from_email": os.environ.get("POSTMARK_FROM", ""),
+            "reply_to": admin_email,
+            "to": c["email"],
+            "subject": subject,
+            "body": rendered,
+            "status": status_v,
+            "error": result.get("error") or "",
+            "tag": "marketing",
+            "contact_id": c["id"],
+            "sent_at": now_iso(),
+        })
+
+    return {
+        "ok": True,
+        "sent": sent,
+        "failed": failed,
+        "skipped_no_email": skipped_no_email,
+        "skipped_unsubscribed": skipped_unsubscribed,
+        "errors": errors[:20],
+    }
+
+
+@api.get("/public/unsubscribe")
+async def public_unsubscribe(t: str):
+    """Public unsubscribe endpoint. Records the email into contact_unsubscribes."""
+    try:
+        payload = pyjwt.decode(t, JWT_SECRET, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid or expired link")
+    email = (payload.get("email") or "").lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Invalid link")
+    await db.contact_unsubscribes.update_one(
+        {"email": email},
+        {"$set": {"email": email, "unsubscribed_at": now_iso(), "contact_id": payload.get("cid")}},
+        upsert=True,
+    )
+    return {"ok": True, "email": email}
+
+
+
 
 
 @api.get("/public/principals")

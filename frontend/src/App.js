@@ -20,6 +20,8 @@ import AdminLenders from "@/byrd/AdminLenders";
 import AdminGuide from "@/byrd/AdminGuide";
 import AdminTestimonials from "@/byrd/AdminTestimonials";
 import AdminAssistant from "@/byrd/AdminAssistant";
+import AdminContacts from "@/byrd/AdminContacts";
+import Unsubscribe from "@/byrd/Unsubscribe";
 import LenderView from "@/byrd/LenderView";
 
 // AdsCopilot (staff-only)
@@ -73,6 +75,7 @@ function App() {
 
             {/* Public lender view (token-gated) */}
             <Route path="/lender/scenario/:token" element={<LenderView />} />
+            <Route path="/unsubscribe" element={<Unsubscribe />} />
 
             {/* Client portal (role=client) */}
             <Route
@@ -102,6 +105,7 @@ function App() {
               <Route path="lenders" element={<AdminLenders />} />
               <Route path="testimonials" element={<AdminTestimonials />} />
               <Route path="assistant" element={<AdminAssistant />} />
+              <Route path="contacts" element={<AdminContacts />} />
               <Route path="guide" element={<AdminGuide />} />
             </Route>
 
