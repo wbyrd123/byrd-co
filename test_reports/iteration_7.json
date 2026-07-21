@@ -1,0 +1,34 @@
+{
+  "summary": "End-to-end testing of the borrower-side Ada concierge. Backend: 8/8 pytest cases pass (list access-control, SSE chat streaming + persistence, LOX PDF generation with %PDF- validation, personal-guarantee broker_note handoff, admin run-nudges counters, rate-quote & qualification guardrails). Frontend: fixed a compile-blocking JSX syntax error in AdaChatPanel.jsx (unescaped quotes in placeholder), then verified panel/greeting/quickstart-buttons/chat streaming/draft card with View + Approve & Upload — all working. Regression: existing client-scenario-* checklist elements still render.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_ada.py",
+    "/app/test_reports/pytest/ada_results.xml"
+  ],
+  "action_items": [
+    "Review the placeholder fix (unescaped inner double-quotes) I applied in AdaChatPanel.jsx line 165 — it was blocking the entire frontend build with SyntaxError, so no borrower could load /portal until fixed.",
+    "Consider adding a `data-testid=\"ada-quickstart-*\"` (or documenting `ada-suggest-*`) — the review_request referenced quickstart testids but the implementation uses `ada-suggest-{first-20-chars}`. Cosmetic only.",
+    "Ada tends to ask clarifying questions before generating a resume unless the borrower explicitly says 'do not ask questions, emit generate_doc now'. LOX generates on first ask when reason is given. Consider tuning ADA_SYSTEM_PROMPT to be slightly more eager for resume when borrower already gave role + units + name.",
+    "server.py is now ~5845 lines — continue flagging for future modularization."
+  ],
+  "critical_code_review_comments": [
+    "AdaChatPanel.jsx had an inline JSX SyntaxError (nested double-quotes in placeholder) that shipped and broke frontend build — a lint/type-check gate would catch this before commit.",
+    "View-draft opens a blob URL via window.open; works in real browsers but not testable via Playwright's expect_page for blob:. Consider offering a fallback anchor download for testability/accessibility.",
+    "SSE endpoint writes user + assistant messages transactionally but nothing prevents a stream failure mid-way from leaving the user message orphaned. Consider a rollback or a stream_state flag."
+  ],
+  "updated_files": [
+    "/app/frontend/src/byrd/AdaChatPanel.jsx (fix: escaped placeholder string using template literal)",
+    "/app/backend/tests/test_ada.py (new)"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% of core Ada flows verified"},
+  "test_credentials": "sample@example.com / sample123 (client) and wayne@byrd-co.com / byrdco2026 (admin) — loaded from /app/memory/test_credentials.md",
+  "seed_data_creation": "Chat messages were created and reset (POST /api/client/ada/reset) after each pass so db.borrower_ada_messages is clean for sample user. One draft PDF (Resume draft) and one broker_note admin task remain from tests (they are ephemeral/non-approved and can be manually removed if desired).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Ada uses SSE via fetch()+reader (POST /api/client/ada/chat). Done event carries {text, drafts_created[], uploads_done[], broker_notes[]}. Quickstart buttons use testid pattern `ada-suggest-{first 20 chars}` not `ada-quickstart-*`. To reliably trigger generate_doc during automation, provide full details in one prompt and add 'do not ask questions, emit generate_doc now' — otherwise Ada may interview first. LOX generates readily; resume/business_plan/PFS need more context up-front. `/api/admin/ada/run-nudges` returns {considered,sent,skipped_quiet} — safe to call in tests, uses Postmark but tolerates unverified recipients."
+}

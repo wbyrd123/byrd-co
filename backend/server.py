@@ -16,6 +16,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import base64
 import logging
+import asyncio
 import random
 import uuid
 import json
@@ -5013,8 +5014,6 @@ async def root():
     return {"service": "Byrd & CO API", "status": "ok"}
 
 
-app.include_router(api)
-
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -5027,3 +5026,819 @@ app.add_middleware(
 @app.on_event("shutdown")
 async def _shutdown():
     mongo_client.close()
+
+
+# ================ ADA — Borrower AI Assistant ================
+ADA_SYSTEM_PROMPT = """You are Ada, the Byrd & CO concierge AI who helps commercial real estate borrowers
+complete their loan documentation portal.
+
+You are warm, patient, professional, and address the borrower by first name. You are NOT a salesperson —
+they've already hired Byrd & CO. You are a helpful concierge whose whole job is making paperwork painless.
+
+At the top of every turn you receive a JSON context:
+- The borrower's identity (first name, email, company)
+- The borrower's scenarios (each with loan_type, property_type, location) and per-scenario doc checklists
+- Which specific docs are pending / uploaded / reviewed / rejected
+- Recent broker notes on any rejected docs
+- Any in-progress `borrower_ada_drafts` (interviews they started but haven't finished)
+
+# WHAT YOU CAN DO
+
+1. **Document coaching** — explain what any doc on their checklist is, in plain English.
+2. **Document generation** — you have SIX PDF builders you can invoke via structured blocks:
+   - `pfs_sba413` — SBA Form 413 Personal Financial Statement (use for scenarios where loan_type == 'SBA')
+   - `pfs_byrd` — Byrd & CO clean-format PFS (use for all non-SBA loans)
+   - `resume` — CRE-focused sponsor resume/bio (long form)
+   - `sponsor_bio` — 1-page punchy sponsor bio for lender packages
+   - `business_plan` — 2-4 page business plan / investment memo (used on value-add, bridge, construction)
+   - `lox` — Letter of Explanation (for income dips, credit events, etc.)
+   - `rent_roll` — clean rent roll from unstructured input
+3. **Upload on the borrower's behalf** — once a doc is drafted, offer to attach it to the right
+   checklist line. The borrower must explicitly confirm.
+4. **Progress helper** — answer "what's next?" by identifying the highest-priority pending required doc
+   on the most active scenario.
+5. **Handoff to Wayne/Caleb** — when the borrower asks a strategic, legal, tax, or investment question,
+   emit a `broker_note` block. Tell the borrower: "I've dropped a note to your broker; expect a call."
+
+# WHAT YOU MUST NEVER DO
+
+- NEVER quote or estimate loan terms (rate, LTV, points, DSCR expectations).
+- NEVER tell a borrower whether they will or won't qualify for anything.
+- NEVER discuss or negotiate the broker fee percentage.
+- NEVER give legal, tax, or investment advice — always defer to broker or their attorney/CPA.
+- NEVER reference other borrowers or lenders by name.
+- NEVER modify the checklist itself (broker-owned) — you can only add files to existing lines.
+- NEVER mark a doc as reviewed — that's the broker's call.
+- NEVER send email as the borrower.
+- NEVER fabricate numeric information. If the borrower doesn't know a value, mark it as "TBD" and
+  ask them to fill it in with their accountant/spouse/records.
+
+# HOW YOU DO DOCUMENT GENERATION (the meaty flow)
+
+- When a borrower asks you to build a PFS/Resume/etc., start an interview. Ask 2-4 questions per turn
+  (don't dump 30 questions at once). Save progress after each answer.
+- When you have enough to draft, emit a `generate_doc` block with `doc_type`, `template_variant`
+  (only for pfs — 'sba413' or 'byrd'), the target `scenario_id`, and the collected `fields` dict.
+- The backend returns a preview PDF. Say "I've drafted your {doc_type} — should I upload it to
+  your {scenario_name} as {checklist_line_label}?"
+- If they confirm, emit an `upload_confirm` block with `draft_id` and `target_doc_line_id`.
+- If any numeric fields are missing, mark them as "TBD" IN the draft and warn the borrower.
+
+# BLOCK SCHEMAS
+
+```generate_doc
+{
+  "doc_type": "pfs_byrd",   // one of: pfs_sba413, pfs_byrd, resume, sponsor_bio, business_plan, lox, rent_roll
+  "scenario_id": "<scenario id from context>",
+  "target_doc_line_label": "Personal Financial Statement",
+  "fields": { /* doc-specific — see field guide below */ }
+}
+```
+
+```upload_confirm
+{
+  "draft_id": "<from previous generate_doc response>",
+  "target_doc_line_id": "<from context>"
+}
+```
+
+```broker_note
+{
+  "question": "Sarah is asking whether she should personally guarantee...",
+  "urgency": "normal",   // 'low' | 'normal' | 'urgent'
+  "related_scenario_id": "<scenario id if applicable>"
+}
+```
+
+# FIELD GUIDE PER DOC TYPE
+
+- **pfs_byrd / pfs_sba413**: `{ as_of_date, name, address, phone, email, employer, business_name,
+   cash_on_hand, savings, ira_401k, stocks_bonds, real_estate_value, autos, other_assets_desc,
+   other_assets_value, accounts_payable, notes_payable, installment_auto, installment_other, credit_cards,
+   mortgages_on_re, unpaid_taxes, other_liabilities, annual_salary, dividends_interest, real_estate_income,
+   other_income_desc, other_income, income_tax_last_year, monthly_debt_payments,
+   real_estate_owned: [{address, type, present_value, mortgage_balance, monthly_pmt, monthly_rent}],
+   life_insurance_face, life_insurance_cash_value }`
+- **resume**: `{ name, professional_summary, years_experience, current_role, current_company,
+   career_history: [{role, company, dates, highlights}], notable_projects: [{name, type, size, role, outcome}],
+   education: [{degree, school, year}], licenses_certs: [], memberships: [] }`
+- **sponsor_bio**: same as resume but only `{ name, professional_summary, notable_projects, current_role }`
+- **business_plan**: `{ scenario_id, executive_summary, investment_thesis, market_analysis,
+   business_plan_narrative, capex_plan, projected_returns, exit_strategy, team, risks_mitigations }`
+- **lox**: `{ subject, addressed_to (default 'To Whom It May Concern'), explanation, resolution,
+   name, date_of_letter }`
+- **rent_roll**: `{ property_address, as_of_date,
+   units: [{unit_id, tenant, unit_type, size_sqft, monthly_rent, lease_start, lease_end, security_deposit, notes}] }`
+
+# STARTUP BEHAVIOR
+
+On the very first message of a session, greet by first name and offer 1 actionable next step
+based on their pending required docs. Example:
+"Morning, Sarah. On your Hotel Purchase — Miami deal, you've got 4 required docs still pending.
+Want to start with the Personal Financial Statement? I can walk you through it in about 5 minutes."
+
+If everything is uploaded, congratulate them and mention their broker will reach out with next steps.
+"""
+
+
+DOC_TYPES = ("pfs_sba413", "pfs_byrd", "resume", "sponsor_bio", "business_plan", "lox", "rent_roll")
+
+# Default checklist-line labels each doc generator maps to when auto-uploading.
+DOC_TYPE_DEFAULT_LABEL = {
+    "pfs_sba413": "Personal Financial Statement",
+    "pfs_byrd": "Personal Financial Statement",
+    "resume": "Resume / Bio",
+    "sponsor_bio": "Sponsor Bio",
+    "business_plan": "Business Plan / Investment Memo",
+    "lox": "Letter of Explanation",
+    "rent_roll": "Current Rent Roll",
+}
+
+
+def render_borrower_pdf(title: str, sections: list, borrower_name: str, disclaimer: str = None) -> bytes:
+    """Generic borrower-doc PDF renderer. `sections` is a list of tuples (heading, list-of-(label,value)-pairs OR paragraph_str)."""
+    from io import BytesIO
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=0.75*inch, rightMargin=0.75*inch,
+                            topMargin=0.75*inch, bottomMargin=0.75*inch, title=title)
+    ss = getSampleStyleSheet()
+    tstyle = ParagraphStyle("t", parent=ss["Heading1"], fontName="Helvetica-Bold", fontSize=15,
+                            alignment=1, spaceAfter=4, textColor=colors.HexColor("#1A1A1A"))
+    sub = ParagraphStyle("sub", parent=ss["BodyText"], fontName="Helvetica", fontSize=9,
+                         alignment=1, textColor=colors.HexColor("#6B6558"), spaceAfter=12)
+    h2 = ParagraphStyle("h2", parent=ss["Heading2"], fontName="Helvetica-Bold", fontSize=11,
+                        textColor=colors.HexColor("#C89434"), spaceBefore=10, spaceAfter=4)
+    body = ParagraphStyle("b", parent=ss["BodyText"], fontName="Helvetica", fontSize=10, leading=13,
+                          textColor=colors.HexColor("#1A1A1A"), spaceAfter=4)
+    lbl = ParagraphStyle("lbl", parent=ss["BodyText"], fontName="Helvetica-Bold", fontSize=9,
+                         textColor=colors.HexColor("#6B6558"))
+
+    story = [Paragraph(title, tstyle),
+             Paragraph(f"Prepared for {borrower_name} · Byrd &amp; CO Portal", sub)]
+
+    for heading, content in sections:
+        if heading:
+            story.append(Paragraph(heading, h2))
+        if isinstance(content, str):
+            story.append(Paragraph(content.replace("\n", "<br/>"), body))
+        elif isinstance(content, list) and content and isinstance(content[0], tuple):
+            rows = [[Paragraph(f"<b>{k}</b>", lbl), Paragraph(str(v) if v not in (None, "") else "TBD", body)] for k, v in content]
+            t = Table(rows, colWidths=[2.0*inch, 4.9*inch])
+            t.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4DFD1")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#EFE9DA")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            story.append(t)
+        story.append(Spacer(1, 4))
+
+    dis = disclaimer or ("Prepared with Byrd & CO Ada Assistant on " +
+                         datetime.now(timezone.utc).strftime("%B %d, %Y at %H:%M UTC") +
+                         ". Content provided by borrower and not independently verified.")
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"<font size='7.5' color='#6B6558'>{dis}</font>", body))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _sum(*vals):
+    tot = 0.0
+    for v in vals:
+        try:
+            tot += float(v or 0)
+        except (TypeError, ValueError):
+            pass
+    return tot
+
+
+def render_pfs(fields: dict, borrower_name: str, variant: str) -> bytes:
+    """PFS renderer. `variant`: 'sba413' or 'byrd'."""
+    f = fields or {}
+    total_assets = _sum(
+        f.get("cash_on_hand"), f.get("savings"), f.get("ira_401k"), f.get("stocks_bonds"),
+        f.get("real_estate_value"), f.get("autos"), f.get("other_assets_value"),
+        f.get("life_insurance_cash_value"),
+    )
+    total_liabs = _sum(
+        f.get("accounts_payable"), f.get("notes_payable"), f.get("installment_auto"),
+        f.get("installment_other"), f.get("credit_cards"), f.get("mortgages_on_re"),
+        f.get("unpaid_taxes"), f.get("other_liabilities"),
+    )
+    net_worth = total_assets - total_liabs
+
+    def fmt(v):
+        try:
+            return f"${float(v):,.0f}"
+        except (TypeError, ValueError):
+            return "TBD"
+
+    title = "SBA Form 413 — Personal Financial Statement" if variant == "sba413" \
+            else "Personal Financial Statement"
+
+    sections = [
+        ("Applicant", [
+            ("Name", f.get("name") or borrower_name),
+            ("As of", f.get("as_of_date") or datetime.now(timezone.utc).date().isoformat()),
+            ("Address", f.get("address")),
+            ("Phone", f.get("phone")),
+            ("Email", f.get("email")),
+            ("Employer", f.get("employer")),
+            ("Business Name", f.get("business_name")),
+        ]),
+        ("Assets", [
+            ("Cash on hand & in banks", fmt(f.get("cash_on_hand"))),
+            ("Savings accounts", fmt(f.get("savings"))),
+            ("IRA / 401(k)", fmt(f.get("ira_401k"))),
+            ("Stocks & bonds", fmt(f.get("stocks_bonds"))),
+            ("Real estate (see schedule)", fmt(f.get("real_estate_value"))),
+            ("Autos", fmt(f.get("autos"))),
+            (f"Other assets — {f.get('other_assets_desc') or ''}", fmt(f.get("other_assets_value"))),
+            ("Life insurance — cash value", fmt(f.get("life_insurance_cash_value"))),
+            ("TOTAL ASSETS", fmt(total_assets)),
+        ]),
+        ("Liabilities", [
+            ("Accounts payable", fmt(f.get("accounts_payable"))),
+            ("Notes payable to banks/others", fmt(f.get("notes_payable"))),
+            ("Installment (auto)", fmt(f.get("installment_auto"))),
+            ("Installment (other)", fmt(f.get("installment_other"))),
+            ("Credit card balances", fmt(f.get("credit_cards"))),
+            ("Mortgages on real estate", fmt(f.get("mortgages_on_re"))),
+            ("Unpaid taxes", fmt(f.get("unpaid_taxes"))),
+            ("Other liabilities", fmt(f.get("other_liabilities"))),
+            ("TOTAL LIABILITIES", fmt(total_liabs)),
+            ("NET WORTH (Assets − Liabilities)", fmt(net_worth)),
+        ]),
+        ("Annual Income", [
+            ("Salary", fmt(f.get("annual_salary"))),
+            ("Dividends & interest", fmt(f.get("dividends_interest"))),
+            ("Real estate income", fmt(f.get("real_estate_income"))),
+            (f"Other income — {f.get('other_income_desc') or ''}", fmt(f.get("other_income"))),
+            ("Income tax paid last year", fmt(f.get("income_tax_last_year"))),
+            ("Total monthly debt payments", fmt(f.get("monthly_debt_payments"))),
+        ]),
+        ("Life Insurance", [
+            ("Face amount", fmt(f.get("life_insurance_face"))),
+            ("Cash surrender value", fmt(f.get("life_insurance_cash_value"))),
+        ]),
+    ]
+
+    # Real estate schedule (if any)
+    reo = f.get("real_estate_owned") or []
+    if reo:
+        reo_rows = "<br/>".join([
+            f"• <b>{r.get('address','—')}</b> ({r.get('type','—')}) — "
+            f"Value {fmt(r.get('present_value'))} · "
+            f"Mortgage {fmt(r.get('mortgage_balance'))} · "
+            f"Monthly pmt {fmt(r.get('monthly_pmt'))} · "
+            f"Monthly rent {fmt(r.get('monthly_rent'))}"
+            for r in reo
+        ])
+        sections.append(("Real Estate Schedule", reo_rows))
+
+    disclaimer = (
+        "The applicant certifies the information above is true and complete to the best of their knowledge. "
+        + ("This statement is intended for use with the SBA in connection with a loan application. "
+           if variant == "sba413" else "")
+        + "Prepared with Byrd & CO Ada Assistant on "
+        + datetime.now(timezone.utc).strftime("%B %d, %Y at %H:%M UTC")
+        + ". Applicant-provided; not independently verified by Byrd & CO."
+    )
+    return render_borrower_pdf(title, sections, borrower_name, disclaimer=disclaimer)
+
+
+def render_resume_pdf(fields: dict, borrower_name: str, short: bool = False) -> bytes:
+    """Resume or 1-page Sponsor Bio (if short=True)."""
+    f = fields or {}
+    title = "Sponsor Bio" if short else "Resume"
+    sections = [
+        ("Summary", f.get("professional_summary") or "TBD"),
+        (f.get("current_role") and "Current Role" or "", [
+            ("Role", f.get("current_role")),
+            ("Company", f.get("current_company")),
+            ("Years of experience", f.get("years_experience")),
+        ] if f.get("current_role") or f.get("current_company") else "TBD"),
+    ]
+    proj = f.get("notable_projects") or []
+    if proj:
+        rows = "<br/>".join([
+            f"• <b>{p.get('name','—')}</b> — {p.get('type','')} · Size: {p.get('size','—')} · "
+            f"Role: {p.get('role','—')}. Outcome: {p.get('outcome','—')}"
+            for p in proj
+        ])
+        sections.append(("Notable Projects", rows))
+    if not short:
+        hist = f.get("career_history") or []
+        if hist:
+            rows = "<br/>".join([
+                f"• <b>{h.get('role','—')}</b> at {h.get('company','—')} ({h.get('dates','')}). "
+                f"{h.get('highlights','')}"
+                for h in hist
+            ])
+            sections.append(("Career History", rows))
+        ed = f.get("education") or []
+        if ed:
+            rows = "<br/>".join([f"• {e.get('degree','—')}, {e.get('school','—')} ({e.get('year','')})"
+                                 for e in ed])
+            sections.append(("Education", rows))
+        if f.get("licenses_certs"):
+            sections.append(("Licenses & Certifications", ", ".join(f["licenses_certs"])))
+        if f.get("memberships"):
+            sections.append(("Memberships", ", ".join(f["memberships"])))
+    return render_borrower_pdf(title, sections, borrower_name)
+
+
+def render_business_plan_pdf(fields: dict, borrower_name: str) -> bytes:
+    f = fields or {}
+    sections = [
+        ("Executive Summary", f.get("executive_summary") or "TBD"),
+        ("Investment Thesis", f.get("investment_thesis") or "TBD"),
+        ("Market Analysis", f.get("market_analysis") or "TBD"),
+        ("Business Plan / Strategy", f.get("business_plan_narrative") or "TBD"),
+        ("Capex / Renovation Plan", f.get("capex_plan") or "TBD"),
+        ("Projected Returns", f.get("projected_returns") or "TBD"),
+        ("Exit Strategy", f.get("exit_strategy") or "TBD"),
+        ("Team", f.get("team") or "TBD"),
+        ("Risks & Mitigations", f.get("risks_mitigations") or "TBD"),
+    ]
+    return render_borrower_pdf("Business Plan / Investment Memo", sections, borrower_name)
+
+
+def render_lox_pdf(fields: dict, borrower_name: str) -> bytes:
+    f = fields or {}
+    body_txt = (
+        f"<b>Date:</b> {f.get('date_of_letter') or datetime.now(timezone.utc).date().isoformat()}<br/>"
+        f"<b>To:</b> {f.get('addressed_to') or 'To Whom It May Concern'}<br/><br/>"
+        f"<b>Re:</b> {f.get('subject') or 'Letter of Explanation'}<br/><br/>"
+        + (f.get("explanation") or "TBD").replace("\n", "<br/>") + "<br/><br/>"
+        + (f.get("resolution") or "").replace("\n", "<br/>") + "<br/><br/>"
+        f"Sincerely,<br/><br/><b>{f.get('name') or borrower_name}</b>"
+    )
+    return render_borrower_pdf("Letter of Explanation", [("", body_txt)], borrower_name)
+
+
+def render_rent_roll_pdf(fields: dict, borrower_name: str) -> bytes:
+    from io import BytesIO
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+
+    f = fields or {}
+    units = f.get("units") or []
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(letter), leftMargin=0.5*inch, rightMargin=0.5*inch,
+                            topMargin=0.5*inch, bottomMargin=0.5*inch, title="Rent Roll")
+    ss = getSampleStyleSheet()
+    t_style = ParagraphStyle("t", parent=ss["Heading1"], fontName="Helvetica-Bold", fontSize=13,
+                             textColor=colors.HexColor("#1A1A1A"), spaceAfter=2)
+    sub = ParagraphStyle("sub", parent=ss["BodyText"], fontName="Helvetica", fontSize=9,
+                         textColor=colors.HexColor("#6B6558"), spaceAfter=10)
+    story = [Paragraph("Rent Roll", t_style),
+             Paragraph(f"{f.get('property_address') or 'Property'} — As of {f.get('as_of_date') or 'today'}", sub)]
+
+    hdr = ["Unit", "Tenant", "Type", "Sq Ft", "Rent", "Lease Start", "Lease End", "Deposit", "Notes"]
+    rows = [hdr]
+    total_rent = 0.0
+    for u in units:
+        try: total_rent += float(u.get("monthly_rent") or 0)
+        except (TypeError, ValueError): pass
+        rows.append([
+            u.get("unit_id", ""), u.get("tenant", ""), u.get("unit_type", ""),
+            str(u.get("size_sqft") or ""),
+            f"${float(u.get('monthly_rent') or 0):,.0f}" if u.get("monthly_rent") not in (None, "") else "",
+            u.get("lease_start", ""), u.get("lease_end", ""),
+            f"${float(u.get('security_deposit') or 0):,.0f}" if u.get("security_deposit") not in (None, "") else "",
+            (u.get("notes") or "")[:40],
+        ])
+    rows.append(["", "TOTAL", "", "", f"${total_rent:,.0f}", "", "", "", ""])
+
+    tbl = Table(rows, repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1A1A")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F3EEE0")),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#E4DFD1")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 14))
+    story.append(Paragraph(
+        f"<font size='7.5' color='#6B6558'>Prepared with Byrd & CO Ada Assistant on "
+        f"{datetime.now(timezone.utc).strftime('%B %d, %Y at %H:%M UTC')}. "
+        f"Borrower-attested; not independently verified.</font>",
+        ParagraphStyle("d", parent=ss["BodyText"], fontName="Helvetica", fontSize=8)))
+    doc.build(story)
+    return buf.getvalue()
+
+
+def _render_ada_doc(doc_type: str, fields: dict, borrower_name: str, variant: Optional[str] = None) -> bytes:
+    if doc_type in ("pfs_sba413", "pfs_byrd"):
+        return render_pfs(fields, borrower_name, "sba413" if doc_type == "pfs_sba413" else "byrd")
+    if doc_type == "resume":
+        return render_resume_pdf(fields, borrower_name, short=False)
+    if doc_type == "sponsor_bio":
+        return render_resume_pdf(fields, borrower_name, short=True)
+    if doc_type == "business_plan":
+        return render_business_plan_pdf(fields, borrower_name)
+    if doc_type == "lox":
+        return render_lox_pdf(fields, borrower_name)
+    if doc_type == "rent_roll":
+        return render_rent_roll_pdf(fields, borrower_name)
+    raise HTTPException(status_code=400, detail=f"Unknown doc_type {doc_type}")
+
+
+async def _ada_turn_context(user: dict) -> str:
+    """Compact JSON snapshot Ada receives every turn."""
+    scenarios = await db.scenarios.find(
+        {"client_id": user["id"]},
+        {"_id": 0, "id": 1, "name": 1, "status": 1, "loan_request": 1, "property_info": 1},
+    ).to_list(50)
+    scen_ids = [s["id"] for s in scenarios]
+    docs_by_scen: dict[str, list] = {sid: [] for sid in scen_ids}
+    if scen_ids:
+        async for d in db.client_docs.find(
+            {"scenario_id": {"$in": scen_ids}},
+            {"_id": 0, "id": 1, "scenario_id": 1, "label": 1, "category": 1, "required": 1,
+             "status": 1, "notes": 1, "file_id": 1},
+        ).sort("order", 1):
+            docs_by_scen.setdefault(d["scenario_id"], []).append({
+                "doc_line_id": d["id"], "label": d["label"], "category": d.get("category"),
+                "required": d.get("required", False), "status": d.get("status"),
+                "has_file": bool(d.get("file_id")),
+                "broker_note": d.get("notes") if d.get("status") == "rejected" else None,
+            })
+    drafts = await db.borrower_ada_drafts.find(
+        {"client_id": user["id"], "status": "in_progress"},
+        {"_id": 0, "id": 1, "doc_type": 1, "scenario_id": 1, "updated_at": 1},
+    ).to_list(20)
+    payload = {
+        "borrower": {
+            "first_name": (user.get("name") or user.get("email", "").split("@")[0]).split(" ")[0],
+            "full_name": user.get("name"),
+            "email": user.get("email"),
+            "company": user.get("company"),
+        },
+        "today": datetime.now(timezone.utc).date().isoformat(),
+        "scenarios": [{
+            "id": s["id"], "name": s.get("name"), "status": s.get("status"),
+            "loan_type": (s.get("loan_request") or {}).get("loan_type"),
+            "property_type": (s.get("property_info") or {}).get("property_type"),
+            "location": ", ".join([p for p in [(s.get("property_info") or {}).get("city"),
+                                                (s.get("property_info") or {}).get("state")] if p]),
+            "docs": docs_by_scen.get(s["id"], []),
+        } for s in scenarios],
+        "in_progress_drafts": drafts,
+    }
+    return ("Here is the current state (READ ONLY):\n\n"
+            f"```json\n{json.dumps(payload, indent=2, default=str)}\n```\n\n"
+            "Respond to the borrower.")
+
+
+def _ada_grab(full_text: str, marker: str) -> Optional[str]:
+    needle = f"```{marker}"
+    idx = full_text.find(needle)
+    if idx < 0:
+        return None
+    start = full_text.find("\n", idx) + 1
+    end = full_text.find("```", start)
+    return full_text[start:end].strip() if end > 0 else None
+
+
+def _ada_strip_blocks(full_text: str) -> str:
+    out = full_text
+    for m in ("generate_doc", "upload_confirm", "broker_note"):
+        needle = f"```{m}"
+        idx = out.find(needle)
+        while idx >= 0:
+            end = out.find("```", idx + len(needle))
+            if end < 0:
+                break
+            out = out[:idx] + out[end + 3:]
+            idx = out.find(needle)
+    return out.strip()
+
+
+@api.get("/client/ada/messages")
+async def ada_messages(user=Depends(require_client)):
+    msgs = await db.borrower_ada_messages.find(
+        {"client_id": user["id"]}, {"_id": 0},
+    ).sort("created_at", 1).to_list(500)
+    return msgs
+
+
+@api.post("/client/ada/reset")
+async def ada_reset(user=Depends(require_client)):
+    await db.borrower_ada_messages.delete_many({"client_id": user["id"]})
+    return {"ok": True}
+
+
+class AdaChatBody(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+
+
+@api.post("/client/ada/chat")
+async def ada_chat(body: AdaChatBody, user=Depends(require_client)):
+    """SSE streaming chat. Applies generate_doc / upload_confirm / broker_note blocks after Claude completes."""
+    now = now_iso()
+    await db.borrower_ada_messages.insert_one({
+        "id": str(uuid.uuid4()), "client_id": user["id"], "role": "user",
+        "content": body.message, "created_at": now,
+    })
+    ctx = await _ada_turn_context(user)
+    session_id = f"ada::{user['id']}"
+    chat = _make_scenario_ai_chat(session_id, ADA_SYSTEM_PROMPT)
+
+    async def gen():
+        buf: list[str] = []
+        try:
+            async for ev in chat.stream_message(UserMessage(text=ctx + "\n\n---\n\nBorrower: " + body.message)):
+                if isinstance(ev, TextDelta):
+                    buf.append(ev.content)
+                    yield f"data: {json.dumps({'type':'token','content':ev.content})}\n\n"
+                elif isinstance(ev, StreamDone):
+                    break
+        except Exception as e:
+            yield f"data: {json.dumps({'type':'error','detail':str(e)[:300]})}\n\n"
+            return
+
+        full = "".join(buf)
+        chat_text = _ada_strip_blocks(full)
+
+        # Parse & apply blocks
+        drafts_created: list[dict] = []
+        uploads_done: list[dict] = []
+        broker_notes: list[dict] = []
+
+        raw_gen = _ada_grab(full, "generate_doc")
+        if raw_gen:
+            try:
+                p = json.loads(raw_gen)
+                d = await _ada_apply_generate_doc(user, p)
+                if d:
+                    drafts_created.append(d)
+            except Exception as e:
+                logger.warning("generate_doc block failed: %s", e)
+
+        raw_up = _ada_grab(full, "upload_confirm")
+        if raw_up:
+            try:
+                p = json.loads(raw_up)
+                up = await _ada_apply_upload(user, p)
+                if up:
+                    uploads_done.append(up)
+            except Exception as e:
+                logger.warning("upload_confirm block failed: %s", e)
+
+        raw_bn = _ada_grab(full, "broker_note")
+        if raw_bn:
+            try:
+                p = json.loads(raw_bn)
+                bn = await _ada_apply_broker_note(user, p)
+                if bn:
+                    broker_notes.append(bn)
+            except Exception as e:
+                logger.warning("broker_note block failed: %s", e)
+
+        msg_id = str(uuid.uuid4())
+        await db.borrower_ada_messages.insert_one({
+            "id": msg_id, "client_id": user["id"], "role": "assistant",
+            "content": chat_text, "drafts_created": drafts_created,
+            "uploads_done": uploads_done, "broker_notes": broker_notes,
+            "created_at": now_iso(),
+        })
+        yield "data: " + json.dumps({
+            "type": "done", "message_id": msg_id, "text": chat_text,
+            "drafts_created": drafts_created, "uploads_done": uploads_done,
+            "broker_notes": broker_notes,
+        }) + "\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+async def _ada_apply_generate_doc(user: dict, block: dict) -> Optional[dict]:
+    doc_type = block.get("doc_type")
+    if doc_type not in DOC_TYPES:
+        return None
+    scenario_id = block.get("scenario_id")
+    if scenario_id:
+        scen = await db.scenarios.find_one(
+            {"id": scenario_id, "client_id": user["id"]}, {"_id": 0, "id": 1, "name": 1},
+        )
+        if not scen:
+            return None
+    fields = block.get("fields") or {}
+    borrower_name = user.get("name") or (user.get("email") or "Borrower").split("@")[0]
+    pdf_bytes = _render_ada_doc(doc_type, fields, borrower_name)
+    now = now_iso()
+    draft_id = str(uuid.uuid4())
+    # Ephemeral file (stored in client_files with is_draft=True; deleted on upload/dismiss)
+    file_id = str(uuid.uuid4())
+    filename = f"{DOC_TYPE_DEFAULT_LABEL.get(doc_type, 'Document')} (draft).pdf"
+    await db.client_files.insert_one({
+        "id": file_id, "doc_id": None, "client_id": user["id"], "scenario_id": scenario_id,
+        "filename": filename, "content_type": "application/pdf", "size": len(pdf_bytes),
+        "data_b64": base64.b64encode(pdf_bytes).decode(),
+        "uploaded_at": now, "is_ada_draft": True,
+    })
+    await db.borrower_ada_drafts.insert_one({
+        "id": draft_id, "client_id": user["id"], "scenario_id": scenario_id,
+        "doc_type": doc_type,
+        "target_doc_line_label": block.get("target_doc_line_label") or DOC_TYPE_DEFAULT_LABEL.get(doc_type),
+        "fields": fields, "preview_file_id": file_id, "status": "ready",
+        "created_at": now, "updated_at": now,
+    })
+    return {
+        "draft_id": draft_id, "doc_type": doc_type, "scenario_id": scenario_id,
+        "preview_file_id": file_id, "filename": filename,
+        "target_doc_line_label": block.get("target_doc_line_label") or DOC_TYPE_DEFAULT_LABEL.get(doc_type),
+    }
+
+
+async def _ada_apply_upload(user: dict, block: dict) -> Optional[dict]:
+    draft_id = block.get("draft_id")
+    target_line_id = block.get("target_doc_line_id")
+    if not draft_id or not target_line_id:
+        return None
+    draft = await db.borrower_ada_drafts.find_one({"id": draft_id, "client_id": user["id"]}, {"_id": 0})
+    if not draft or draft.get("status") == "uploaded":
+        return None
+    dl = await db.client_docs.find_one({"id": target_line_id, "client_id": user["id"]})
+    if not dl or dl.get("system"):
+        return None
+    # Copy the preview file into a real, permanent file on the doc line
+    preview = await db.client_files.find_one({"id": draft["preview_file_id"]}, {"_id": 0})
+    if not preview:
+        return None
+    now = now_iso()
+    new_file_id = str(uuid.uuid4())
+    filename = preview["filename"].replace(" (draft)", "")
+    await db.client_files.insert_one({
+        "id": new_file_id, "doc_id": target_line_id, "client_id": user["id"],
+        "scenario_id": draft["scenario_id"], "filename": filename,
+        "content_type": preview["content_type"], "size": preview["size"],
+        "data_b64": preview["data_b64"], "uploaded_at": now, "uploaded_by_ada": True,
+    })
+    if dl.get("file_id"):
+        await db.client_files.delete_one({"id": dl["file_id"]})
+    await db.client_docs.update_one({"id": target_line_id},
+        {"$set": {"file_id": new_file_id, "status": "uploaded",
+                  "notes": f"Uploaded via Ada on {now.split('T')[0]}", "updated_at": now}})
+    await db.borrower_ada_drafts.update_one({"id": draft_id},
+        {"$set": {"status": "uploaded", "uploaded_file_id": new_file_id, "updated_at": now}})
+    # Delete the preview to save space
+    await db.client_files.delete_one({"id": draft["preview_file_id"]})
+    return {"draft_id": draft_id, "doc_line_id": target_line_id, "filename": filename,
+            "doc_type": draft["doc_type"]}
+
+
+async def _ada_apply_broker_note(user: dict, block: dict) -> Optional[dict]:
+    """Post a task into EACH admin's assistant queue with the borrower's question."""
+    question = (block.get("question") or "").strip()
+    if not question:
+        return None
+    urgency = block.get("urgency") or "normal"
+    scen_id = block.get("related_scenario_id")
+    related_name = user.get("name") or user.get("email")
+    admins = await db.users.find({"role": "admin"}, {"_id": 0, "id": 1, "name": 1}).to_list(20)
+    now = now_iso()
+    posted_admin_ids: list[str] = []
+    for a in admins:
+        task_id = str(uuid.uuid4())
+        title_prefix = "URGENT: " if urgency == "urgent" else ""
+        await db.assistant_tasks.insert_one({
+            "id": task_id, "admin_id": a["id"],
+            "title": f"{title_prefix}Ada relay from {related_name}",
+            "notes": question, "related_name": related_name,
+            "related_scenario_id": scen_id, "status": "open",
+            "due_date": None, "assigned_by_name": "Ada (borrower relay)",
+            "created_at": now, "updated_at": now,
+        })
+        posted_admin_ids.append(a["id"])
+    return {"question": question[:200], "urgency": urgency, "posted_to_admins": len(posted_admin_ids)}
+
+
+# ---- Proactive 3-day silence nudge ----
+NUDGE_SILENCE_DAYS = 3
+NUDGE_QUIET_DAYS = 7  # after we ping a borrower, don't ping again for a week
+
+
+async def _ada_nudge_check() -> dict:
+    """Find borrowers whose scenarios have pending required docs and who haven't opened Ada in 3+ days.
+    Sends a Postmark email inviting them back."""
+    now = datetime.now(timezone.utc)
+    counters = {"considered": 0, "sent": 0, "skipped_quiet": 0}
+    scenarios = await db.scenarios.find(
+        {"client_id": {"$exists": True, "$ne": None}, "status": {"$in": ["draft", "shopping"]}},
+        {"_id": 0, "id": 1, "client_id": 1, "name": 1},
+    ).to_list(500)
+    scen_by_client: dict[str, list] = {}
+    for s in scenarios:
+        scen_by_client.setdefault(s["client_id"], []).append(s)
+    for client_id, scens in scen_by_client.items():
+        counters["considered"] += 1
+        # Recent ada activity check
+        last_msg = await db.borrower_ada_messages.find_one(
+            {"client_id": client_id}, {"_id": 0, "created_at": 1},
+            sort=[("created_at", -1)],
+        )
+        last_active = None
+        if last_msg and last_msg.get("created_at"):
+            try:
+                last_active = datetime.fromisoformat(last_msg["created_at"].replace("Z", "+00:00"))
+            except Exception:
+                last_active = None
+        if last_active and (now - last_active).days < NUDGE_SILENCE_DAYS:
+            continue
+        # Recent nudge quiet window
+        last_nudge = await db.borrower_ada_nudges.find_one(
+            {"client_id": client_id}, {"_id": 0, "sent_at": 1},
+            sort=[("sent_at", -1)],
+        )
+        if last_nudge and last_nudge.get("sent_at"):
+            try:
+                sent_dt = datetime.fromisoformat(last_nudge["sent_at"].replace("Z", "+00:00"))
+                if (now - sent_dt).days < NUDGE_QUIET_DAYS:
+                    counters["skipped_quiet"] += 1
+                    continue
+            except Exception:
+                pass
+        # Count pending required docs across all their scenarios
+        pending_required = await db.client_docs.count_documents({
+            "client_id": client_id,
+            "scenario_id": {"$in": [s["id"] for s in scens]},
+            "required": True, "status": "pending",
+        })
+        if pending_required == 0:
+            continue
+        # Fetch client + send
+        client = await db.users.find_one({"id": client_id}, {"_id": 0, "name": 1, "email": 1})
+        if not client or not client.get("email"):
+            continue
+        first_name = (client.get("name") or "there").split(" ")[0]
+        portal_url = f"{public_base_url()}/portal" if public_base_url() else "/portal"
+        subject = f"{first_name}, want a hand with your remaining docs?"
+        html = (
+            f"<div style='font-family:Helvetica,Arial,sans-serif;color:#1A1A1A;line-height:1.55;font-size:14px;'>"
+            f"<p>Hi {first_name},</p>"
+            f"<p>It's Ada from Byrd &amp; CO. I noticed there are still <b>{pending_required} required document"
+            f"{'s' if pending_required != 1 else ''}</b> pending on your loan. I can walk you through them "
+            f"in about 5-10 minutes — including generating your Personal Financial Statement and resume for you.</p>"
+            f"<p><a href='{portal_url}' style='background:#1A1A1A;color:#FBF8F1;text-decoration:none;padding:12px 18px;border-radius:6px;font-weight:600;display:inline-block;'>Open my portal</a></p>"
+            f"<p style='font-size:12px;color:#6B6558;'>Reply to this email if you'd rather have Wayne or Caleb call you.</p>"
+            f"</div>"
+        )
+        text = (f"Hi {first_name},\n\nAda from Byrd & CO here. You have {pending_required} required "
+                f"document(s) still pending. Open your portal to knock them out: {portal_url}\n")
+        try:
+            send_email(client["email"], subject, html, text, "ada_nudge")
+            await db.borrower_ada_nudges.insert_one({
+                "id": str(uuid.uuid4()), "client_id": client_id,
+                "pending_required": pending_required, "sent_at": now.isoformat(),
+            })
+            counters["sent"] += 1
+        except Exception as e:
+            logger.warning("Ada nudge send failed for %s: %s", client["email"], e)
+    return counters
+
+
+@api.post("/admin/ada/run-nudges")
+async def admin_run_ada_nudges(admin=Depends(require_admin)):
+    """Manual trigger for the nudge scan (also runs automatically every 24h at startup)."""
+    return await _ada_nudge_check()
+
+
+@app.on_event("startup")
+async def _ada_nudge_loop():
+    async def loop():
+        # Warm up 5 min after startup, then every 24h
+        await asyncio.sleep(300)
+        while True:
+            try:
+                res = await _ada_nudge_check()
+                logger.info("Ada nudge scan: %s", res)
+            except Exception as e:
+                logger.warning("Ada nudge loop error: %s", e)
+            await asyncio.sleep(86400)
+    asyncio.create_task(loop())
+
+
+app.include_router(api)
+

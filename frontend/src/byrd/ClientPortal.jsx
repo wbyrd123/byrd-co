@@ -5,6 +5,7 @@ import { api, API_BASE } from "@/lib/api";
 import { LOGO_URL, CONTACT } from "@/byrd/data";
 import { StatusChip, readFileAsBase64, fmtSize } from "@/byrd/docHelpers";
 import { toast } from "sonner";
+import AdaChatPanel from "@/byrd/AdaChatPanel";
 import {
   LogOut, Upload, FileText, Download, Phone, Mail, CheckCircle2, Circle, CircleAlert,
   ChevronDown, ChevronRight, PenLine,
@@ -110,6 +111,11 @@ export default function ClientPortal() {
               Each of your loans has its own checklist below. Upload each item on the deal it belongs to —
               we&apos;ll mark items reviewed as they clear our desk.
             </p>
+
+            {/* Ada — borrower AI document concierge */}
+            <div className="mt-8">
+              <AdaChatPanel user={user} scenarios={scenarios} onUploaded={load} />
+            </div>
 
             {/* Overall progress card (visible when 2+ scenarios) */}
             {scenarios.length > 1 && totalAll > 0 && (
