@@ -227,7 +227,7 @@ export default function AdminAssistant() {
           try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
           if (evt.type === "token") {
             liveBuf += evt.content;
-            const cutIdx = liveBuf.search(/```(new_tasks|complete_tasks|email_draft|suggest_client|handoffs|marketing_suggestion)/);
+            const cutIdx = liveBuf.search(/```(new_tasks|complete_tasks|email_draft|suggest_client|handoffs|marketing_suggestion|new_contacts)/);
             setStreaming(cutIdx >= 0 ? liveBuf.slice(0, cutIdx) : liveBuf);
           } else if (evt.type === "done") {
             setMessages((m) => [
@@ -242,6 +242,7 @@ export default function AdminAssistant() {
                 completed_task_ids: evt.completed_task_ids,
                 handoffs_sent: evt.handoffs_sent,
                 marketing_suggestion: evt.marketing_suggestion,
+                new_contacts: evt.new_contacts,
                 created_at: new Date().toISOString(),
               },
             ]);
@@ -576,6 +577,27 @@ function Bubble({ m, onSendEmail, onCreateClient, onAcceptSuggestion, onDismissS
                     &ldquo;{h.note}&rdquo;
                   </div>
                 )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!isUser && m.new_contacts && m.new_contacts.length > 0 && (
+          <div className="border border-[#245C25] bg-[#E5F0E5] rounded-md p-3 text-xs" data-testid="new-contacts-card">
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[#245C25] mb-1.5 inline-flex items-center gap-1">
+              <Check size={10} /> Added to CRM ({m.new_contacts.length})
+            </div>
+            {m.new_contacts.map((c) => (
+              <div key={c.id} className="mt-1 pt-1 first:mt-0 first:pt-0 border-t border-[#C9E1C9] first:border-t-0">
+                <div className="font-semibold text-[#1A3A1A]">{c.name}</div>
+                <div className="text-[11px] text-[#245C25] flex flex-wrap gap-2 mt-0.5">
+                  {c.email && <span>{c.email}</span>}
+                  {c.phone && <span>{c.phone}</span>}
+                  {(c.tags || []).map((t) => (
+                    <span key={t} className="font-mono">#{t}</span>
+                  ))}
+                </div>
+                {c.notes && <div className="text-[11px] text-[#4A6E4A] mt-0.5 italic">{c.notes}</div>}
               </div>
             ))}
           </div>

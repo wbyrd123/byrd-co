@@ -1,0 +1,24 @@
+{
+  "summary": "Verified new_contacts block end-to-end. Backend SSE chat emits new_contacts, /api/admin/contacts persists them, dedupe by name/email works, and regression tests for new_tasks / email_draft / marketing-status all pass. Frontend renders green data-testid='new-contacts-card' with correct names/emails/tags.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_assistant_new_contacts.py",
+    "/app/test_reports/pytest/new_contacts_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is ~5030 lines — flag for future modularization (already large, adding assistant blocks continues to grow it).",
+    "_apply_new_contacts loads ALL existing names/emails into memory for dedupe — fine at current scale but should switch to per-item db lookup or an index+unique-constraint when contacts > a few thousand.",
+    "The dedupe silently skips duplicates; consider returning skipped entries so UI can show 'already in CRM' hint (Claude's prompt already advises the LLM, but a server-side signal would harden it)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_assistant_new_contacts.py (new)"
+  ],
+  "success_rate": {"backend": "100% (5/5)", "frontend": "100%"},
+  "test_credentials": "wayne@byrd-co.com / byrdco2026 (loaded via python-dotenv from /app/frontend/.env and /app/backend/.env)",
+  "seed_data_creation": "Created & cleaned up TEST_ prefixed contacts (sarah_testnc/mike_testnc/jenna_testnc/testui_*_fe/testuia_*/testuib_*/testuic_*) after each run. No demo data touched.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Chat endpoint is POST /api/admin/assistant/chat (NOT GET as review_request stated) with body {message, stream:true}. SSE lines are `data: {json}`; the final `type:'done'` payload carries created_tasks, completed_task_ids, handoffs_sent, email_draft, suggest_client, marketing_suggestion, new_contacts. The /admin/assistant/tasks endpoint returns bucketed dict {overdue, due_today, upcoming, done, dismissed} — flatten before searching. The assistant chat context carries prior history so use time-stamped fake data to avoid cross-turn dedupe surprises when re-testing."
+}
