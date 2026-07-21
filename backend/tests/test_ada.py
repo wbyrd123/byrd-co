@@ -195,3 +195,59 @@ def test_no_qualification_yes_no(client_token):
                    "you don't qualify", "no, you do not qualify"]
     for p in bad_phrases:
         assert p not in txt, f"Ada gave direct qualification answer: '{p}' in {txt[:300]}"
+
+
+# ---- Proforma generator (unit-level PDF render) ----
+def test_proforma_pdf_renders_directly():
+    """Render the proforma PDF without going through the LLM (deterministic)."""
+    import sys as _sys
+    _sys.path.insert(0, "/app/backend")
+    from server import render_proforma_pdf, DOC_TYPES, DOC_TYPE_DEFAULT_LABEL, _render_ada_doc
+
+    assert "proforma" in DOC_TYPES
+    assert DOC_TYPE_DEFAULT_LABEL["proforma"] == "Proforma"
+
+    sample = {
+        "property_address": "123 Ocean Drive, Miami, FL",
+        "property_type": "30-unit multifamily",
+        "as_of_date": "2026-02-15",
+        "prepared_by": "Sample Borrower",
+        "purchase_price": 5_000_000,
+        "loan_amount": 3_500_000,
+        "interest_rate_pct": 6.75,
+        "amortization_years": 30,
+        "term_years": 5,
+        "closing_costs": 75_000,
+        "rent_growth_pct": 3.0,
+        "expense_growth_pct": 2.5,
+        "vacancy_pct": 5.0,
+        "management_pct": 4.0,
+        "cap_rate_pct": 6.5,
+        "income_lines": [
+            {"label": "Base Rent", "monthly_amount": 49_500},
+            {"label": "Laundry", "monthly_amount": 400},
+        ],
+        "expense_lines": [
+            {"label": "Property Taxes", "annual_amount": 42_000},
+            {"label": "Insurance", "annual_amount": 18_500},
+        ],
+        "assumptions_notes": "Stabilized. Vacancy per market."
+    }
+    pdf = render_proforma_pdf(sample, "Sample Borrower")
+    assert pdf[:5] == b"%PDF-", f"not a PDF: {pdf[:20]!r}"
+    assert len(pdf) > 5000, f"PDF suspiciously small: {len(pdf)}"
+
+    # And via the Ada dispatcher
+    pdf2 = _render_ada_doc("proforma", sample, "Sample Borrower")
+    assert pdf2[:5] == b"%PDF-"
+    assert len(pdf2) > 5000
+
+
+def test_proforma_handles_minimum_inputs():
+    """Should not crash on sparse/empty input — outputs 'TBD' cells but still renders."""
+    import sys as _sys
+    _sys.path.insert(0, "/app/backend")
+    from server import render_proforma_pdf
+    pdf = render_proforma_pdf({}, "Sparse Borrower")
+    assert pdf[:5] == b"%PDF-"
+    assert len(pdf) > 3000

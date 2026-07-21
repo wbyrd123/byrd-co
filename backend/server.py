@@ -5045,12 +5045,18 @@ At the top of every turn you receive a JSON context:
 # WHAT YOU CAN DO
 
 1. **Document coaching** — explain what any doc on their checklist is, in plain English.
-2. **Document generation** — you have SIX PDF builders you can invoke via structured blocks:
+2. **Document generation** — you have SEVEN PDF builders you can invoke via structured blocks:
    - `pfs_sba413` — SBA Form 413 Personal Financial Statement (use for scenarios where loan_type == 'SBA')
    - `pfs_byrd` — Byrd & CO clean-format PFS (use for all non-SBA loans)
    - `resume` — CRE-focused sponsor resume/bio (long form)
    - `sponsor_bio` — 1-page punchy sponsor bio for lender packages
-   - `business_plan` — 2-4 page business plan / investment memo (used on value-add, bridge, construction)
+   - `business_plan` — 2-4 page NARRATIVE business plan / investment memo — the STORY, strategy,
+      market, exit thesis. Use on value-add, bridge, construction, ground-up.
+   - `proforma` — NUMBERS-ONLY multi-page pro-forma underwriting workbook: Property Summary →
+      Rent Roll / Income (unit-by-unit or line-by-line) → Operating Expenses → NOI & Cap Rate →
+      Debt Service & DSCR → 5-Year Cash-Flow Projection. Use whenever a lender or the borrower needs
+      underwriting math — often required on acquisitions, refis, value-add, DSCR, bridge. It is
+      SEPARATE from the business plan; you can generate both for the same deal.
    - `lox` — Letter of Explanation (for income dips, credit events, etc.)
    - `rent_roll` — clean rent roll from unstructured input
 3. **Upload on the borrower's behalf** — once a doc is drafted, offer to attach it to the right
@@ -5088,7 +5094,7 @@ At the top of every turn you receive a JSON context:
 
 ```generate_doc
 {
-  "doc_type": "pfs_byrd",   // one of: pfs_sba413, pfs_byrd, resume, sponsor_bio, business_plan, lox, rent_roll
+  "doc_type": "pfs_byrd",   // one of: pfs_sba413, pfs_byrd, resume, sponsor_bio, business_plan, lox, rent_roll, proforma
   "scenario_id": "<scenario id from context>",
   "target_doc_line_label": "Personal Financial Statement",
   "fields": { /* doc-specific — see field guide below */ }
@@ -5129,6 +5135,14 @@ At the top of every turn you receive a JSON context:
    name, date_of_letter }`
 - **rent_roll**: `{ property_address, as_of_date,
    units: [{unit_id, tenant, unit_type, size_sqft, monthly_rent, lease_start, lease_end, security_deposit, notes}] }`
+- **proforma**: `{ property_address, property_type, as_of_date, prepared_by, purchase_price,
+   loan_amount, interest_rate_pct, amortization_years, term_years, closing_costs,
+   rent_growth_pct (default 3), expense_growth_pct (default 2.5), vacancy_pct (default 5),
+   management_pct (default 4), cap_rate_pct (exit cap for terminal-value math),
+   income_lines: [{label, monthly_amount}],   // rent, laundry, parking, other
+   expense_lines: [{label, annual_amount}],   // taxes, insurance, utilities, r&m, mgmt, etc
+   assumptions_notes: "free-text bullets about the model"
+   }`
 
 # STARTUP BEHAVIOR
 
@@ -5141,7 +5155,8 @@ If everything is uploaded, congratulate them and mention their broker will reach
 """
 
 
-DOC_TYPES = ("pfs_sba413", "pfs_byrd", "resume", "sponsor_bio", "business_plan", "lox", "rent_roll")
+DOC_TYPES = ("pfs_sba413", "pfs_byrd", "resume", "sponsor_bio", "business_plan",
+             "lox", "rent_roll", "proforma")
 
 # Default checklist-line labels each doc generator maps to when auto-uploading.
 DOC_TYPE_DEFAULT_LABEL = {
@@ -5152,6 +5167,7 @@ DOC_TYPE_DEFAULT_LABEL = {
     "business_plan": "Business Plan / Investment Memo",
     "lox": "Letter of Explanation",
     "rent_roll": "Current Rent Roll",
+    "proforma": "Proforma",
 }
 
 
@@ -5449,6 +5465,338 @@ def render_rent_roll_pdf(fields: dict, borrower_name: str) -> bytes:
     return buf.getvalue()
 
 
+def render_proforma_pdf(fields: dict, borrower_name: str) -> bytes:
+    """CRE Proforma / underwriting workbook. Numbers-driven, multi-page."""
+    from io import BytesIO
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    # PageBreak already imported at module top
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+
+    f = fields or {}
+
+    def _num(v, default=0.0):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    def fmt_money(v):
+        try:
+            return f"${float(v):,.0f}"
+        except (TypeError, ValueError):
+            return "TBD"
+
+    def fmt_pct(v):
+        try:
+            return f"{float(v):.2f}%"
+        except (TypeError, ValueError):
+            return "TBD"
+
+    def fmt_x(v):
+        try:
+            return f"{float(v):.2f}x"
+        except (TypeError, ValueError):
+            return "TBD"
+
+    # --- Core assumptions ---
+    purchase_price = _num(f.get("purchase_price"))
+    loan_amount = _num(f.get("loan_amount"))
+    rate = _num(f.get("interest_rate_pct"))
+    amort_years = _num(f.get("amortization_years"), 30)
+    term_years = _num(f.get("term_years"), 5)
+    closing_costs = _num(f.get("closing_costs"))
+    rent_growth = _num(f.get("rent_growth_pct"), 3.0)
+    expense_growth = _num(f.get("expense_growth_pct"), 2.5)
+    vacancy_pct = _num(f.get("vacancy_pct"), 5.0)
+    mgmt_pct = _num(f.get("management_pct"), 4.0)
+    exit_cap = _num(f.get("cap_rate_pct"), 0)
+
+    income_lines = f.get("income_lines") or []
+    expense_lines = f.get("expense_lines") or []
+
+    # --- Derived monthly / annual totals ---
+    monthly_gross_income = sum(_num(li.get("monthly_amount")) for li in income_lines)
+    annual_gross_income = monthly_gross_income * 12.0
+    vacancy_loss = annual_gross_income * (vacancy_pct / 100.0)
+    egi = annual_gross_income - vacancy_loss  # effective gross income
+    # Management fee auto-computed off EGI unless user provided a mgmt line already
+    has_mgmt_line = any((li.get("label") or "").strip().lower().startswith(("mgmt", "management"))
+                       for li in expense_lines)
+    mgmt_fee_auto = 0.0 if has_mgmt_line else egi * (mgmt_pct / 100.0)
+    hard_expenses = sum(_num(li.get("annual_amount")) for li in expense_lines)
+    total_expenses = hard_expenses + mgmt_fee_auto
+    noi = egi - total_expenses
+    # Cap rate implied on purchase
+    implied_cap = (noi / purchase_price * 100.0) if purchase_price else 0.0
+    # Debt service — monthly, level-pay amort
+    if loan_amount > 0 and rate > 0 and amort_years > 0:
+        i = rate / 100.0 / 12.0
+        n = amort_years * 12.0
+        monthly_pmt = loan_amount * (i * (1 + i) ** n) / (((1 + i) ** n) - 1)
+    else:
+        monthly_pmt = 0.0
+    annual_ds = monthly_pmt * 12.0
+    dscr = (noi / annual_ds) if annual_ds > 0 else 0.0
+    cash_flow_before_tax = noi - annual_ds
+    total_cash_in = (purchase_price - loan_amount) + closing_costs
+    cash_on_cash = (cash_flow_before_tax / total_cash_in * 100.0) if total_cash_in > 0 else 0.0
+    ltv = (loan_amount / purchase_price * 100.0) if purchase_price else 0.0
+    dy = (noi / loan_amount * 100.0) if loan_amount else 0.0
+
+    # --- PDF build ---
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=0.6*inch, rightMargin=0.6*inch,
+                            topMargin=0.6*inch, bottomMargin=0.6*inch, title="Proforma")
+    ss = getSampleStyleSheet()
+    tstyle = ParagraphStyle("t", parent=ss["Heading1"], fontName="Helvetica-Bold", fontSize=16,
+                            alignment=1, spaceAfter=2, textColor=colors.HexColor("#1A1A1A"))
+    sub = ParagraphStyle("sub", parent=ss["BodyText"], fontName="Helvetica", fontSize=9,
+                         alignment=1, textColor=colors.HexColor("#6B6558"), spaceAfter=10)
+    h2 = ParagraphStyle("h2", parent=ss["Heading2"], fontName="Helvetica-Bold", fontSize=11,
+                        textColor=colors.HexColor("#C89434"), spaceBefore=10, spaceAfter=4)
+    body = ParagraphStyle("b", parent=ss["BodyText"], fontName="Helvetica", fontSize=9.5, leading=12,
+                          textColor=colors.HexColor("#1A1A1A"), spaceAfter=4)
+
+    def kv_table(rows, col1=2.2*inch, col2=4.5*inch):
+        t = Table(rows, colWidths=[col1, col2])
+        t.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4DFD1")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#EFE9DA")),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#6B6558")),
+            ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        return t
+
+    def data_table(header, rows, footer=None, widths=None):
+        all_rows = [header] + rows + ([footer] if footer else [])
+        t = Table(all_rows, colWidths=widths, repeatRows=1)
+        style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1A1A")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#E4DFD1")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]
+        if footer:
+            style += [
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F3EEE0")),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ]
+        t.setStyle(TableStyle(style))
+        return t
+
+    story = [
+        Paragraph("Proforma — Underwriting Workbook", tstyle),
+        Paragraph(
+            f"{f.get('property_address') or 'Property'} · "
+            f"{f.get('property_type') or 'Commercial Real Estate'} · "
+            f"As of {f.get('as_of_date') or datetime.now(timezone.utc).date().isoformat()}",
+            sub
+        ),
+    ]
+
+    # ---------- Page 1: Property Summary + Deal Assumptions ----------
+    story.append(Paragraph("Property Summary", h2))
+    story.append(kv_table([
+        ["Property Address", f.get("property_address") or "TBD"],
+        ["Property Type", f.get("property_type") or "TBD"],
+        ["Prepared By", f.get("prepared_by") or borrower_name],
+        ["As-of Date", f.get("as_of_date") or datetime.now(timezone.utc).date().isoformat()],
+    ]))
+
+    story.append(Paragraph("Deal Assumptions", h2))
+    story.append(kv_table([
+        ["Purchase Price", fmt_money(purchase_price)],
+        ["Loan Amount", fmt_money(loan_amount)],
+        ["LTV", fmt_pct(ltv)],
+        ["Interest Rate", fmt_pct(rate)],
+        ["Amortization", f"{int(amort_years)} years" if amort_years else "TBD"],
+        ["Term", f"{int(term_years)} years" if term_years else "TBD"],
+        ["Closing Costs", fmt_money(closing_costs)],
+        ["Total Cash Required", fmt_money(total_cash_in)],
+        ["Vacancy Assumption", fmt_pct(vacancy_pct)],
+        ["Management Fee (of EGI)", fmt_pct(mgmt_pct)],
+        ["Rent Growth", fmt_pct(rent_growth) + " / yr"],
+        ["Expense Growth", fmt_pct(expense_growth) + " / yr"],
+    ]))
+    story.append(PageBreak())
+
+    # ---------- Page 2: Income & Rent Roll ----------
+    story.append(Paragraph("Income Schedule (Year 1)", h2))
+    inc_rows = []
+    for li in income_lines:
+        m = _num(li.get("monthly_amount"))
+        inc_rows.append([li.get("label") or "Line", fmt_money(m), fmt_money(m * 12)])
+    if not inc_rows:
+        inc_rows.append(["No income lines provided", "TBD", "TBD"])
+    story.append(data_table(
+        ["Line", "Monthly", "Annual"],
+        inc_rows,
+        footer=["Gross Potential Income (GPI)", fmt_money(monthly_gross_income),
+                fmt_money(annual_gross_income)],
+        widths=[3.4*inch, 1.7*inch, 1.7*inch],
+    ))
+    story.append(Spacer(1, 8))
+    story.append(kv_table([
+        ["Gross Potential Income", fmt_money(annual_gross_income)],
+        [f"Less: Vacancy ({fmt_pct(vacancy_pct)})", "(" + fmt_money(vacancy_loss) + ")"],
+        ["Effective Gross Income (EGI)", fmt_money(egi)],
+    ]))
+    story.append(PageBreak())
+
+    # ---------- Page 3: Operating Expenses + NOI ----------
+    story.append(Paragraph("Operating Expenses (Year 1)", h2))
+    exp_rows = []
+    for li in expense_lines:
+        a = _num(li.get("annual_amount"))
+        exp_rows.append([li.get("label") or "Line", fmt_money(a), fmt_money(a / 12.0)])
+    if mgmt_fee_auto > 0:
+        exp_rows.append([f"Management Fee ({fmt_pct(mgmt_pct)} of EGI)",
+                        fmt_money(mgmt_fee_auto), fmt_money(mgmt_fee_auto / 12.0)])
+    if not exp_rows:
+        exp_rows.append(["No expense lines provided", "TBD", "TBD"])
+    story.append(data_table(
+        ["Line", "Annual", "Monthly"],
+        exp_rows,
+        footer=["Total Operating Expenses", fmt_money(total_expenses),
+                fmt_money(total_expenses / 12.0)],
+        widths=[3.4*inch, 1.7*inch, 1.7*inch],
+    ))
+
+    exp_ratio = (total_expenses / egi * 100.0) if egi else 0.0
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("Net Operating Income", h2))
+    story.append(kv_table([
+        ["Effective Gross Income", fmt_money(egi)],
+        ["Less: Total Operating Expenses", "(" + fmt_money(total_expenses) + ")"],
+        ["Net Operating Income (NOI)", fmt_money(noi)],
+        ["Operating Expense Ratio", fmt_pct(exp_ratio)],
+        ["Implied Cap Rate on Purchase", fmt_pct(implied_cap)],
+    ]))
+    story.append(PageBreak())
+
+    # ---------- Page 4: Debt Service & Returns ----------
+    story.append(Paragraph("Debt Service & Coverage", h2))
+    story.append(kv_table([
+        ["Loan Amount", fmt_money(loan_amount)],
+        ["LTV", fmt_pct(ltv)],
+        ["Interest Rate", fmt_pct(rate)],
+        ["Amortization", f"{int(amort_years)} years" if amort_years else "TBD"],
+        ["Monthly Debt Service", fmt_money(monthly_pmt)],
+        ["Annual Debt Service", fmt_money(annual_ds)],
+        ["Debt Service Coverage Ratio (DSCR)", fmt_x(dscr)],
+        ["Debt Yield (NOI / Loan)", fmt_pct(dy)],
+    ]))
+
+    story.append(Paragraph("Cash Flow & Returns (Year 1)", h2))
+    story.append(kv_table([
+        ["Net Operating Income", fmt_money(noi)],
+        ["Less: Annual Debt Service", "(" + fmt_money(annual_ds) + ")"],
+        ["Cash Flow Before Tax", fmt_money(cash_flow_before_tax)],
+        ["Total Cash Required (Equity + Closing)", fmt_money(total_cash_in)],
+        ["Cash-on-Cash Return", fmt_pct(cash_on_cash)],
+    ]))
+    story.append(PageBreak())
+
+    # ---------- Page 5: 5-Year Projection ----------
+    story.append(Paragraph("5-Year Cash-Flow Projection", h2))
+    years = int(max(5, min(term_years or 5, 10)))
+    proj_header = ["Year"] + [str(y) for y in range(1, years + 1)]
+    egi_row = ["Effective Gross Income"]
+    exp_row = ["Operating Expenses"]
+    noi_row = ["NOI"]
+    ds_row = ["Debt Service"]
+    cf_row = ["Cash Flow (BT)"]
+    dscr_row = ["DSCR"]
+
+    y_egi = egi
+    y_exp = total_expenses
+    for y in range(1, years + 1):
+        if y > 1:
+            y_egi = y_egi * (1 + rent_growth / 100.0)
+            y_exp = y_exp * (1 + expense_growth / 100.0)
+        y_noi = y_egi - y_exp
+        y_cf = y_noi - annual_ds
+        y_dscr = (y_noi / annual_ds) if annual_ds > 0 else 0.0
+        egi_row.append(fmt_money(y_egi))
+        exp_row.append("(" + fmt_money(y_exp) + ")")
+        noi_row.append(fmt_money(y_noi))
+        ds_row.append("(" + fmt_money(annual_ds) + ")")
+        cf_row.append(fmt_money(y_cf))
+        dscr_row.append(fmt_x(y_dscr))
+
+    proj_table = Table([proj_header, egi_row, exp_row, noi_row, ds_row, cf_row, dscr_row],
+                       repeatRows=1)
+    proj_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A1A1A")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 3), (0, 3), "Helvetica-Bold"),  # NOI row
+        ("FONTNAME", (0, 5), (0, 5), "Helvetica-Bold"),  # CF row
+        ("BACKGROUND", (0, 3), (-1, 3), colors.HexColor("#F3EEE0")),
+        ("BACKGROUND", (0, 5), (-1, 5), colors.HexColor("#F3EEE0")),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#E4DFD1")),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(proj_table)
+
+    # Terminal value / exit if exit_cap provided
+    if exit_cap > 0:
+        # Use year-{years} NOI (recompute)
+        y_egi = egi
+        y_exp = total_expenses
+        for y in range(1, years + 1):
+            if y > 1:
+                y_egi = y_egi * (1 + rent_growth / 100.0)
+                y_exp = y_exp * (1 + expense_growth / 100.0)
+        terminal_noi = y_egi - y_exp
+        terminal_value = terminal_noi / (exit_cap / 100.0)
+        story.append(Spacer(1, 8))
+        story.append(Paragraph("Terminal Value (Year " + str(years) + ")", h2))
+        story.append(kv_table([
+            [f"Year {years} NOI", fmt_money(terminal_noi)],
+            ["Exit Cap Rate", fmt_pct(exit_cap)],
+            ["Estimated Terminal Value", fmt_money(terminal_value)],
+        ]))
+
+    # Assumptions / Notes
+    notes = (f.get("assumptions_notes") or "").strip()
+    if notes:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Assumptions & Notes", h2))
+        story.append(Paragraph(notes.replace("\n", "<br/>"), body))
+
+    story.append(Spacer(1, 14))
+    story.append(Paragraph(
+        f"<font size='7.5' color='#6B6558'>Prepared with Byrd &amp; CO Ada Assistant on "
+        f"{datetime.now(timezone.utc).strftime('%B %d, %Y at %H:%M UTC')}. "
+        f"Borrower-attested underwriting model — projections not guarantees. "
+        f"Numbers not independently verified.</font>",
+        body))
+    doc.build(story)
+    return buf.getvalue()
+
+
 def _render_ada_doc(doc_type: str, fields: dict, borrower_name: str, variant: Optional[str] = None) -> bytes:
     if doc_type in ("pfs_sba413", "pfs_byrd"):
         return render_pfs(fields, borrower_name, "sba413" if doc_type == "pfs_sba413" else "byrd")
@@ -5462,6 +5810,8 @@ def _render_ada_doc(doc_type: str, fields: dict, borrower_name: str, variant: Op
         return render_lox_pdf(fields, borrower_name)
     if doc_type == "rent_roll":
         return render_rent_roll_pdf(fields, borrower_name)
+    if doc_type == "proforma":
+        return render_proforma_pdf(fields, borrower_name)
     raise HTTPException(status_code=400, detail=f"Unknown doc_type {doc_type}")
 
 

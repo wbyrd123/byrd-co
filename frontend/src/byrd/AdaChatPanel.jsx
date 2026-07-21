@@ -162,7 +162,7 @@ export default function AdaChatPanel({ user, scenarios, onUploaded }) {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={`Ask Ada… ("What's a PFS?", "Help me build my resume")`}
+              placeholder={`Ask Ada… ("What's a PFS?", "Build me a proforma")`}
               disabled={busy}
               data-testid="ada-input"
               className="flex-1 h-11 px-3 rounded-md border border-[#E4DFD1] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[#C89434]/40"
@@ -188,11 +188,13 @@ function AdaGreeting({ name, hasPending, onQuickstart }) {
         "What's next on my checklist?",
         "Help me build my Personal Financial Statement",
         "I need a CRE resume — walk me through it",
+        "Build me a proforma for this deal",
       ]
     : [
         "What does my broker do next?",
         "Can you explain what a T-12 is?",
         "Draft a Letter of Explanation for me",
+        "Build me a proforma for this deal",
       ];
   return (
     <div className="rounded-lg border border-[#E4DFD1] bg-white p-4" data-testid="ada-greeting">
@@ -204,7 +206,7 @@ function AdaGreeting({ name, hasPending, onQuickstart }) {
       </div>
       <p className="text-sm text-[#6B6558] mt-2">
         I'm your Byrd &amp; CO document concierge. I can explain any checklist item, draft your PFS / resume /
-        letters / rent roll — and upload them straight to the right place for you.
+        proforma / letters / rent roll — and upload them straight to the right place for you.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         {suggestions.map((s) => (
