@@ -61,6 +61,7 @@ const SECTIONS = [
   { id: "clients", label: "Clients" },
   { id: "scenarios", label: "Scenarios & Docs" },
   { id: "fee-agreement", label: "Fee Agreement" },
+  { id: "ada", label: "Ada (Borrower AI)" },
   { id: "lenders", label: "Lender Directory" },
   { id: "shopping", label: "Shopping a Deal" },
   { id: "quotes", label: "Quote Inbox" },
@@ -324,6 +325,34 @@ export default function AdminGuide() {
           <p>&mdash; <b>Cancel Request</b> kills a pending link without sending a new one.</p>
           <p>&mdash; The Signed Fee Agreement line is <b>always at the top of the checklist</b>, is <b>hidden from lender views</b>, and can't be deleted through the normal UI (the delete endpoint refuses).</p>
           <p>&mdash; Borrowers cannot upload to this line themselves &mdash; it's system-managed.</p>
+        </Step>
+      </Card>
+
+      <Card id="ada" icon={Sparkles} title="Ada — Borrower AI Concierge">
+        <p className="text-sm text-[#6B6558] -mt-2 mb-4">
+          Ada is a Claude-powered concierge that lives at the top of every borrower's portal.
+          Her job: turn the paperwork friction into velocity. She greets your borrowers by first
+          name and helps them build the docs they don't already have.
+        </p>
+
+        <Step n="1" title="What she can do">
+          <p><b>Explain the checklist</b> — "What's a T-12?", "Why do you need business tax returns?" — she answers in plain English.</p>
+          <p><b>Generate six document types</b> right from the chat: SBA Form 413 PFS, Byrd-branded PFS, CRE Resume, 1-page Sponsor Bio, Business Plan / Investment Memo, Letter of Explanation, and cleaned-up Rent Rolls. She interviews the borrower a few fields at a time, drafts a PDF, and shows them a <b>View</b> + <b>Approve &amp; Upload</b> pair of buttons.</p>
+          <p><b>Upload on their behalf</b> — once they hit Approve, she attaches the file to the exact checklist line on the exact scenario. No manual routing.</p>
+          <p><b>Route strategic questions to you</b> — anything about loan terms, qualifying, legal, tax, or investment questions → she posts a task into your Personal Assistant with the borrower's exact words. You see it right in your regular tasks/handoffs bucket.</p>
+        </Step>
+
+        <Step n="2" title="What she'll never do (hard guardrails)">
+          <p>No rate quotes. No "you'll qualify / you won't qualify". No fee negotiation. No legal/tax/investment advice. No cross-borrower data. She can only add files to lines you already put on the checklist — she can't modify or delete lines. She never marks a doc Reviewed (only you can). She never emails on behalf of the borrower.</p>
+        </Step>
+
+        <Step n="3" title="Proactive 3-day silence nudge">
+          <p>A daily background job scans for borrowers who (a) have pending required docs and (b) haven't opened Ada in 3+ days. It emails them via Postmark with a "Want a hand with your remaining docs?" link back to the portal. Per-borrower 7-day quiet window after each nudge so nobody gets spammed.</p>
+          <p>You can trigger the scan on-demand: hit <InlineCode>POST /api/admin/ada/run-nudges</InlineCode> (or ask us to add a button on your dashboard if you want manual control).</p>
+        </Step>
+
+        <Step n="4" title="Every generated doc is stamped">
+          <p>Bottom of every Ada-generated PDF says: "Prepared with Byrd &amp; CO Ada Assistant on {"{date}"}. Borrower-attested; not independently verified." Belt-and-suspenders against any downstream misuse of the generated content.</p>
         </Step>
       </Card>
 

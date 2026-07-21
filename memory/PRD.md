@@ -37,6 +37,16 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
 - P3: Real Marketplace (lender self-onboarding + term-sheet capture)
 
+### Ada — Borrower AI Concierge — SHIPPED 2026-02
+- New AI assistant embedded at the top of every borrower's portal at `/portal`, powered by Claude Sonnet 4.5. Warm, first-name greeting, quickstart suggestion pills.
+- **Six document generators**: `pfs_sba413` (SBA Form 413), `pfs_byrd` (clean Byrd branded PFS), `resume` (full CRE resume), `sponsor_bio` (1-page), `business_plan` (2-4 pages), `lox` (Letter of Explanation), `rent_roll` (landscape spreadsheet-style PDF). Ada picks pfs_sba413 automatically for SBA loans, pfs_byrd otherwise, borrower can override.
+- **Structured blocks**: `generate_doc` (creates ephemeral draft PDF), `upload_confirm` (attaches approved draft to the correct scenario doc line), `broker_note` (posts a task into every admin's assistant queue with the borrower's question).
+- **Guardrails hard-coded** in system prompt + verified by testing agent: no loan-term quotes, no qualification claims, no legal/tax/investment advice, no fee negotiation, no cross-borrower data leakage, can only add files to existing lines (broker owns the checklist), can't mark docs Reviewed, can't send email as the borrower.
+- **Proactive 3-day silence nudge**: background loop scans daily; if a borrower has pending required docs and no Ada activity in 3+ days, sends a Postmark email inviting them back. Per-borrower 7-day quiet window after each nudge. Manual trigger available at `POST /admin/ada/run-nudges`.
+- New collections: `borrower_ada_messages`, `borrower_ada_drafts`, `borrower_ada_nudges`. New endpoints: `GET/POST /client/ada/messages`, `POST /client/ada/chat`, `POST /client/ada/reset`, `POST /admin/ada/run-nudges`.
+- Every generated PDF carries: "Prepared with Byrd & CO Ada Assistant · Borrower-attested; not independently verified" — hallucination shield.
+- **Verified by testing agent** (iteration 7): 100% backend (8/8 pytest cases including guardrails), 100% frontend Ada flows.
+
 ### Fee Agreement E-Signature — SHIPPED 2026-02 (+ portal signing + certificate v2)
 - New **Broker fee & e-signature** card at the top of every scenario's Documents tab. Enter fee %, preview draft PDF (pre-fills borrower name/email/entity, property address+type, loan purpose, agreement date, broker), then send.
 - **Send** creates a pinned system-managed "Signed Fee Agreement" doc line (order = -1000, hidden from lenders, protected from deletion + not user-uploadable) and a one-time signing token; emails the borrower a signing link via Postmark.
