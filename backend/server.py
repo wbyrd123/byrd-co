@@ -3513,7 +3513,10 @@ async def _crm_snapshot_for_assistant() -> dict:
         # Compact index Claude uses to dedupe when the broker mentions a new person.
         # Cap at 200 rows; contacts_stats.total tells Claude if there are more.
         "contacts_index": [
-            {"name": c.get("name"), "email": (c.get("email") or "").lower() or None}
+            {"id": c.get("id"),
+             "name": c.get("name"),
+             "email": (c.get("email") or "").lower() or None,
+             "tags": c.get("tags") or []}
             for c in contacts[:200] if c.get("name")
         ],
     }
@@ -3619,8 +3622,10 @@ async def _stalled_scenarios_for_admin(admin_id: str) -> list[dict]:
     return stalled
 
 
-ASSISTANT_SYSTEM_PROMPT = """You are the personal assistant to a commercial real estate broker at Byrd & CO.
-You are warm, concise, and proactive. You address the broker by first name.
+ASSISTANT_SYSTEM_PROMPT = """You are **Ava**, the personal assistant to a commercial real estate broker at Byrd & CO.
+Your name is Ava. When the broker asks "what's your name?" or "who are you?", you say you're Ava —
+their personal assistant at Byrd & CO. You are warm, concise, and proactive. You address the broker
+by first name.
 
 At the top of every turn you receive:
 - The broker's identity (name, email)
@@ -3671,19 +3676,35 @@ At the top of every turn you receive:
     a warm, one-paragraph nudge — not pushy — asking if they need help getting the remaining docs
     uploaded. If the broker says "snooze it" or "not now", acknowledge without emitting any block
     (the UI has a snooze button for that).
-13. **Adding contacts to the CRM.** Whenever the broker mentions a NEW person you haven't seen before
+13. **Adding NEW contacts to the CRM.** Whenever the broker mentions a NEW person you haven't seen before
     in the current `contacts_index` OR `clients` roster — a referral source, a lender rep, a
     prospective borrower, someone they met — automatically emit a `new_contacts` block. Also emit
     one when the broker explicitly asks you to add contacts ("add John, Sarah and Mike from
-    Marcus & Millichap"). Rules:
+    Marcus & Millichap"). If the broker says "add my existing clients Rod, Jose, and Breona to the
+    CRM", pull their name+email straight from the `clients` roster and emit `new_contacts` with them
+    — you don't need to ask the broker to re-supply details. Rules:
     - Match on `name` (case-insensitive) OR `email`. If either matches an existing entry in
       `contacts_index`, DO NOT re-add — say "already in the CRM" instead.
     - Always include `name`. Include `email` and `phone` only if the broker gave them or they're
-      obviously derivable — never fabricate.
+      obviously derivable (e.g. from the `clients` roster) — never fabricate.
     - Pick sensible `tags` from what's already in `contacts_stats.tag_counts` when they fit
-      (e.g. `["referral"]`, `["lender"]`, `["past sponsor"]`). Otherwise leave `tags` empty.
+      (e.g. `["referral"]`, `["lender"]`, `["past sponsor"]`). If the broker says the person is a
+      "borrower", "client", "referral", etc., use that as a tag. Otherwise leave `tags` empty.
     - `notes` field: short context ("Met at MBA conference Feb 2026", "Refi lead from Rod").
     - Confirm in your visible chat what was added ("Added Sarah Chen and Mike Torres to the CRM").
+14. **UPDATING existing contacts (tags, notes).** To add tags to a contact that is ALREADY in
+    `contacts_index`, or to update their notes, emit a `contact_updates` block. Reference the
+    contact by their `id` from `contacts_index` (preferred) or by exact `name`/`email` match.
+    `add_tags` is additive — existing tags are preserved. Use `set_tags` if the broker asks to
+    REPLACE the tag set entirely. `set_notes` overwrites notes; `append_notes` appends with a
+    newline. Rules:
+    - NEVER emit `contact_updates` for a person who is not in `contacts_index`. If they're only in
+      `clients`, add them to the CRM first via `new_contacts`.
+    - If the broker says something like "tag Rod, Jose, and Breona as borrower", first check each
+      is in `contacts_index`. For any that ARE in the index, emit a `contact_updates` entry. For any
+      that are NOT, emit `new_contacts` for them (with the tag set) in the SAME response. Explain
+      both in your chat reply.
+    - Confirm in visible chat what was tagged/updated.
 
 # Response format
 Write your natural-language reply first. Then, ONLY IF you have structured actions to take,
@@ -3749,8 +3770,27 @@ append fenced blocks at the end of your message:
 ]
 ```
 
+```contact_updates
+[
+  {
+    "id": "<contact id from contacts_index>",
+    "add_tags": ["borrower"],
+    "set_tags": null,
+    "append_notes": null,
+    "set_notes": null
+  }
+]
+```
+
 Rules:
 - Only include blocks you're actually proposing. Never emit empty ones.
+- **CRITICAL — NO CONFABULATION.** NEVER claim you added, tagged, updated, sent, emailed, completed,
+  handed off, or created anything unless you emit the corresponding fenced block in the SAME reply.
+  If you write "Done — I tagged Rod as borrower" or "Perfect, I've added them", you MUST emit the
+  matching `contact_updates` / `new_contacts` block. If you cannot emit the block (e.g. the contact
+  isn't in `contacts_index`), tell the broker what's blocking you instead — do NOT pretend the
+  action happened. This applies to every block: `new_tasks`, `complete_tasks`, `email_draft`,
+  `handoffs`, `new_contacts`, `contact_updates`, `marketing_suggestion`.
 - Never emit `complete_tasks` unless you're matching a task from the "OPEN TASKS" list.
 - Never emit `email_draft` unless the broker asked you to email someone.
 - Never emit `email_draft` for a MARKETING/BLAST email — use `marketing_suggestion` instead.
@@ -3833,6 +3873,7 @@ def _split_assistant_response(full_text: str) -> dict:
     raw_handoffs = _grab("handoffs")
     raw_marketing = _grab("marketing_suggestion")
     raw_contacts = _grab("new_contacts")
+    raw_contact_updates = _grab("contact_updates")
 
     new_tasks = None
     if raw_new:
@@ -3950,8 +3991,44 @@ def _split_assistant_response(full_text: str) -> dict:
         except Exception:
             pass
 
+    contact_updates = None
+    if raw_contact_updates:
+        try:
+            parsed = json.loads(raw_contact_updates)
+            if isinstance(parsed, list):
+                contact_updates = []
+                for x in parsed:
+                    if not isinstance(x, dict):
+                        continue
+                    # Need at least one identifier
+                    ident_id = (x.get("id") or "").strip()
+                    ident_name = (x.get("name") or "").strip()
+                    ident_email = (x.get("email") or "").strip().lower()
+                    if not (ident_id or ident_name or ident_email):
+                        continue
+                    add_tags = x.get("add_tags") or []
+                    set_tags = x.get("set_tags")
+                    if not isinstance(add_tags, list):
+                        add_tags = []
+                    if set_tags is not None and not isinstance(set_tags, list):
+                        set_tags = None
+                    contact_updates.append({
+                        "id": ident_id or None,
+                        "name": ident_name or None,
+                        "email": ident_email or None,
+                        "add_tags": [str(t).strip() for t in add_tags if str(t).strip()][:16],
+                        "set_tags": ([str(t).strip() for t in set_tags if str(t).strip()][:16]
+                                    if isinstance(set_tags, list) else None),
+                        "append_notes": (str(x.get("append_notes") or "").strip() or None),
+                        "set_notes": (str(x.get("set_notes") or "").strip() or None),
+                    })
+                if not contact_updates:
+                    contact_updates = None
+        except Exception:
+            pass
+
     chat_text = full_text
-    for marker in ("new_tasks", "complete_tasks", "email_draft", "suggest_client", "handoffs", "marketing_suggestion", "new_contacts"):
+    for marker in ("new_tasks", "complete_tasks", "email_draft", "suggest_client", "handoffs", "marketing_suggestion", "new_contacts", "contact_updates"):
         needle = f"```{marker}"
         idx = chat_text.find(needle)
         if idx >= 0:
@@ -3967,6 +4044,7 @@ def _split_assistant_response(full_text: str) -> dict:
         "handoffs": handoffs,
         "marketing_suggestion": marketing_suggestion,
         "new_contacts": new_contacts,
+        "contact_updates": contact_updates,
     }
 
 
@@ -4052,6 +4130,66 @@ async def _apply_assistant_actions(admin: dict, parsed: dict) -> dict:
             })
 
     return {"created": applied_new, "completed": applied_complete, "handoffs": applied_handoffs, "marketing_suggestion": None, "new_contacts": []}
+
+
+async def _apply_contact_updates(parsed_updates: list[dict], admin_id: str) -> list[dict]:
+    """Apply tag / note updates to existing contacts. Returns list of {contact_id, name, tags,
+    added_tags, notes_updated} for each contact actually updated. Skips silently if the contact
+    can't be resolved."""
+    if not parsed_updates:
+        return []
+    now = now_iso()
+    updated: list[dict] = []
+    for u in parsed_updates:
+        # Resolve contact by id > email > name (case-insensitive)
+        query = None
+        if u.get("id"):
+            query = {"id": u["id"]}
+        elif u.get("email"):
+            query = {"email": u["email"]}
+        elif u.get("name"):
+            query = {"name": {"$regex": f"^{re.escape(u['name'])}$", "$options": "i"}}
+        if not query:
+            continue
+        contact = await db.contacts.find_one(query, {"_id": 0})
+        if not contact:
+            continue
+        # Compute new tags
+        current_tags = list(contact.get("tags") or [])
+        added: list[str] = []
+        if u.get("set_tags") is not None:
+            new_tags = [t for t in u["set_tags"] if t]
+        else:
+            new_tags = current_tags[:]
+            for t in (u.get("add_tags") or []):
+                if t and t not in new_tags:
+                    new_tags.append(t)
+                    added.append(t)
+        # Compute new notes
+        current_notes = contact.get("notes") or ""
+        if u.get("set_notes") is not None:
+            new_notes = u["set_notes"]
+        elif u.get("append_notes"):
+            new_notes = (current_notes + ("\n" if current_notes else "") + u["append_notes"]).strip()
+        else:
+            new_notes = current_notes
+        # Only write if something actually changed
+        changed = (new_tags != current_tags) or (new_notes != current_notes)
+        if not changed:
+            continue
+        await db.contacts.update_one(
+            {"id": contact["id"]},
+            {"$set": {"tags": new_tags, "notes": new_notes, "updated_at": now}},
+        )
+        updated.append({
+            "contact_id": contact["id"],
+            "name": contact.get("name"),
+            "email": contact.get("email"),
+            "tags": new_tags,
+            "added_tags": added,
+            "notes_updated": (new_notes != current_notes),
+        })
+    return updated
 
 
 async def _apply_new_contacts(parsed_contacts: list[dict], admin_id: str) -> list[dict]:
@@ -4186,6 +4324,8 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
             )
         if parsed.get("new_contacts"):
             applied["new_contacts"] = await _apply_new_contacts(parsed["new_contacts"], admin["id"])
+        if parsed.get("contact_updates"):
+            applied["contact_updates"] = await _apply_contact_updates(parsed["contact_updates"], admin["id"])
 
         assistant_msg_id = str(uuid.uuid4())
         await db.assistant_messages.insert_one({
@@ -4200,6 +4340,7 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
             "handoffs_sent": applied["handoffs"],
             "marketing_suggestion": applied.get("marketing_suggestion"),
             "new_contacts": applied.get("new_contacts", []),
+            "contact_updates": applied.get("contact_updates", []),
             "created_at": now_iso(),
         })
 
@@ -4214,6 +4355,7 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
             "handoffs_sent": applied["handoffs"],
             "marketing_suggestion": applied.get("marketing_suggestion"),
             "new_contacts": applied.get("new_contacts", []),
+            "contact_updates": applied.get("contact_updates", []),
         }
         yield f"data: {json.dumps(done_payload)}\n\n"
 

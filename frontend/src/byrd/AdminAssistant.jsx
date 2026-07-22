@@ -227,7 +227,7 @@ export default function AdminAssistant() {
           try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
           if (evt.type === "token") {
             liveBuf += evt.content;
-            const cutIdx = liveBuf.search(/```(new_tasks|complete_tasks|email_draft|suggest_client|handoffs|marketing_suggestion|new_contacts)/);
+            const cutIdx = liveBuf.search(/```(new_tasks|complete_tasks|email_draft|suggest_client|handoffs|marketing_suggestion|new_contacts|contact_updates)/);
             setStreaming(cutIdx >= 0 ? liveBuf.slice(0, cutIdx) : liveBuf);
           } else if (evt.type === "done") {
             setMessages((m) => [
@@ -243,6 +243,7 @@ export default function AdminAssistant() {
                 handoffs_sent: evt.handoffs_sent,
                 marketing_suggestion: evt.marketing_suggestion,
                 new_contacts: evt.new_contacts,
+                contact_updates: evt.contact_updates,
                 created_at: new Date().toISOString(),
               },
             ]);
@@ -598,6 +599,28 @@ function Bubble({ m, onSendEmail, onCreateClient, onAcceptSuggestion, onDismissS
                   ))}
                 </div>
                 {c.notes && <div className="text-[11px] text-[#4A6E4A] mt-0.5 italic">{c.notes}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!isUser && m.contact_updates && m.contact_updates.length > 0 && (
+          <div className="border border-[#245C25] bg-[#E5F0E5] rounded-md p-3 text-xs" data-testid="contact-updates-card">
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[#245C25] mb-1.5 inline-flex items-center gap-1">
+              <Check size={10} /> CRM Updated ({m.contact_updates.length})
+            </div>
+            {m.contact_updates.map((c) => (
+              <div key={c.contact_id} className="mt-1 pt-1 first:mt-0 first:pt-0 border-t border-[#C9E1C9] first:border-t-0">
+                <div className="font-semibold text-[#1A3A1A]">{c.name}</div>
+                <div className="text-[11px] text-[#245C25] flex flex-wrap gap-2 mt-0.5">
+                  {(c.added_tags || []).length > 0 && (
+                    <span>added: {(c.added_tags || []).map((t) => `#${t}`).join(" ")}</span>
+                  )}
+                  {(c.tags || []).length > 0 && (
+                    <span className="text-[#4A6E4A]">now: {(c.tags || []).map((t) => `#${t}`).join(" ")}</span>
+                  )}
+                  {c.notes_updated && <span>notes updated</span>}
+                </div>
               </div>
             ))}
           </div>

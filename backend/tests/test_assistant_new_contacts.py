@@ -184,3 +184,53 @@ class TestRegressionOtherBlocks:
         assert r.status_code == 200, r.text[:400]
         data = r.json()
         assert isinstance(data, dict), data
+
+
+class TestAvaIdentityAndContactUpdates:
+    def test_assistant_knows_she_is_ava(self, h):
+        # Fresh convo
+        requests.delete(f"{API}/admin/assistant/messages", headers=h, timeout=10)
+        done = _sse_chat(h, "What is your name?", timeout=60)
+        text = (done.get("text") or "").lower()
+        assert "ava" in text, f"Assistant did not identify as Ava. Reply: {text[:400]}"
+
+    def test_contact_updates_tags_existing(self, h, db):
+        # Reuse a persisted test contact (Sarah Chen was created earlier in the module).
+        contact = db.contacts.find_one({"email": "sarah_testnc@example-test.com"})
+        assert contact, "prerequisite: Sarah Chen must exist from earlier test"
+        pre_tags = set(contact.get("tags") or [])
+
+        done = _sse_chat(
+            h,
+            "Add a tag called 'borrower' to Sarah Chen in the CRM.",
+            timeout=90,
+        )
+        updates = done.get("contact_updates") or []
+        assert updates, f"Expected contact_updates to be populated. done={json.dumps(done)[:800]}"
+        sarah_upd = next((u for u in updates if (u.get("name") or "").lower() == "sarah chen"), None)
+        assert sarah_upd, f"No update entry for Sarah Chen: {updates}"
+        assert "borrower" in (sarah_upd.get("tags") or []), f"borrower tag not in resulting tags: {sarah_upd}"
+        assert "borrower" in (sarah_upd.get("added_tags") or []), f"borrower not in added_tags: {sarah_upd}"
+
+        # Db must reflect the new tag
+        after = db.contacts.find_one({"email": "sarah_testnc@example-test.com"})
+        assert "borrower" in (after.get("tags") or []), f"tag not persisted in DB: tags={after.get('tags')}"
+        # Original tags preserved
+        for t in pre_tags:
+            assert t in (after.get("tags") or []), f"pre-existing tag {t} was dropped: {after.get('tags')}"
+
+    def test_contact_updates_does_not_hallucinate_for_unknown(self, h, db):
+        # Ask Ava to tag someone who isn't in the CRM
+        done = _sse_chat(
+            h,
+            "Add the tag 'lender' to nobody@example.com in the CRM. That person is not in the system.",
+            timeout=60,
+        )
+        updates = done.get("contact_updates") or []
+        # If Ava emitted an update, it must NOT create a phantom contact
+        for u in updates:
+            assert (u.get("email") or "").lower() != "nobody@example.com", (
+                f"Ava hallucinated an update for a non-existent contact: {u}"
+            )
+        # Sanity — no new contact was created for that email
+        assert db.contacts.count_documents({"email": "nobody@example.com"}) == 0
