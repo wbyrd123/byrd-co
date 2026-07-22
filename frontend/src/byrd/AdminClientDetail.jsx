@@ -4,7 +4,7 @@ import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { scenarioStatusChip, fmtMoney } from "@/byrd/dealData";
 import {
-  ArrowLeft, Plus, Copy, Trash2, Phone, Mail, Building2,
+  ArrowLeft, Plus, Copy, Trash2, Phone, Mail, Building2, Send,
   FileText, ExternalLink, AlertTriangle,
 } from "lucide-react";
 import NewScenarioDialog from "@/byrd/NewScenarioDialog";
@@ -65,9 +65,25 @@ export default function AdminClientDetail() {
         </div>
         <div className="flex flex-col items-end gap-2">
           {invite && !inviteActivated && (
-            <button onClick={copyInvite} className="byrd-btn byrd-btn-primary" data-testid="copy-invite">
-              <Copy size={14} /> Copy Invite Link
-            </button>
+            <div className="flex gap-2">
+              <button onClick={copyInvite} className="byrd-btn byrd-btn-outline h-9 px-3 text-xs" data-testid="copy-invite">
+                <Copy size={12} /> Copy Link
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await api.post(`/admin/users/${client.id}/send-invite`);
+                    toast.success(`Portal invite emailed to ${client.email}`);
+                  } catch (e) {
+                    toast.error(e?.response?.data?.detail || "Failed to send");
+                  }
+                }}
+                className="byrd-btn byrd-btn-dark h-9 px-3 text-xs"
+                data-testid="send-invite-email"
+              >
+                <Send size={12} /> Send Portal Invite
+              </button>
+            </div>
           )}
           <div className="text-xs text-[#6B6558]">
             {inviteActivated ? (

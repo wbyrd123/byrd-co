@@ -27,6 +27,8 @@ import LenderView from "@/byrd/LenderView";
 import LendersApplyPage from "@/byrd/LendersApplyPage";
 import LenderActivate from "@/byrd/LenderActivate";
 import LenderPortal from "@/byrd/LenderPortal";
+import PortalForgotPassword from "@/byrd/PortalForgotPassword";
+import PortalResetPassword from "@/byrd/PortalResetPassword";
 
 // AdsCopilot (staff-only)
 import DashboardLayout from "@/pages/DashboardLayout";
@@ -86,6 +88,8 @@ function App() {
             <Route path="/lender/activate/:token" element={<LenderActivate />} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />
             <Route path="/fee-agreement/:token" element={<FeeAgreementSign />} />
+            <Route path="/portal/forgot-password" element={<PortalForgotPassword />} />
+            <Route path="/portal/reset-password/:token" element={<PortalResetPassword />} />
 
             {/* Lender portal (role=lender) */}
             <Route

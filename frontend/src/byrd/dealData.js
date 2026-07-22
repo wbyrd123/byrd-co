@@ -3,7 +3,8 @@ export const LOAN_TYPES = ["Purchase", "Refinance", "Cash-Out", "Construction", 
 
 export const PROPERTY_TYPES = [
   "Multifamily", "Hotel", "Office", "Condo Project",
-  "Single-Family Residence", "Condo Unit", "1-4 Unit", "Portfolio", "Other",
+  "Single-Family Residence", "Condo Unit", "1-4 Unit", "Portfolio",
+  "New Construction", "Other",
 ];
 
 export const RECOURSE_OPTIONS = ["recourse", "non-recourse", "partial"];

@@ -312,7 +312,7 @@ export default function AdminAssistant() {
     if (!email) return;
     try {
       const res = await api.post("/admin/invites", { name, email });
-      toast.success(`${name} added — invite link copied`);
+      toast.success(`${name} added — invite link copied. Send it when you're ready.`);
       const url = `${window.location.origin}${res.data.invite_url_path}`;
       navigator.clipboard.writeText(url).catch(() => {});
       setMessages((m) => m.map((x) => (x.id === msgId ? { ...x, _clientAdded: true } : x)));

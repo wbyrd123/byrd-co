@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, API_BASE } from "@/lib/api";
 import { toast } from "sonner";
-import { Copy, Plus, Users, X, Check } from "lucide-react";
+import { Copy, Plus, Users, X, Check, Send } from "lucide-react";
 
 const InviteDialog = ({ open, onClose, onCreated }) => {
   const [form, setForm] = useState({
@@ -99,17 +99,32 @@ const InviteDialog = ({ open, onClose, onCreated }) => {
           <div className="mt-6 space-y-4" data-testid="invite-result">
             <div className="byrd-chip byrd-chip-green"><Check size={12} /> Client added</div>
             <p className="text-sm text-[#2A2A2A]">
-              <span className="font-semibold">{result.user.name}</span> is now in your roster. Share this
-              invite link whenever you&apos;re ready — they&apos;ll set a password and land in their portal.
-              You can also copy this link later from their client page.
+              <span className="font-semibold">{result.user.name}</span> is now in your roster.
+              No email has been sent yet — set up their scenarios &amp; fee agreement first, then
+              trigger the portal invite when you&apos;re ready. You can copy the link below or
+              send the invite email now.
             </p>
             <div className="flex items-center gap-2">
               <input readOnly value={url} className="flex-1 h-11 px-3 rounded-md border border-[#E4DFD1] bg-[#FBF8F1] font-mono text-xs"
                 data-testid="invite-link" />
-              <button onClick={copy} className="byrd-btn byrd-btn-dark h-11 px-3" data-testid="invite-copy">
+              <button onClick={copy} className="byrd-btn byrd-btn-outline h-11 px-3" data-testid="invite-copy">
                 <Copy size={14} /> Copy
               </button>
             </div>
+            <button
+              onClick={async () => {
+                try {
+                  await api.post(`/admin/users/${result.user.id}/send-invite`);
+                  toast.success(`Portal invite emailed to ${result.user.email}`);
+                } catch (e) {
+                  toast.error(e?.response?.data?.detail || "Failed to send invite");
+                }
+              }}
+              className="byrd-btn byrd-btn-dark w-full h-11"
+              data-testid="invite-send-email"
+            >
+              <Send size={14} /> Send Portal Invite Email
+            </button>
             <div className="flex gap-3 pt-2">
               <Link to={`/admin/clients/${result.user.id}`} className="byrd-btn byrd-btn-primary flex-1" data-testid="invite-open-client">
                 Open client

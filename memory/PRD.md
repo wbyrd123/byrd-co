@@ -1,12 +1,18 @@
 # Byrd & CO — Product Requirements
 
 ## Backlog
-- P0: Redeploy production (`byrd-co.com`) to ship Ada/Proforma/CRM-tags/Marketplace/Postmark-unlock live.
+- P0: Redeploy production (`byrd-co.com`) to ship Ada/Proforma/CRM-tags/Marketplace/Postmark-unlock/PortalPolish live.
 - P1: Automatic reminder emails when client docs missing X days
 - P2: Postmark inbound routing → route replies back into Personal Assistant
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
-- P2: Rate-limit `/public/lender/apply` (basic per-IP throttle)
-- P3: Refactor `server.py` (~6,900 lines) into modular routes: `auth/`, `scenarios/`, `lender_marketplace/`, `ai/`, `pdf/`, `crm/`
+- P2: Rate-limit `/public/lender/apply` and `/public/password-reset/request` (basic per-IP throttle)
+- P3: Refactor `server.py` (~7,000 lines) into modular routes
+
+### Portal polish + Password Reset — SHIPPED 2026-02
+- **No more auto-invite on client creation** — `POST /admin/invites` no longer sends the welcome email. Broker now triggers manually via new **Send Portal Invite** button on the client detail page (`/admin/clients/{id}`) or the Add Client dialog. Prevents the "client got a welcome email before broker could set up scenarios/fee agreement" bug. New endpoint: `POST /admin/users/{uid}/send-invite` (reuses unused token or generates a new one).
+- **Password reset flow** — works for all 3 roles (admin/client/lender). New endpoints: `POST /public/password-reset/request` (uniform 200 response, no email disclosure), `GET /public/password-reset/{token}` (verify + masked email), `POST /public/password-reset/{token}` (set new password, invalidates other unused tokens). 60-min token expiry, one-time use. New pages `/portal/forgot-password` and `/portal/reset-password/:token`. "Forgot password?" link added to `/portal/login`. Postmark template `tmpl_password_reset` added.
+- **"New Construction" property type** — added to shared `PROPERTY_TYPES` list (`dealData.js`) + Lender Marketplace apply page + lender portal credit box.
+- **Guide updated** — Clients section rewritten with the manual-invite flow + Forgot Password mention.
 
 
 ## Original problem statement

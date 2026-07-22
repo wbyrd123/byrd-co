@@ -64,7 +64,12 @@ export default function PortalLogin() {
               />
             </div>
             <div>
-              <label className="text-xs uppercase font-mono tracking-widest text-[#6B6558]">Password</label>
+              <div className="flex items-baseline justify-between">
+                <label className="text-xs uppercase font-mono tracking-widest text-[#6B6558]">Password</label>
+                <Link to="/portal/forgot-password" className="text-xs text-[#C89434] hover:text-[#1A1A1A]" data-testid="forgot-password-link">
+                  Forgot password?
+                </Link>
+              </div>
               <input
                 type="password" required value={pw} onChange={(e) => setPw(e.target.value)}
                 data-testid="login-password"

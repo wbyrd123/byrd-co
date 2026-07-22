@@ -35,6 +35,7 @@ from email_service import (
     tmpl_quote, tmpl_invite, tmpl_lender_activity,
     tmpl_lender_application_received, tmpl_lender_approved, tmpl_lender_invite,
     tmpl_term_sheet_submitted, tmpl_term_sheet_status_change,
+    tmpl_password_reset,
 )
 
 ROOT_DIR = Path(__file__).parent
@@ -872,11 +873,8 @@ async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=D
         "used_at": None,
     })
     # Document checklists now live on each SCENARIO (not the client). Nothing to seed here.
-    # Email the invite link to the client (non-blocking, safe if Postmark down)
-    invite_url = f"{public_base_url()}/portal/invite/{token}" if public_base_url() else f"/portal/invite/{token}"
-    user_stub = {"name": body.name, "email": body.email.lower()}
-    subj, html, text = tmpl_invite(user_stub, invite_url)
-    background.add_task(send_email, body.email.lower(), subj, html, text, "invite")
+    # NOTE: No email is sent automatically. Broker triggers via /admin/users/{uid}/send-invite
+    # once documents/fee agreement are ready.
     return {
         "token": token,
         "invite_url_path": f"/portal/invite/{token}",
@@ -885,6 +883,37 @@ async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=D
             "company": body.company, "phone": body.phone,
         },
     }
+
+
+@api.post("/admin/users/{uid}/send-invite")
+async def send_invite_email(uid: str, background: BackgroundTasks, admin=Depends(require_admin)):
+    """Manually trigger (or resend) the portal invite email for a client."""
+    user = await db.users.find_one({"id": uid}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.get("role") != "client":
+        raise HTTPException(status_code=400, detail="Can only send invites to client users")
+    # Find latest unused invite; if none exists (or already used), create a new token
+    inv = await db.invites.find_one(
+        {"user_id": uid, "used_at": None},
+        sort=[("created_at", -1)],
+    )
+    if not inv:
+        token = uuid.uuid4().hex + uuid.uuid4().hex
+        await db.invites.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": uid,
+            "token": token,
+            "created_by": admin["id"],
+            "created_at": now_iso(),
+            "used_at": None,
+        })
+    else:
+        token = inv["token"]
+    invite_url = f"{public_base_url()}/portal/invite/{token}" if public_base_url() else f"/portal/invite/{token}"
+    subj, html, text = tmpl_invite({"name": user.get("name"), "email": user.get("email")}, invite_url)
+    background.add_task(send_email, user["email"], subj, html, text, "invite")
+    return {"ok": True, "invite_url_path": f"/portal/invite/{token}", "sent_to": user["email"]}
 
 
 @api.get("/invites/{token}")
@@ -1017,6 +1046,100 @@ async def admin_delete_client(client_id: str, admin=Depends(require_admin)):
     await db.invites.delete_many({"user_id": client_id})
     await db.users.delete_one({"id": client_id})
     return {"ok": True}
+
+
+
+# ================ Password Reset (all roles) ================
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    password: str = Field(min_length=8, max_length=200)
+
+
+@api.post("/public/password-reset/request")
+async def password_reset_request(body: PasswordResetRequest, background: BackgroundTasks):
+    """Send a password-reset email to any user (admin/client/lender). Always returns 200 to
+    avoid disclosing whether an email is registered."""
+    email = body.email.lower()
+    user = await db.users.find_one({"email": email})
+    # Only actually send if we found a user with a password set (i.e., activated account)
+    if user and user.get("password_hash"):
+        token = uuid.uuid4().hex + uuid.uuid4().hex
+        # Expire in 60 minutes
+        expires_at_dt = datetime.now(timezone.utc) + timedelta(minutes=60)
+        await db.password_reset_tokens.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "token": token,
+            "created_at": now_iso(),
+            "expires_at": expires_at_dt.isoformat(),
+            "used_at": None,
+        })
+        reset_url = (f"{public_base_url()}/portal/reset-password/{token}"
+                     if public_base_url() else f"/portal/reset-password/{token}")
+        subj, html, text = tmpl_password_reset(user.get("name") or "there", reset_url)
+        background.add_task(send_email, email, subj, html, text, "password_reset")
+    # Uniform response
+    return {"ok": True}
+
+
+@api.get("/public/password-reset/{token}")
+async def password_reset_check(token: str):
+    """Verify a reset token is still valid. Returns the associated email (masked)."""
+    tok = await db.password_reset_tokens.find_one({"token": token})
+    if not tok:
+        raise HTTPException(status_code=404, detail="Reset link invalid")
+    if tok.get("used_at"):
+        raise HTTPException(status_code=410, detail="Reset link already used")
+    try:
+        exp = datetime.fromisoformat(tok["expires_at"])
+    except (ValueError, TypeError):
+        exp = datetime.now(timezone.utc)
+    if datetime.now(timezone.utc) > exp:
+        raise HTTPException(status_code=410, detail="Reset link expired")
+    user = await db.users.find_one({"id": tok["user_id"]}, {"_id": 0, "email": 1, "name": 1})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Mask the email
+    email = user.get("email") or ""
+    local, _, domain = email.partition("@")
+    masked = (local[:2] + "***" + "@" + domain) if local else email
+    return {"email_masked": masked, "name": user.get("name")}
+
+
+@api.post("/public/password-reset/{token}", response_model=AuthResponse)
+async def password_reset_confirm(token: str, body: PasswordResetConfirm):
+    tok = await db.password_reset_tokens.find_one({"token": token})
+    if not tok:
+        raise HTTPException(status_code=404, detail="Reset link invalid")
+    if tok.get("used_at"):
+        raise HTTPException(status_code=410, detail="Reset link already used")
+    try:
+        exp = datetime.fromisoformat(tok["expires_at"])
+    except (ValueError, TypeError):
+        exp = datetime.now(timezone.utc)
+    if datetime.now(timezone.utc) > exp:
+        raise HTTPException(status_code=410, detail="Reset link expired")
+    user = await db.users.find_one({"id": tok["user_id"]})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"password_hash": hash_pw(body.password), "password_updated_at": now_iso()}},
+    )
+    await db.password_reset_tokens.update_one({"id": tok["id"]},
+                                              {"$set": {"used_at": now_iso()}})
+    # Invalidate any OTHER unused reset tokens for this user
+    await db.password_reset_tokens.update_many(
+        {"user_id": user["id"], "used_at": None, "id": {"$ne": tok["id"]}},
+        {"$set": {"used_at": now_iso()}},
+    )
+    return {"token": make_token(user["id"]), "user": sanitize_user(user)}
+
+
 
 
 # ================ Client portal ================

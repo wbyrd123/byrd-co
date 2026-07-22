@@ -335,3 +335,41 @@ def tmpl_term_sheet_status_change(lender_name: str, scen_name: str, status: str,
     </div>
     """
     return subject, html, text
+
+
+def tmpl_password_reset(name: str, reset_url: str) -> tuple[str, str, str]:
+    subject = "Reset your Byrd & CO password"
+    text = (
+        f"Hi {name},\n\n"
+        f"Someone (hopefully you) asked to reset the password for your Byrd & CO account.\n\n"
+        f"Click the link below within 60 minutes to choose a new one:\n\n"
+        f"{reset_url}\n\n"
+        f"If you didn't request this, you can ignore this email — your password won't change.\n\n"
+        f"— Byrd & CO Commercial RE Lending\n"
+    )
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:600px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">Password Reset</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 12px;font-family:Georgia,serif;">Hi {name},</h2>
+        <p style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;">
+          Someone (hopefully you) asked to reset the password for your Byrd &amp; CO account.
+          Click the button below within 60 minutes to choose a new one.
+        </p>
+        <div style="text-align:center;margin:24px 0;">
+          <a href="{reset_url}" style="background:#C89434;color:#1A1A1A;padding:14px 28px;text-decoration:none;font-family:Arial,sans-serif;font-size:14px;font-weight:bold;">Reset My Password</a>
+        </div>
+        <p style="font-family:Arial,sans-serif;font-size:12px;color:#6B6558;">
+          Or paste this into your browser:<br/><span style="word-break:break-all;">{reset_url}</span>
+        </p>
+        <p style="font-family:Arial,sans-serif;font-size:12px;color:#6B6558;margin-top:24px;">
+          If you didn't request this, you can ignore this email — your password won't change.
+        </p>
+      </div>
+    </div>
+    """
+    return subject, html, text
+

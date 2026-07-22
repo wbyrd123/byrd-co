@@ -11,6 +11,7 @@ import {
 const PROPERTY_TYPES = [
   "Multifamily", "Office", "Retail", "Industrial", "Hospitality",
   "Self-storage", "Mixed-use", "Medical Office", "Mobile Home Park", "Land",
+  "New Construction",
 ];
 
 const Input = (p) => (

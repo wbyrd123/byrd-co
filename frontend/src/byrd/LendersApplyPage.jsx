@@ -19,6 +19,7 @@ const INSTITUTION_TYPES = [
 const PROPERTY_TYPES = [
   "Multifamily", "Office", "Retail", "Industrial", "Hospitality",
   "Self-storage", "Mixed-use", "Medical Office", "Mobile Home Park", "Land",
+  "New Construction",
 ];
 
 function Field({ label, hint, children, testId }) {

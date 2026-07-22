@@ -237,16 +237,23 @@ export default function AdminGuide() {
       </Card>
 
       <Card id="clients" icon={Users} title="Clients">
-        <Step n="1" title="Add a client">
+        <Step n="1" title="Add a client — no email is sent yet">
           <p>Sidebar &rarr; <b>Clients</b> &rarr; <b>Add Client</b>. Fill in name + email (optionally company / phone). Click <b>Add Client</b>.</p>
-          <p>They get an invite link (auto-emailed via Postmark; also copyable from their client page). They click, set a password, and land in their portal.</p>
+          <p><b>Important:</b> creating a client no longer auto-emails the portal invite. You get an invite link and a <b>Send Portal Invite Email</b> button. Copy the link or fire the email <em>only when you're ready</em> — after you've set up their scenarios, uploaded any starter docs, and sent the fee agreement. This way clients don't get a "welcome to your portal" email that leads to a half-empty portal.</p>
         </Step>
-        <Step n="2" title="Client page = scenarios + delete">
+        <Step n="2" title="When you're ready — send the invite">
+          <p>Open the client page (<InlineCode>/admin/clients/{"{id}"}</InlineCode>). Top-right you'll see two buttons: <b>Copy Link</b> (silent, for pasting into a personal email) and <b>Send Portal Invite</b> (fires the Postmark welcome email with the reset link).</p>
+          <p>Both work as many times as you want — the invite token is reused until the client activates their portal.</p>
+        </Step>
+        <Step n="3" title="Client page = scenarios + delete">
           <p>Docs no longer live on the client page &mdash; they live on each <b>scenario</b>. So the client detail page is now clean: a list of that client's deals with progress bars, plus a <b>Delete client</b> button.</p>
           <p><b>Delete is blocked</b> if the client has any scenarios. Remove or reassign the scenarios first, then the delete button unlocks. That's the guardrail against wiping real data by mistake.</p>
         </Step>
-        <Step n="3" title="What the client sees">
+        <Step n="4" title="What the client sees">
           <p>Their portal groups their upload checklist <b>by scenario</b>. If Rod has two deals with you (hotel purchase in Miami + MF refi in Sugar Land), he sees two collapsible sections &mdash; each with its own progress bar and its own document list. Way clearer than one flat pile.</p>
+        </Step>
+        <Step n="5" title="Forgot password?">
+          <p>The login page now has a <b>Forgot password?</b> link (visible to anyone — client, lender, or broker). It sends a 60-minute one-time reset link via Postmark. If someone emails you saying they can't get in, point them there instead of resetting for them.</p>
         </Step>
       </Card>
 
