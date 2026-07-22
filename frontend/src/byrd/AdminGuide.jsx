@@ -63,6 +63,7 @@ const SECTIONS = [
   { id: "fee-agreement", label: "Fee Agreement" },
   { id: "ada", label: "Ada (Borrower AI)" },
   { id: "lenders", label: "Lender Directory" },
+  { id: "marketplace", label: "Lender Marketplace" },
   { id: "shopping", label: "Shopping a Deal" },
   { id: "quotes", label: "Quote Inbox" },
   { id: "faq", label: "Help & FAQ" },
@@ -366,6 +367,34 @@ export default function AdminGuide() {
         </Step>
         <Step n="3" title="Edit and prune over time">
           <p>Every card has Edit/Delete on the right. Keep the directory small and honest &mdash; the match engine is only as good as the credit boxes you enter.</p>
+        </Step>
+        <Step n="4" title="Directory vs Marketplace">
+          <p>The Directory is <b>your private rolodex</b> — lenders you've placed with in the past. The <b>Marketplace</b> (next section) is where lenders self-register through the public site. Both feed the match engine, but only Marketplace lenders can log in to their own portal and submit structured term sheets.</p>
+        </Step>
+      </Card>
+
+      <Card id="marketplace" icon={Inbox} title="Lender Marketplace (Self-Registration + Term Sheets)">
+        <Step n="1" title="Public application page">
+          <p>Lenders find your site (or you send them a link) and click <b>Become a Lending Partner</b> in the footer — that goes to <InlineCode>/lenders/apply</InlineCode>. They fill out their credit box (institution type, property types, geography, LTV / DSCR / DY parameters, loan size range, rate range, recourse, fees) and submit.</p>
+          <p>They get an instant confirmation email. Nothing happens yet in your directory — the application is <b>pending</b>.</p>
+        </Step>
+        <Step n="2" title="Approve or reject on /admin/lenders">
+          <p>New applications show up as a <b>gold-bordered card at the top of the Lenders page</b> — "Marketplace applications (N)". Each entry shows the credit box + primary contact so you can vet quickly.</p>
+          <p><b>Approve</b> → sends the lender an activation email with a link to set their password. Once they set it, their lender portal is live and they show up in your main directory list. <b>Reject</b> → marks the record rejected and no email is sent.</p>
+        </Step>
+        <Step n="3" title="Auto-match invites on any scenario">
+          <p>On a scenario's <b>Lenders</b> tab, approved marketplace lenders whose credit box matches show up in a green "Marketplace Matches" card at the top — with fits/misses and a one-click <b>Invite</b> button per lender (or "Invite all N" for the whole set). Confirming invites emails them + drops the scenario into their portal's Active Invites tab.</p>
+          <p>Auto-suggestions never fire without your click — nothing gets sent behind your back.</p>
+        </Step>
+        <Step n="4" title="Lenders submit structured term sheets">
+          <p>Inside their portal, each active invite has a <b>Submit Term Sheet</b> button. The form captures rate + type, loan amount, LTV / LTC, amortization, term, IO period, recourse, prepay, orig / exit fees, expiration, contingencies, and notes. They can update the term sheet any time before you act on it.</p>
+          <p>Submission emails Wayne and Caleb + drops a task into your Personal Assistant queue ("Review term sheet from Frost Bank on Sample MF Refi").</p>
+        </Step>
+        <Step n="5" title="Compare term sheets on the scenario">
+          <p>Every submission shows up on the scenario's new <b>Term Sheets</b> tab — side-by-side cards with rate, loan, LTV, term, amort, fees, prepay, expiration, contingencies, lender notes. Per card, three actions: <b>Accept</b>, <b>Counter with note</b>, or <b>Pass</b>. Each emails the lender with your note. Multiple term sheets from multiple lenders are the whole point — pick the winner.</p>
+        </Step>
+        <Step n="6" title="Borrower sees term sheets in their portal">
+          <p>Under each scenario in the borrower's portal, a new <b>Lender Term Sheets</b> block shows every non-withdrawn submission with rate / loan / LTV / status. If you've countered or accepted, your broker note is visible to the borrower — so they know exactly where things stand without you having to forward every email.</p>
         </Step>
       </Card>
 

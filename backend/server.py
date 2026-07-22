@@ -33,6 +33,8 @@ from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, Strea
 from email_service import (
     send_email, broker_emails, public_base_url,
     tmpl_quote, tmpl_invite, tmpl_lender_activity,
+    tmpl_lender_application_received, tmpl_lender_approved, tmpl_lender_invite,
+    tmpl_term_sheet_submitted, tmpl_term_sheet_status_change,
 )
 
 ROOT_DIR = Path(__file__).parent
@@ -103,6 +105,12 @@ async def require_admin(user=Depends(get_current_user)):
 async def require_client(user=Depends(get_current_user)):
     if user.get("role") != "client":
         raise HTTPException(status_code=403, detail="Client only")
+    return user
+
+
+async def require_lender(user=Depends(get_current_user)):
+    if user.get("role") != "lender":
+        raise HTTPException(status_code=403, detail="Lender only")
     return user
 
 
@@ -3129,6 +3137,579 @@ async def lender_docs_zip(token: str, session_token: Optional[str] = None):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+
+# ================ Lender Marketplace ================
+# Self-registration flow, per-lender portal (invites + credit box + term sheets),
+# structured term-sheet submission, admin approval + auto-match invites.
+
+
+class LenderApplyBody(BaseModel):
+    # Company + primary contact
+    lender_name: str = Field(min_length=2, max_length=200)
+    institution_type: str = "bank"   # bank / credit_union / private / agency / bridge / hard_money / other
+    contact_name: str = Field(min_length=1, max_length=200)
+    contact_title: str = Field(default="", max_length=120)
+    contact_email: EmailStr
+    contact_phone: str = Field(default="", max_length=40)
+    website: str = Field(default="", max_length=200)
+    # Credit box (all optional at apply time)
+    property_types: List[str] = Field(default_factory=list)
+    geography: List[str] = Field(default_factory=list)
+    min_loan: Optional[float] = None
+    max_loan: Optional[float] = None
+    max_ltv: Optional[float] = None
+    max_ltc: Optional[float] = None
+    min_dscr: Optional[float] = None
+    min_debt_yield: Optional[float] = None
+    rate_min: Optional[float] = None
+    rate_max: Optional[float] = None
+    typical_term_months: Optional[int] = None
+    recourse_preference: str = ""
+    decision_speed_days: Optional[int] = None
+    typical_fees: str = ""
+    notes: str = ""
+
+
+class LenderApproveBody(BaseModel):
+    lender_id: str
+
+
+class LenderActivateBody(BaseModel):
+    password: str = Field(min_length=8, max_length=200)
+
+
+class CreditBoxUpdate(BaseModel):
+    lender_name: Optional[str] = None
+    institution_type: Optional[str] = None
+    property_types: Optional[List[str]] = None
+    geography: Optional[List[str]] = None
+    min_loan: Optional[float] = None
+    max_loan: Optional[float] = None
+    max_ltv: Optional[float] = None
+    max_ltc: Optional[float] = None
+    min_dscr: Optional[float] = None
+    min_debt_yield: Optional[float] = None
+    rate_min: Optional[float] = None
+    rate_max: Optional[float] = None
+    typical_term_months: Optional[int] = None
+    recourse_preference: Optional[str] = None
+    decision_speed_days: Optional[int] = None
+    typical_fees: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class TermSheetBody(BaseModel):
+    # Core (mostly optional; broker only needs enough to compare)
+    rate_type: Optional[Literal["fixed", "floating", "hybrid"]] = None
+    interest_rate_pct: Optional[float] = None
+    floating_index: Optional[str] = None       # e.g., "SOFR", "Prime"
+    floating_spread_bps: Optional[float] = None
+    loan_amount: Optional[float] = None
+    ltv_pct: Optional[float] = None
+    ltc_pct: Optional[float] = None
+    amortization_years: Optional[int] = None
+    term_months: Optional[int] = None
+    io_months: Optional[int] = None            # interest-only period
+    recourse: Optional[Literal["full", "partial", "non-recourse"]] = None
+    prepay: Optional[str] = None               # freeform, e.g. "3-2-1"
+    origination_fee_pct: Optional[float] = None
+    exit_fee_pct: Optional[float] = None
+    expiration_date: Optional[str] = None      # ISO date
+    contingencies: Optional[str] = None
+    notes: Optional[str] = None
+    pdf_file_id: Optional[str] = None          # file uploaded separately via /admin/files
+
+
+class TermSheetStatusBody(BaseModel):
+    status: Literal["accepted", "countered", "passed"]
+    broker_note: str = Field(default="", max_length=4000)
+
+
+class LenderInviteBody(BaseModel):
+    lender_ids: List[str] = Field(min_length=1)
+    note: str = Field(default="", max_length=2000)
+
+
+# --- Utility helpers ---
+
+def _sanitize_lender_public(lender: dict) -> dict:
+    """Strip fields lenders shouldn't see about themselves (e.g. internal broker notes)."""
+    if not lender:
+        return {}
+    out = {k: v for k, v in lender.items() if k not in ("broker_id",)}
+    return out
+
+
+async def _make_lender_activation_token(lender_id: str, user_id: str) -> str:
+    tok = uuid.uuid4().hex + uuid.uuid4().hex
+    await db.lender_activation_tokens.insert_one({
+        "id": str(uuid.uuid4()),
+        "token": tok,
+        "lender_id": lender_id,
+        "user_id": user_id,
+        "created_at": now_iso(),
+        "used_at": None,
+    })
+    return tok
+
+
+async def _resolve_lender_for_user(user: dict) -> dict:
+    """Get the lender record owned by this lender-role user."""
+    lender = await db.lenders.find_one({"owner_user_id": user["id"]}, {"_id": 0})
+    if not lender:
+        raise HTTPException(status_code=404, detail="No lender record linked to this account")
+    return lender
+
+
+# --- 1. PUBLIC: self-register (apply) ---
+
+@api.post("/public/lender/apply")
+async def lender_apply(body: LenderApplyBody, background: BackgroundTasks):
+    email = body.contact_email.lower()
+    # Reject if any user with this email already exists in ANY role
+    existing_user = await db.users.find_one({"email": email})
+    if existing_user:
+        raise HTTPException(status_code=400,
+                            detail="An account with this email already exists. Log in instead.")
+    # Reject if the lender is already applied/approved
+    existing_lender = await db.lenders.find_one({
+        "$or": [
+            {"contacts.email": email},
+            {"apply_email": email},
+        ]
+    }, {"_id": 0, "id": 1, "status": 1})
+    if existing_lender:
+        raise HTTPException(status_code=400,
+                            detail="An application from this email is already on file.")
+    now = now_iso()
+    lender_id = str(uuid.uuid4())
+    doc = {
+        "id": lender_id,
+        "name": body.lender_name,
+        "institution_type": body.institution_type,
+        "contacts": [{
+            "name": body.contact_name, "title": body.contact_title,
+            "phone": body.contact_phone, "email": email,
+        }],
+        "property_types": body.property_types,
+        "geography": [g.upper() for g in body.geography if g],
+        "min_loan": body.min_loan, "max_loan": body.max_loan,
+        "max_ltv": body.max_ltv, "max_ltc": body.max_ltc,
+        "min_dscr": body.min_dscr, "min_debt_yield": body.min_debt_yield,
+        "rate_min": body.rate_min, "rate_max": body.rate_max,
+        "typical_term_months": body.typical_term_months,
+        "recourse_preference": body.recourse_preference,
+        "decision_speed_days": body.decision_speed_days,
+        "typical_fees": body.typical_fees,
+        "notes": body.notes,
+        "website": body.website,
+        "status": "active",              # match filter status
+        "approval_status": "pending",    # NEW: pending / approved / rejected
+        "self_registered": True,
+        "apply_email": email,
+        "owner_user_id": None,           # set on approval
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.lenders.insert_one(doc)
+    subj, html, text = tmpl_lender_application_received(body.lender_name, email)
+    background.add_task(send_email, email, subj, html, text, "lender_application")
+    return {"ok": True, "id": lender_id}
+
+
+# --- 2. ADMIN: pending / approve / reject ---
+
+@api.get("/admin/marketplace/pending-lenders")
+async def admin_list_pending_lenders(admin=Depends(require_admin)):
+    return await db.lenders.find(
+        {"approval_status": "pending", "self_registered": True},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(500)
+
+
+@api.post("/admin/marketplace/lenders/{lid}/approve")
+async def admin_approve_lender(lid: str, background: BackgroundTasks, admin=Depends(require_admin)):
+    lender = await db.lenders.find_one({"id": lid})
+    if not lender:
+        raise HTTPException(status_code=404, detail="Lender not found")
+    if lender.get("approval_status") == "approved":
+        raise HTTPException(status_code=400, detail="Already approved")
+    email = (lender.get("apply_email") or "").lower()
+    contact_name = (lender.get("contacts") or [{}])[0].get("name") or lender.get("name")
+    if not email:
+        raise HTTPException(status_code=400, detail="No contact email on record")
+    # Check user doesn't already exist
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=400, detail="A user with this email already exists")
+    user_id = str(uuid.uuid4())
+    await db.users.insert_one({
+        "id": user_id,
+        "email": email,
+        "name": contact_name,
+        "role": "lender",
+        "password_hash": None,
+        "pending": True,
+        "created_by": admin["id"],
+        "created_at": now_iso(),
+    })
+    tok = await _make_lender_activation_token(lid, user_id)
+    await db.lenders.update_one(
+        {"id": lid},
+        {"$set": {
+            "approval_status": "approved",
+            "owner_user_id": user_id,
+            "approved_at": now_iso(),
+            "approved_by_admin_id": admin["id"],
+            "updated_at": now_iso(),
+        }},
+    )
+    activate_url = (f"{public_base_url()}/lender/activate/{tok}"
+                    if public_base_url() else f"/lender/activate/{tok}")
+    subj, html, text = tmpl_lender_approved(lender.get("name") or contact_name, activate_url)
+    background.add_task(send_email, email, subj, html, text, "lender_approved")
+    return {"ok": True, "activate_url": activate_url}
+
+
+@api.post("/admin/marketplace/lenders/{lid}/reject")
+async def admin_reject_lender(lid: str, admin=Depends(require_admin)):
+    lender = await db.lenders.find_one({"id": lid})
+    if not lender:
+        raise HTTPException(status_code=404, detail="Lender not found")
+    await db.lenders.update_one(
+        {"id": lid},
+        {"$set": {"approval_status": "rejected", "updated_at": now_iso(),
+                  "rejected_at": now_iso(), "rejected_by_admin_id": admin["id"]}},
+    )
+    return {"ok": True}
+
+
+# --- 3. LENDER: activate + get me + credit box ---
+
+@api.get("/lender/activate/{token}")
+async def get_lender_activation(token: str):
+    tok = await db.lender_activation_tokens.find_one({"token": token}, {"_id": 0})
+    if not tok:
+        raise HTTPException(status_code=404, detail="Activation link not found")
+    if tok.get("used_at"):
+        raise HTTPException(status_code=410, detail="Link already used")
+    lender = await db.lenders.find_one({"id": tok["lender_id"]}, {"_id": 0, "name": 1})
+    user = await db.users.find_one({"id": tok["user_id"]}, {"_id": 0, "email": 1, "name": 1})
+    return {
+        "lender_name": lender.get("name") if lender else "",
+        "email": user.get("email") if user else "",
+        "contact_name": user.get("name") if user else "",
+    }
+
+
+@api.post("/lender/activate/{token}", response_model=AuthResponse)
+async def lender_activate(token: str, body: LenderActivateBody):
+    tok = await db.lender_activation_tokens.find_one({"token": token})
+    if not tok:
+        raise HTTPException(status_code=404, detail="Activation link not found")
+    if tok.get("used_at"):
+        raise HTTPException(status_code=410, detail="Link already used")
+    user = await db.users.find_one({"id": tok["user_id"]})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"password_hash": hash_pw(body.password), "pending": False,
+                  "activated_at": now_iso()}},
+    )
+    await db.lender_activation_tokens.update_one({"id": tok["id"]},
+                                                 {"$set": {"used_at": now_iso()}})
+    return {"token": make_token(user["id"]), "user": sanitize_user({**user, "role": "lender"})}
+
+
+@api.get("/lender/me")
+async def lender_me(user=Depends(require_lender)):
+    lender = await _resolve_lender_for_user(user)
+    return _sanitize_lender_public(lender)
+
+
+@api.patch("/lender/me/credit-box")
+async def lender_update_credit_box(body: CreditBoxUpdate, user=Depends(require_lender)):
+    lender = await _resolve_lender_for_user(user)
+    update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if "lender_name" in update:
+        update["name"] = update.pop("lender_name")
+    if "geography" in update and update["geography"] is not None:
+        update["geography"] = [g.upper() for g in update["geography"]]
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = now_iso()
+    await db.lenders.update_one({"id": lender["id"]}, {"$set": update})
+    updated = await db.lenders.find_one({"id": lender["id"]}, {"_id": 0})
+    return _sanitize_lender_public(updated)
+
+
+# --- 4. LENDER: invites list (scenarios shared with me) ---
+
+@api.get("/lender/invites")
+async def lender_list_invites(user=Depends(require_lender)):
+    lender = await _resolve_lender_for_user(user)
+    shares = await db.scenario_shares.find(
+        {"lender_id": lender["id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(200)
+    out = []
+    for sh in shares:
+        scen = await db.scenarios.find_one(
+            {"id": sh["scenario_id"]},
+            {"_id": 0, "id": 1, "name": 1, "property_info": 1, "loan_request": 1, "status": 1},
+        )
+        if not scen:
+            continue
+        # Has this lender already submitted a term sheet on this scenario?
+        ts = await db.term_sheets.find_one(
+            {"scenario_id": sh["scenario_id"], "lender_id": lender["id"]},
+            {"_id": 0, "id": 1, "status": 1, "submitted_at": 1},
+        )
+        out.append({
+            "share_id": sh["id"],
+            "token": sh["token"],
+            "invited_at": sh.get("created_at"),
+            "broker_note": sh.get("note", ""),
+            "scenario": {
+                "id": scen["id"],
+                "name": scen.get("name"),
+                "status": scen.get("status"),
+                "property_type": (scen.get("property_info") or {}).get("property_type"),
+                "location": ", ".join(x for x in [(scen.get("property_info") or {}).get("city"),
+                                                  (scen.get("property_info") or {}).get("state")] if x),
+                "loan_amount": (scen.get("loan_request") or {}).get("loan_amount"),
+                "loan_type": (scen.get("loan_request") or {}).get("loan_type"),
+            },
+            "term_sheet": ts,
+        })
+    return out
+
+
+# --- 5. LENDER: term sheet CRUD ---
+
+@api.get("/lender/term-sheets")
+async def lender_list_term_sheets(user=Depends(require_lender)):
+    lender = await _resolve_lender_for_user(user)
+    sheets = await db.term_sheets.find(
+        {"lender_id": lender["id"]}, {"_id": 0}
+    ).sort("submitted_at", -1).to_list(500)
+    # Enrich with scenario name
+    for s in sheets:
+        scen = await db.scenarios.find_one({"id": s.get("scenario_id")},
+                                          {"_id": 0, "name": 1, "id": 1})
+        s["scenario_name"] = scen.get("name") if scen else "(deleted deal)"
+    return sheets
+
+
+@api.post("/lender/scenarios/{sid}/term-sheet")
+async def lender_submit_term_sheet(sid: str, body: TermSheetBody, background: BackgroundTasks,
+                                    user=Depends(require_lender)):
+    lender = await _resolve_lender_for_user(user)
+    # Must have a share for this scenario
+    share = await db.scenario_shares.find_one({"scenario_id": sid, "lender_id": lender["id"]})
+    if not share:
+        raise HTTPException(status_code=403, detail="You have not been invited to this deal")
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    # One active term sheet per (scenario, lender) — if one exists in state 'submitted', update it
+    existing = await db.term_sheets.find_one({"scenario_id": sid, "lender_id": lender["id"],
+                                             "status": {"$in": ["submitted", "countered"]}})
+    now = now_iso()
+    doc = {
+        **body.model_dump(exclude_none=True),
+        "scenario_id": sid,
+        "lender_id": lender["id"],
+        "lender_name": lender.get("name"),
+        "submitted_by_user_id": user["id"],
+        "status": "submitted",
+        "broker_note": "",
+        "updated_at": now,
+    }
+    if existing:
+        doc["id"] = existing["id"]
+        doc["submitted_at"] = existing.get("submitted_at") or now
+        await db.term_sheets.update_one({"id": existing["id"]}, {"$set": doc})
+        ts_id = existing["id"]
+    else:
+        doc["id"] = str(uuid.uuid4())
+        doc["submitted_at"] = now
+        await db.term_sheets.insert_one(doc)
+        ts_id = doc["id"]
+    # Notify brokers via Postmark + create task for the primary broker (Wayne if exists)
+    admins = await db.users.find({"role": "admin"}, {"_id": 0, "id": 1, "name": 1, "email": 1}).to_list(20)
+    admin_url = (f"{public_base_url()}/admin/scenarios/{sid}"
+                 if public_base_url() else f"/admin/scenarios/{sid}")
+    rate_str = (f"{doc.get('interest_rate_pct'):.2f}%" if doc.get('interest_rate_pct') is not None else "—")
+    la = doc.get("loan_amount")
+    la_str = f"${la:,.0f}" if la else "—"
+    ltv = doc.get("ltv_pct")
+    ltv_str = f"{ltv:.1f}%" if ltv is not None else "—"
+    for a in admins:
+        subj, html, text = tmpl_term_sheet_submitted(a.get("name") or "there",
+                                                      lender.get("name"),
+                                                      scen.get("name"),
+                                                      rate_str, ltv_str, la_str, admin_url)
+        background.add_task(send_email, a["email"], subj, html, text, "term_sheet_submitted")
+        # Task on their Personal Assistant
+        await db.assistant_tasks.insert_one({
+            "id": str(uuid.uuid4()),
+            "admin_id": a["id"],
+            "title": f"Review term sheet from {lender.get('name')} on {scen.get('name')}",
+            "notes": f"Rate {rate_str}, Loan {la_str}, LTV {ltv_str}. Open the scenario to compare.",
+            "due_date": None,
+            "related_name": lender.get("name"),
+            "assigned_by_name": None,
+            "status": "open",
+            "source": "term_sheet_submitted",
+            "created_at": now,
+            "updated_at": now,
+        })
+    return {"ok": True, "id": ts_id}
+
+
+@api.delete("/lender/term-sheets/{tid}")
+async def lender_withdraw_term_sheet(tid: str, user=Depends(require_lender)):
+    lender = await _resolve_lender_for_user(user)
+    ts = await db.term_sheets.find_one({"id": tid, "lender_id": lender["id"]})
+    if not ts:
+        raise HTTPException(status_code=404, detail="Term sheet not found")
+    if ts.get("status") == "accepted":
+        raise HTTPException(status_code=400, detail="Cannot withdraw an accepted term sheet — call your broker")
+    await db.term_sheets.update_one({"id": tid},
+                                    {"$set": {"status": "withdrawn", "updated_at": now_iso()}})
+    return {"ok": True}
+
+
+# --- 6. ADMIN: view term sheets on a scenario + change status ---
+
+@api.get("/admin/scenarios/{sid}/term-sheets")
+async def admin_list_term_sheets(sid: str, admin=Depends(require_admin)):
+    sheets = await db.term_sheets.find(
+        {"scenario_id": sid}, {"_id": 0}
+    ).sort("submitted_at", -1).to_list(200)
+    return sheets
+
+
+@api.patch("/admin/term-sheets/{tid}")
+async def admin_set_term_sheet_status(tid: str, body: TermSheetStatusBody,
+                                       background: BackgroundTasks, admin=Depends(require_admin)):
+    ts = await db.term_sheets.find_one({"id": tid})
+    if not ts:
+        raise HTTPException(status_code=404, detail="Term sheet not found")
+    await db.term_sheets.update_one(
+        {"id": tid},
+        {"$set": {"status": body.status, "broker_note": body.broker_note,
+                  "acted_by_admin_id": admin["id"], "acted_at": now_iso(),
+                  "updated_at": now_iso()}},
+    )
+    # Notify the lender's owner user
+    lender = await db.lenders.find_one({"id": ts.get("lender_id")}, {"_id": 0})
+    scen = await db.scenarios.find_one({"id": ts.get("scenario_id")}, {"_id": 0, "name": 1})
+    if lender and lender.get("owner_user_id"):
+        owner = await db.users.find_one({"id": lender["owner_user_id"]},
+                                       {"_id": 0, "email": 1, "name": 1})
+        if owner and owner.get("email"):
+            subj, html, text = tmpl_term_sheet_status_change(
+                lender.get("name") or owner.get("name") or "there",
+                (scen or {}).get("name") or "your deal",
+                body.status, body.broker_note,
+            )
+            background.add_task(send_email, owner["email"], subj, html, text, f"term_sheet_{body.status}")
+    return {"ok": True}
+
+
+# --- 7. ADMIN: auto-match suggestions + bulk invite ---
+
+@api.get("/admin/scenarios/{sid}/match-suggestions")
+async def admin_match_suggestions(sid: str, admin=Depends(require_admin)):
+    """Return APPROVED, self-registered lenders that match this scenario AND haven't been invited yet."""
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    # Only self-reg + approved lenders eligible for auto-invite
+    lenders = await db.lenders.find(
+        {"approval_status": "approved", "self_registered": True},
+        {"_id": 0},
+    ).to_list(500)
+    already = {sh["lender_id"] async for sh in db.scenario_shares.find(
+        {"scenario_id": sid, "lender_id": {"$ne": None}}, {"_id": 0, "lender_id": 1})
+        if sh.get("lender_id")}
+    eligible = [l for l in lenders if l["id"] not in already]
+    matches = match_lenders(scen, eligible)
+    # Only return fit/partial
+    return [m for m in matches if m.get("verdict") in ("fit", "partial")]
+
+
+@api.post("/admin/scenarios/{sid}/invite-lenders")
+async def admin_invite_lenders(sid: str, body: LenderInviteBody, background: BackgroundTasks,
+                                admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    invited: list[dict] = []
+    for lid in body.lender_ids:
+        lender = await db.lenders.find_one({"id": lid}, {"_id": 0})
+        if not lender:
+            continue
+        # Idempotent: skip if already invited
+        existing = await db.scenario_shares.find_one({"scenario_id": sid, "lender_id": lid})
+        if existing:
+            invited.append({"lender_id": lid, "share_id": existing["id"], "already": True})
+            continue
+        primary_contact = (lender.get("contacts") or [{}])[0]
+        share_id = str(uuid.uuid4())
+        tok = uuid.uuid4().hex + uuid.uuid4().hex
+        await db.scenario_shares.insert_one({
+            "id": share_id,
+            "scenario_id": sid,
+            "lender_id": lid,
+            "lender_name": lender.get("name"),
+            "recipient_name": primary_contact.get("name", ""),
+            "recipient_email": (primary_contact.get("email") or "").lower(),
+            "recipient_institution": lender.get("name"),
+            "note": body.note,
+            "token": tok,
+            "doc_overrides": {},
+            "doc_grants": [],
+            "created_by": admin["id"],
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        })
+        # Email the owner if self-registered, otherwise the contact email
+        target_email = None
+        if lender.get("owner_user_id"):
+            owner = await db.users.find_one({"id": lender["owner_user_id"]},
+                                           {"_id": 0, "email": 1})
+            if owner:
+                target_email = owner.get("email")
+        target_email = target_email or (primary_contact.get("email") or "").lower()
+        if target_email:
+            portal_url = (f"{public_base_url()}/lender/portal"
+                          if public_base_url() else "/lender/portal")
+            subj, html, text = tmpl_lender_invite(lender.get("name"),
+                                                   scen.get("name"),
+                                                   portal_url,
+                                                   body.note)
+            background.add_task(send_email, target_email, subj, html, text, "lender_invite")
+        invited.append({"lender_id": lid, "share_id": share_id, "already": False})
+    return {"invited": invited}
+
+
+# --- 8. CLIENT: view term sheets on their scenarios (read-only) ---
+
+@api.get("/client/scenarios/{sid}/term-sheets")
+async def client_list_term_sheets(sid: str, user=Depends(require_client)):
+    scen = await db.scenarios.find_one({"id": sid, "client_id": user["id"]},
+                                       {"_id": 0, "id": 1})
+    if not scen:
+        raise HTTPException(status_code=403, detail="Not your scenario")
+    return await db.term_sheets.find(
+        {"scenario_id": sid, "status": {"$ne": "withdrawn"}}, {"_id": 0}
+    ).sort("submitted_at", -1).to_list(200)
+
 
 
 

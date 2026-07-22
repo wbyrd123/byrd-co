@@ -34,13 +34,20 @@ export const AuthProvider = ({ children }) => {
     return res.data.user;
   };
 
+  const activateLender = async (token, password) => {
+    const res = await api.post(`/lender/activate/${token}`, { password });
+    localStorage.setItem("ac_token", res.data.token);
+    setUser(res.data.user);
+    return res.data.user;
+  };
+
   const logout = () => {
     localStorage.removeItem("ac_token");
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, ready, login, acceptInvite, logout }}>
+    <AuthContext.Provider value={{ user, ready, login, acceptInvite, activateLender, logout }}>
       {children}
     </AuthContext.Provider>
   );

@@ -18,7 +18,10 @@ export default function PortalLogin() {
     try {
       const user = await login(email, pw);
       toast.success(`Welcome back, ${user.name}`);
-      nav(user.role === "admin" ? "/admin" : "/portal");
+      const dest = user.role === "admin" ? "/admin"
+                 : user.role === "lender" ? "/lender/portal"
+                 : "/portal";
+      nav(dest);
     } catch (err) {
       toast.error(err?.response?.data?.detail || "Invalid credentials");
     } finally {

@@ -45,8 +45,9 @@ export default function BrandFooter() {
           <div className="font-mono text-[11px] uppercase tracking-widest text-[#8F8877]">
             © {new Date().getFullYear()} Byrd &amp; CO Commercial RE Lending — All rights reserved
           </div>
-          <div className="flex items-center gap-4 text-sm">
+          <div className="flex items-center gap-4 text-sm flex-wrap">
             <Link to="/portal/login" className="text-[#C9C1AF] hover:text-[#E5B968]">Client Login</Link>
+            <Link to="/lenders/apply" className="text-[#C9C1AF] hover:text-[#E5B968]" data-testid="footer-lender-apply">Become a Lending Partner</Link>
             <a href="#contact" className="text-[#C9C1AF] hover:text-[#E5B968]">Contact</a>
           </div>
         </div>

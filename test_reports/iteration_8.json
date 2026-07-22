@@ -1,0 +1,36 @@
+{
+  "summary": "Comprehensive backend + frontend testing of the Lender Marketplace feature. All 25 backend pytest tests PASS (100%). Frontend flows verified: public /lenders/apply submits & shows success screen, /admin/lenders shows the gold Marketplace applications card with Approve/Reject, admin scenario page's Lenders tab renders (blank-screen `attached` bug is fixed), Term Sheets tab renders submitted sheets with structured fields, lender portal /lender/portal loads with 3 tabs, client portal exposes term sheets on the scenario. Role isolation confirmed at API level.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Lender portal (/lender/portal)", "issues": ["Tab order is 'Active Invites | My Term Sheets | My Credit Box' — user spec called them out as 'My Credit Box, Active Invites, My Term Sheets'. Not a bug but flag for product review."]},
+      {"screen": "Admin scenario > Term Sheets tab", "issues": ["Accept/Counter/Pass action buttons are correctly hidden once status is countered/accepted/passed. Verified via existing 'Test Frost Bank' term sheet (status=countered). Buttons render for status='submitted' — confirmed by code review of TermSheetsTab. No UI issue."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_lender_marketplace.py",
+    "/app/test_reports/pytest/lender_marketplace.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 6922 lines — well over the 700-line guideline. Consider splitting into modules (auth, scenarios, lender_marketplace, ai, etc.) for maintainability. This is a systemic pre-existing issue, not new.",
+    "In /api/admin/scenarios/{sid}/match-suggestions the `already` set comprehension uses `async for` inside a set comprehension with a conditional at the end — the `if sh.get('lender_id')` filter is on the async iterator variable but comes after the projection dict yielded — semantics are correct (Python evaluates the source first) but it's easy to misread. Consider refactoring to an explicit loop for readability.",
+    "Term sheet POST endpoint doesn't validate that expiration_date is a valid ISO date; just accepts any string. Low risk since it's a broker-facing field, but adding pydantic validator would be safer.",
+    "No rate limiting on public /public/lender/apply — could be spammed. Consider basic per-IP throttle."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_lender_marketplace.py (new file — 25 test cases)"
+  ],
+  "success_rate": {"backend": "100% (25/25)", "frontend": "100% of critical flows verified"},
+  "test_credentials": "Admin: wayne@byrd-co.com / byrdco2026. Client: sample@example.com / sample123. Lender test data generated per-run and cleaned up.",
+  "seed_data_creation": "Tests create their own transient lender via /public/lender/apply → approve → activate. Cleanup fixture (test_99_cleanup + explicit mongo cleanup script) removes all TEST_* lenders, their users, term sheets, scenario_shares, tokens, and assistant tasks at the end. Verified 0 leftover TEST_ records in db after run.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression suite lives at /app/backend/tests/test_lender_marketplace.py — safe to re-run any time; it self-cleans. Sample scenario id: efd946c4-c0f9-49ae-8883-36c2c36c3307 (owned by sample@example.com). One approved self-registered lender ('Test Frost Bank') and one countered term sheet exist as leftover demo data — not created by this test iteration. The admin scenario Lenders tab's `Marketplace Matches` card only appears when there are approved self-registered lenders that fit AND haven't been invited yet — since Test Frost Bank is already invited to the sample scenario, the card is empty (correct behavior). To visually verify that card, invite would need to be removed first.",
+  "rca of the issue": "N/A — no defects found in this iteration."
+}

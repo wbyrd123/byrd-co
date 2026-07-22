@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import {
   INSTITUTION_TYPES, PROPERTY_TYPES, LENDER_STATUSES, lenderStatusChip, fmtMoney, fmtPct,
 } from "@/byrd/dealData";
-import { Plus, Trash2, X, Save, Building2, Phone, Mail } from "lucide-react";
+import { Plus, Trash2, X, Save, Building2, Phone, Mail, Check, XCircle, Inbox } from "lucide-react";
 
 const emptyLender = () => ({
   name: "",
@@ -206,11 +206,35 @@ function LenderEditor({ open, initial, onClose, onSaved }) {
 
 export default function AdminLenders() {
   const [lenders, setLenders] = useState([]);
+  const [pending, setPending] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null); // null = closed, {} = new, {...} = edit
 
-  const load = () => api.get("/admin/lenders").then((r) => setLenders(r.data)).finally(() => setLoading(false));
+  const load = () => Promise.all([
+    api.get("/admin/lenders").then((r) => setLenders(r.data)),
+    api.get("/admin/marketplace/pending-lenders").then((r) => setPending(r.data)).catch(() => setPending([])),
+  ]).finally(() => setLoading(false));
   useEffect(() => { load(); }, []);
+
+  const approve = async (l) => {
+    try {
+      await api.post(`/admin/marketplace/lenders/${l.id}/approve`);
+      toast.success(`${l.name} approved — activation email sent`);
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Approve failed");
+    }
+  };
+  const reject = async (l) => {
+    if (!window.confirm(`Reject "${l.name}"?`)) return;
+    try {
+      await api.post(`/admin/marketplace/lenders/${l.id}/reject`);
+      toast.success("Rejected");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Reject failed");
+    }
+  };
 
   const remove = async (l) => {
     if (!window.confirm(`Delete "${l.name}"? This cannot be undone.`)) return;
@@ -229,6 +253,55 @@ export default function AdminLenders() {
         </div>
         <button onClick={() => setEditing({})} className="byrd-btn byrd-btn-dark" data-testid="new-lender-btn"><Plus size={14} /> Add Lender</button>
       </div>
+
+      {/* Marketplace pending applications */}
+      {pending.length > 0 && (
+        <div className="byrd-card p-6 border-l-4 border-[#C89434]" data-testid="pending-applications-card">
+          <div className="flex items-center gap-2 mb-3">
+            <Inbox size={16} className="text-[#C89434]" />
+            <h2 className="font-serif text-xl font-bold">Marketplace applications ({pending.length})</h2>
+          </div>
+          <p className="text-xs text-[#6B6558] mb-4">
+            Lenders who applied through <code className="bg-[#F3EEE0] px-1">/lenders/apply</code>. Approve to send them
+            an activation email; the activated portal lets them update their credit box and submit term sheets.
+          </p>
+          <div className="space-y-3">
+            {pending.map((l) => (
+              <div key={l.id} className="border border-[#E4DFD1] rounded-md p-4 bg-white" data-testid={`pending-${l.id}`}>
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-serif text-lg font-bold">{l.name}</div>
+                    <div className="text-xs text-[#6B6558] mt-0.5 capitalize">{l.institution_type?.replace("_", " ")}</div>
+                    <div className="text-xs mt-2">
+                      <b>{l.contacts?.[0]?.name}</b>
+                      {l.contacts?.[0]?.title ? ` · ${l.contacts[0].title}` : ""}
+                      {" · "}<a href={`mailto:${l.contacts?.[0]?.email}`} className="text-[#C89434]">{l.contacts?.[0]?.email}</a>
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-y-1 text-xs text-[#2A2A2A]">
+                      <div><span className="text-[#6B6558]">Size:</span> {fmtMoney(l.min_loan)} – {fmtMoney(l.max_loan)}</div>
+                      <div><span className="text-[#6B6558]">Max LTV:</span> {fmtPct(l.max_ltv, 1)}</div>
+                      <div><span className="text-[#6B6558]">Min DSCR:</span> {l.min_dscr ?? "—"}</div>
+                      <div><span className="text-[#6B6558]">Geo:</span> {(l.geography || []).slice(0, 3).join(", ") || "—"}</div>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {(l.property_types || []).slice(0, 6).map((p) => <span key={p} className="byrd-chip">{p}</span>)}
+                    </div>
+                    {l.notes && <div className="mt-2 text-xs italic text-[#6B6558]">"{l.notes}"</div>}
+                  </div>
+                  <div className="flex flex-col gap-2 shrink-0">
+                    <button onClick={() => approve(l)} className="byrd-btn byrd-btn-dark h-9 px-3 text-xs" data-testid={`pending-${l.id}-approve`}>
+                      <Check size={12} /> Approve
+                    </button>
+                    <button onClick={() => reject(l)} className="byrd-btn byrd-btn-outline h-9 px-3 text-xs text-[#8A1F1A] border-[#E38380]" data-testid={`pending-${l.id}-reject`}>
+                      <XCircle size={12} /> Reject
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div className="text-sm text-[#6B6558]">Loading…</div>

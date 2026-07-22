@@ -179,3 +179,159 @@ def tmpl_lender_activity(action: str, share: dict, viewer: dict, scen_name: str)
     </div>
     """
     return subject, html, text
+
+
+
+def tmpl_lender_application_received(lender_name: str, contact_email: str) -> tuple[str, str, str]:
+    subject = "Byrd & CO — Application received"
+    text = (
+        f"Thank you for applying to become a Byrd & CO lending partner.\n\n"
+        f"We've received your application for {lender_name} and one of the brokers will "
+        f"review it shortly. You'll get another email once you're approved with instructions "
+        f"on how to set your password and access your lender portal.\n\n"
+        f"— Byrd & CO Commercial RE Lending\n"
+    )
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:600px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">Lender Application</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 12px;font-family:Georgia,serif;">Application received</h2>
+        <p style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;">
+          Thanks for applying to become a Byrd &amp; CO lending partner. We've received your
+          application for <b>{lender_name}</b> and one of our brokers will review it shortly.
+        </p>
+        <p style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;">
+          You'll get another email once you're approved, with instructions to set your password
+          and access your lender portal — where you'll see deals matched to your credit box and
+          submit term sheets.
+        </p>
+      </div>
+    </div>
+    """
+    return subject, html, text
+
+
+def tmpl_lender_approved(lender_name: str, activate_url: str) -> tuple[str, str, str]:
+    subject = "You're approved — activate your Byrd & CO lender portal"
+    text = (
+        f"Great news — {lender_name} has been approved as a Byrd & CO lending partner.\n\n"
+        f"Click the link below to set your password and access your lender portal:\n\n"
+        f"{activate_url}\n\n"
+        f"Inside you'll be able to update your credit box, review deal invites from Byrd & CO "
+        f"brokers, and submit term sheets on active scenarios.\n\n"
+        f"— Byrd & CO Commercial RE Lending\n"
+    )
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:600px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">Lender Portal Access</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 12px;font-family:Georgia,serif;">Welcome aboard, {lender_name}.</h2>
+        <p style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;">
+          You've been approved as a Byrd &amp; CO lending partner. Click below to activate your
+          portal and set a password.
+        </p>
+        <div style="text-align:center;margin:24px 0;">
+          <a href="{activate_url}" style="background:#C89434;color:#1A1A1A;padding:14px 28px;text-decoration:none;font-family:Arial,sans-serif;font-size:14px;font-weight:bold;">Activate My Portal</a>
+        </div>
+        <p style="font-family:Arial,sans-serif;font-size:12px;color:#6B6558;">Or paste this into your browser:<br/><span style="word-break:break-all;">{activate_url}</span></p>
+      </div>
+    </div>
+    """
+    return subject, html, text
+
+
+def tmpl_lender_invite(lender_name: str, scen_name: str, portal_url: str, broker_note: str = "") -> tuple[str, str, str]:
+    subject = f"New deal for you: {scen_name}"
+    note_block = f"\n\nBroker note: {broker_note}\n" if broker_note else ""
+    text = (
+        f"Hi {lender_name},\n\n"
+        f"A new deal has been shared with you at Byrd & CO — {scen_name}. It matches "
+        f"the parameters in your credit box.{note_block}\n"
+        f"Log in to review and submit a term sheet:\n{portal_url}\n\n"
+        f"— Byrd & CO Commercial RE Lending\n"
+    )
+    note_html = f"<div style=\"background:#fff;border-left:3px solid #C89434;padding:12px;margin:12px 0;font-family:Arial,sans-serif;font-size:13px;\">{broker_note}</div>" if broker_note else ""
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:600px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">New Deal Invite</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 12px;font-family:Georgia,serif;">New deal for {lender_name}</h2>
+        <p style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;">
+          A new scenario has been shared with you — <b>{scen_name}</b>. It matches the parameters
+          in your credit box.
+        </p>
+        {note_html}
+        <div style="text-align:center;margin:24px 0;">
+          <a href="{portal_url}" style="background:#C89434;color:#1A1A1A;padding:14px 28px;text-decoration:none;font-family:Arial,sans-serif;font-size:14px;font-weight:bold;">Review & Term Sheet</a>
+        </div>
+      </div>
+    </div>
+    """
+    return subject, html, text
+
+
+def tmpl_term_sheet_submitted(broker_name: str, lender_name: str, scen_name: str, rate: str, ltv: str, loan_amount: str, admin_url: str) -> tuple[str, str, str]:
+    subject = f"{lender_name} submitted a term sheet on {scen_name}"
+    text = (
+        f"Hi {broker_name},\n\n"
+        f"{lender_name} just submitted a term sheet on {scen_name}.\n\n"
+        f"Rate: {rate}\nLoan Amount: {loan_amount}\nLTV: {ltv}\n\n"
+        f"Review it here: {admin_url}\n"
+    )
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:600px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">Term Sheet Received</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 12px;font-family:Georgia,serif;">{lender_name} submitted a term sheet</h2>
+        <p style="font-family:Arial,sans-serif;font-size:14px;">On <b>{scen_name}</b>.</p>
+        <table style="width:100%;font-family:Arial,sans-serif;font-size:14px;border-collapse:collapse;">
+          <tr><td style="color:#6B6558;padding:4px 0;">Rate</td><td><b>{rate}</b></td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">Loan Amount</td><td>{loan_amount}</td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">LTV</td><td>{ltv}</td></tr>
+        </table>
+        <div style="text-align:center;margin:24px 0;">
+          <a href="{admin_url}" style="background:#C89434;color:#1A1A1A;padding:12px 22px;text-decoration:none;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;">Open in Admin</a>
+        </div>
+      </div>
+    </div>
+    """
+    return subject, html, text
+
+
+def tmpl_term_sheet_status_change(lender_name: str, scen_name: str, status: str, broker_note: str) -> tuple[str, str, str]:
+    label = {"accepted": "accepted", "countered": "countered", "passed": "passed on"}.get(status, status)
+    subject = f"Update on your term sheet — {scen_name}"
+    note_block = f"\n\nBroker note: {broker_note}\n" if broker_note else ""
+    text = (
+        f"Hi {lender_name},\n\n"
+        f"The broker has {label} your term sheet on {scen_name}.{note_block}\n"
+        f"— Byrd & CO\n"
+    )
+    color = "#245C25" if status == "accepted" else ("#7A5410" if status == "countered" else "#8A1F1A")
+    note_html = f"<div style=\"background:#fff;border-left:3px solid {color};padding:12px;margin:12px 0;font-family:Arial,sans-serif;font-size:13px;\">{broker_note}</div>" if broker_note else ""
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:600px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">Term Sheet Update</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 12px;font-family:Georgia,serif;">Broker <span style="color:{color};">{label}</span> your term sheet</h2>
+        <p style="font-family:Arial,sans-serif;font-size:14px;">On <b>{scen_name}</b>.</p>
+        {note_html}
+      </div>
+    </div>
+    """
+    return subject, html, text

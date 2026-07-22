@@ -77,6 +77,7 @@ const TABS = [
   { key: "package", label: "Package" },
   { key: "docs", label: "Documents" },
   { key: "lenders", label: "Lenders" },
+  { key: "termsheets", label: "Term Sheets" },
   { key: "ai", label: "AI Assist" },
 ];
 
@@ -91,11 +92,15 @@ export default function AdminScenarioDetail() {
   const [matches, setMatches] = useState([]);
   const [shareLenderId, setShareLenderId] = useState("");
   const [shareDialog, setShareDialog] = useState(null);
+  const [termSheets, setTermSheets] = useState([]);
+  const [suggestions, setSuggestions] = useState([]);
   // shareDialog shape: { mode: "create"|"edit", lenderId?, lenderName?, share?, overrides }
 
   const load = () => api.get(`/admin/scenarios/${id}`).then((r) => setScen(r.data));
+  const loadTermSheets = () => api.get(`/admin/scenarios/${id}/term-sheets`).then((r) => setTermSheets(r.data)).catch(() => {});
+  const loadSuggestions = () => api.get(`/admin/scenarios/${id}/match-suggestions`).then((r) => setSuggestions(r.data)).catch(() => setSuggestions([]));
 
-  useEffect(() => { load(); }, [id]);
+  useEffect(() => { load(); loadTermSheets(); loadSuggestions(); }, [id]);
   useEffect(() => {
     api.get("/admin/clients").then((r) => setClients(r.data));
     api.get("/admin/lenders").then((r) => setLenders(r.data));
@@ -375,12 +380,29 @@ export default function AdminScenarioDetail() {
           scen={scen}
           lenders={lenders}
           matches={matches}
+          suggestions={suggestions}
+          onInviteSelfReg={async (lender_ids) => {
+            try {
+              await api.post(`/admin/scenarios/${id}/invite-lenders`, { lender_ids, note: "" });
+              toast.success(`Invited ${lender_ids.length} lender(s)`);
+              loadSuggestions();
+              load();
+            } catch (e) { toast.error(e?.response?.data?.detail || "Invite failed"); }
+          }}
           runMatch={runMatch}
           onOpenSendDialog={openSendDialog}
           onRevoke={revokeShare}
           onOpenEditVisibility={openEditVisibilityDialog}
           shareLenderId={shareLenderId}
           setShareLenderId={setShareLenderId}
+        />
+      )}
+
+      {tab === "termsheets" && (
+        <TermSheetsTab
+          scenarioId={id}
+          termSheets={termSheets}
+          onReload={loadTermSheets}
         />
       )}
 
@@ -1224,10 +1246,12 @@ function CopyDocsDialog({ scenarioId, onClose, onCopy }) {
 }
 
 // --------------- LENDERS TAB ---------------
-function LendersTab({ scen, lenders, matches, runMatch, onOpenSendDialog, onRevoke, onOpenEditVisibility, shareLenderId, setShareLenderId }) {
+function LendersTab({ scen, lenders, matches, suggestions, onInviteSelfReg, runMatch, onOpenSendDialog, onRevoke, onOpenEditVisibility, shareLenderId, setShareLenderId }) {
   const scenDocs = scen.docs || scen.client_docs || [];
   const clientDocMap = {};
   scenDocs.forEach((d) => { clientDocMap[d.id] = d; });
+  // Any scenario doc is a candidate for lender visibility now.
+  const attached = scenDocs;
 
   const copyLink = (token) => {
     const url = `${window.location.origin}/lender/scenario/${token}`;
@@ -1259,6 +1283,50 @@ function LendersTab({ scen, lenders, matches, runMatch, onOpenSendDialog, onRevo
 
   return (
     <div className="space-y-6">
+      {/* Auto-match suggestions (self-registered lenders) */}
+      {(suggestions || []).length > 0 && (
+        <div className="byrd-card p-6 border-l-4 border-[#245C25]" data-testid="marketplace-suggestions">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[#245C25]">// Marketplace Matches</div>
+              <h3 className="font-serif text-xl font-bold">Self-registered lenders that fit this deal</h3>
+              <p className="text-xs text-[#6B6558] mt-1">Approved marketplace lenders — one-click invite sends them straight to their portal.</p>
+            </div>
+            <button
+              onClick={() => onInviteSelfReg(suggestions.map((s) => s.lender.id))}
+              className="byrd-btn byrd-btn-dark"
+              data-testid="invite-all-suggested-btn"
+            >
+              <Share2 size={14} /> Invite all {suggestions.length}
+            </button>
+          </div>
+          <div className="mt-4 space-y-3">
+            {suggestions.map((m) => (
+              <div key={m.lender.id} className="border border-[#C9E1C9] bg-[#F5F9F5] rounded-md p-4 flex items-start justify-between gap-3" data-testid={`suggest-${m.lender.id}`}>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="font-semibold">{m.lender.name}</div>
+                    <span className={m.verdict === "fit" ? "byrd-chip byrd-chip-green" : "byrd-chip byrd-chip-gold"}>{m.verdict}</span>
+                    <span className="byrd-chip">Marketplace</span>
+                  </div>
+                  <div className="text-xs text-[#6B6558] mt-1">
+                    {m.fits.length > 0 && <div>✓ {m.fits.join(" · ")}</div>}
+                    {m.misses.length > 0 && <div className="text-[#8A1F1A]">✗ {m.misses.join(" · ")}</div>}
+                  </div>
+                </div>
+                <button
+                  onClick={() => onInviteSelfReg([m.lender.id])}
+                  className="byrd-btn byrd-btn-outline h-9 px-3 text-xs shrink-0"
+                  data-testid={`invite-suggest-${m.lender.id}`}
+                >
+                  Invite
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Matching */}
       <div className="byrd-card p-6">
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -1532,6 +1600,154 @@ function ShareVisibilityDialog({ scen, dialog, onClose, onSubmit }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+
+// ================= TermSheetsTab (marketplace) =================
+function TermSheetsTab({ scenarioId, termSheets, onReload }) {
+  const [actingOn, setActingOn] = useState(null); // {id, status, note}
+
+  const setStatus = async () => {
+    if (!actingOn) return;
+    try {
+      await api.patch(`/admin/term-sheets/${actingOn.id}`, {
+        status: actingOn.status,
+        broker_note: actingOn.note || "",
+      });
+      toast.success(`Term sheet ${actingOn.status}`);
+      setActingOn(null);
+      onReload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed");
+    }
+  };
+
+  const fmtM = (v) => v == null ? "—" : `$${Number(v).toLocaleString()}`;
+  const fmtP = (v) => v == null ? "—" : `${v}%`;
+
+  return (
+    <div className="space-y-6" data-testid="term-sheets-tab">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Term Sheets</div>
+          <h2 className="font-serif text-2xl font-bold">Lender submissions ({termSheets.length})</h2>
+          <p className="text-xs text-[#6B6558] mt-1">Side-by-side view of every term sheet submitted through the Lender Marketplace. Acting on a term sheet emails the lender + is visible to the borrower in their portal.</p>
+        </div>
+      </div>
+
+      {termSheets.length === 0 ? (
+        <div className="byrd-card p-10 text-center" data-testid="ts-empty">
+          <div className="text-sm text-[#6B6558]">No term sheets submitted yet.</div>
+          <p className="text-xs text-[#6B6558] mt-2 max-w-md mx-auto">Invite lenders from the Lenders tab. Once they submit, term sheets show up here for you to accept, counter, or pass on.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {termSheets.map((t) => (
+            <div key={t.id} className="byrd-card p-5" data-testid={`admin-ts-${t.id}`}>
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="font-serif text-lg font-bold">{t.lender_name}</div>
+                    <TSStatusChip status={t.status} />
+                  </div>
+                  <div className="text-xs text-[#6B6558] mt-0.5">Submitted {new Date(t.submitted_at).toLocaleString()}</div>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-2 text-sm">
+                <KV2 label="Rate">{t.interest_rate_pct != null ? `${t.interest_rate_pct}%` : "—"}{t.rate_type ? <span className="text-[10px] text-[#6B6558]"> {t.rate_type}</span> : null}</KV2>
+                <KV2 label="Loan">{fmtM(t.loan_amount)}</KV2>
+                <KV2 label="LTV">{fmtP(t.ltv_pct)}</KV2>
+                <KV2 label="LTC">{fmtP(t.ltc_pct)}</KV2>
+                <KV2 label="Amort">{t.amortization_years ? `${t.amortization_years} yr` : "—"}</KV2>
+                <KV2 label="Term">{t.term_months ? `${t.term_months} mo` : "—"}</KV2>
+                <KV2 label="IO">{t.io_months ? `${t.io_months} mo` : "—"}</KV2>
+                <KV2 label="Recourse">{t.recourse || "—"}</KV2>
+                <KV2 label="Orig fee">{fmtP(t.origination_fee_pct)}</KV2>
+                <KV2 label="Exit fee">{fmtP(t.exit_fee_pct)}</KV2>
+                <KV2 label="Prepay">{t.prepay || "—"}</KV2>
+                <KV2 label="Expires">{t.expiration_date || "—"}</KV2>
+              </div>
+              {t.contingencies && (
+                <div className="mt-3 text-xs">
+                  <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] mb-0.5">Contingencies</div>
+                  <div className="text-[#2A2A2A]">{t.contingencies}</div>
+                </div>
+              )}
+              {t.notes && (
+                <div className="mt-3 text-xs bg-[#F3EEE0] border-l-2 border-[#C89434] p-2 italic">"{t.notes}"</div>
+              )}
+              {t.broker_note && t.status !== "submitted" && (
+                <div className="mt-3 text-xs bg-white border-l-2 border-[#245C25] p-2">
+                  <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] mb-0.5">// Your Note</div>
+                  {t.broker_note}
+                </div>
+              )}
+              {t.status === "submitted" && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button onClick={() => setActingOn({ id: t.id, status: "accepted", note: "" })}
+                    className="byrd-btn byrd-btn-dark h-9 px-3 text-xs" data-testid={`ts-accept-${t.id}`}>
+                    <Check size={12} /> Accept
+                  </button>
+                  <button onClick={() => setActingOn({ id: t.id, status: "countered", note: "" })}
+                    className="byrd-btn byrd-btn-outline h-9 px-3 text-xs" data-testid={`ts-counter-${t.id}`}>
+                    Counter with note…
+                  </button>
+                  <button onClick={() => setActingOn({ id: t.id, status: "passed", note: "" })}
+                    className="byrd-btn byrd-btn-outline h-9 px-3 text-xs text-[#8A1F1A] border-[#E38380]" data-testid={`ts-pass-${t.id}`}>
+                    Pass
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {actingOn && (
+        <div className="fixed inset-0 bg-black/40 z-50 grid place-items-center p-4" data-testid="ts-action-modal">
+          <div className="bg-white rounded-md border border-[#E4DFD1] w-full max-w-md p-6">
+            <div className="font-serif text-xl font-bold capitalize">{actingOn.status} term sheet</div>
+            <p className="text-xs text-[#6B6558] mt-1">
+              The lender will be emailed with your note. The borrower will also see this in their portal.
+            </p>
+            <textarea
+              value={actingOn.note}
+              onChange={(e) => setActingOn({ ...actingOn, note: e.target.value })}
+              placeholder={actingOn.status === "countered" ? "Client wants 65% LTV, 5-year term, non-recourse…" : "Optional note to the lender."}
+              className="w-full min-h-[100px] mt-3 px-3 py-2 border border-[#E4DFD1] rounded-md text-sm focus:outline-none focus:border-[#C89434]"
+              data-testid="ts-action-note"
+            />
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button onClick={() => setActingOn(null)} className="byrd-btn byrd-btn-outline">Cancel</button>
+              <button onClick={setStatus} className="byrd-btn byrd-btn-dark" data-testid="ts-action-confirm">
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TSStatusChip({ status }) {
+  const map = {
+    submitted: "byrd-chip byrd-chip-gold",
+    accepted: "byrd-chip byrd-chip-green",
+    countered: "byrd-chip byrd-chip-gold",
+    passed: "byrd-chip byrd-chip-red",
+    withdrawn: "byrd-chip byrd-chip-red",
+  };
+  return <span className={map[status] || "byrd-chip"}>{status}</span>;
+}
+
+function KV2({ label, children }) {
+  return (
+    <div>
+      <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">{label}</div>
+      <div className="text-sm font-semibold">{children}</div>
     </div>
   );
 }

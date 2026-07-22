@@ -24,6 +24,9 @@ import AdminContacts from "@/byrd/AdminContacts";
 import Unsubscribe from "@/byrd/Unsubscribe";
 import FeeAgreementSign from "@/byrd/FeeAgreementSign";
 import LenderView from "@/byrd/LenderView";
+import LendersApplyPage from "@/byrd/LendersApplyPage";
+import LenderActivate from "@/byrd/LenderActivate";
+import LenderPortal from "@/byrd/LenderPortal";
 
 // AdsCopilot (staff-only)
 import DashboardLayout from "@/pages/DashboardLayout";
@@ -40,8 +43,11 @@ const RequireAuth = ({ children, role }) => {
   if (!ready) return null;
   if (!user) return <Navigate to="/portal/login" replace />;
   if (role && user.role !== role) {
-    // client trying to visit admin routes → send to portal, and vice versa
-    return <Navigate to={user.role === "admin" ? "/admin" : "/portal"} replace />;
+    // Route to the correct home based on role
+    const home = user.role === "admin" ? "/admin"
+               : user.role === "lender" ? "/lender/portal"
+               : "/portal";
+    return <Navigate to={home} replace />;
   }
   return children;
 };
@@ -76,8 +82,20 @@ function App() {
 
             {/* Public lender view (token-gated) */}
             <Route path="/lender/scenario/:token" element={<LenderView />} />
+            <Route path="/lenders/apply" element={<LendersApplyPage />} />
+            <Route path="/lender/activate/:token" element={<LenderActivate />} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />
             <Route path="/fee-agreement/:token" element={<FeeAgreementSign />} />
+
+            {/* Lender portal (role=lender) */}
+            <Route
+              path="/lender/portal"
+              element={
+                <RequireAuth role="lender">
+                  <LenderPortal />
+                </RequireAuth>
+              }
+            />
 
             {/* Client portal (role=client) */}
             <Route

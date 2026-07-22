@@ -313,6 +313,7 @@ export default function ClientPortal() {
                             </div>
                           ))
                         )}
+                        <ScenarioTermSheetsSection scenarioId={s.id} />
                       </div>
                     )}
                   </section>
@@ -354,6 +355,64 @@ export default function ClientPortal() {
           </aside>
         </div>
       </main>
+    </div>
+  );
+}
+
+
+// ------------- Term Sheets section (per scenario, read-only for borrower) -------------
+function ScenarioTermSheetsSection({ scenarioId }) {
+  const [sheets, setSheets] = React.useState(null);
+  React.useEffect(() => {
+    api.get(`/client/scenarios/${scenarioId}/term-sheets`)
+      .then((r) => setSheets(r.data))
+      .catch(() => setSheets([]));
+  }, [scenarioId]);
+
+  if (!sheets || sheets.length === 0) return null;
+
+  const fmtM = (v) => v == null ? "—" : `$${Number(v).toLocaleString()}`;
+  const fmtP = (v) => v == null ? "—" : `${v}%`;
+  const statusChip = (s) => ({
+    submitted: "byrd-chip byrd-chip-gold",
+    accepted: "byrd-chip byrd-chip-green",
+    countered: "byrd-chip byrd-chip-gold",
+    passed: "byrd-chip byrd-chip-red",
+  }[s] || "byrd-chip");
+
+  return (
+    <div className="pt-4 mt-4 border-t border-[#E4DFD1]" data-testid={`client-ts-${scenarioId}`}>
+      <div className="flex items-baseline justify-between mb-2">
+        <h4 className="font-serif text-lg font-bold">Lender Term Sheets</h4>
+        <div className="font-mono text-[10px] text-[#6B6558]">{sheets.length} {sheets.length === 1 ? "submission" : "submissions"}</div>
+      </div>
+      <div className="space-y-3">
+        {sheets.map((t) => (
+          <div key={t.id} className="border border-[#E4DFD1] rounded-md p-3 bg-white" data-testid={`client-ts-card-${t.id}`}>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="font-semibold text-sm">{t.lender_name}</div>
+                <span className={statusChip(t.status)}>{t.status}</span>
+              </div>
+              <div className="text-[11px] text-[#6B6558]">{new Date(t.submitted_at).toLocaleDateString()}</div>
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1 text-xs">
+              <div><span className="text-[#6B6558]">Rate:</span> <b>{t.interest_rate_pct != null ? `${t.interest_rate_pct}%` : "—"}</b></div>
+              <div><span className="text-[#6B6558]">Loan:</span> <b>{fmtM(t.loan_amount)}</b></div>
+              <div><span className="text-[#6B6558]">LTV:</span> <b>{fmtP(t.ltv_pct)}</b></div>
+              <div><span className="text-[#6B6558]">Term:</span> {t.term_months ? `${t.term_months} mo` : "—"}</div>
+              <div><span className="text-[#6B6558]">Amort:</span> {t.amortization_years ? `${t.amortization_years} yr` : "—"}</div>
+              <div><span className="text-[#6B6558]">Recourse:</span> {t.recourse || "—"}</div>
+            </div>
+            {t.broker_note && t.status !== "submitted" && (
+              <div className="mt-2 text-xs bg-[#F3EEE0] border-l-2 border-[#245C25] p-2">
+                <b className="font-mono uppercase tracking-widest text-[10px] text-[#6B6558] block mb-0.5">// Broker Note</b>
+                {t.broker_note}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
