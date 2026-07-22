@@ -186,13 +186,13 @@ class TestRegressionOtherBlocks:
         assert isinstance(data, dict), data
 
 
-class TestAvaIdentityAndContactUpdates:
-    def test_assistant_knows_she_is_ava(self, h):
+class TestAdaIdentityAndContactUpdates:
+    def test_assistant_knows_she_is_ada(self, h):
         # Fresh convo
         requests.delete(f"{API}/admin/assistant/messages", headers=h, timeout=10)
         done = _sse_chat(h, "What is your name?", timeout=60)
         text = (done.get("text") or "").lower()
-        assert "ava" in text, f"Assistant did not identify as Ava. Reply: {text[:400]}"
+        assert "ada" in text, f"Assistant did not identify as Ada. Reply: {text[:400]}"
 
     def test_contact_updates_tags_existing(self, h, db):
         # Reuse a persisted test contact (Sarah Chen was created earlier in the module).

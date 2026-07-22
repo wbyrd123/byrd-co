@@ -37,12 +37,12 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
 - P3: Real Marketplace (lender self-onboarding + term-sheet capture)
 
-### Personal Assistant is "Ava" + contact tag updates — SHIPPED 2026-02
-- Assistant now identifies as **Ava** in her system prompt — no more "I don't have a formal name". Verified with pytest.
-- **New `contact_updates` block** — Ava can now add tags (or replace tags, append/overwrite notes) on contacts already in the CRM. Handler `_apply_contact_updates` resolves by `id` > `email` > case-insensitive `name`. Additive `add_tags` preserves existing tags; `set_tags` replaces the whole set. Frontend renders a green "CRM Updated" card with the tags that were added.
-- **`contacts_index` now includes `id` and current `tags`** so Ava can (a) reference contacts precisely, (b) skip re-adding tags a contact already has.
-- **Anti-hallucination guardrail** — the system prompt now includes a hard rule: NEVER claim to have added/tagged/updated/sent anything unless the corresponding fenced block is emitted in the SAME reply. This was the root cause of "Ava said okay it's done and nothing happened" — the LLM used to write "Done!" without emitting the mutation block.
-- Handles the mixed case ("add my existing clients Rod, Jose, Breona to the CRM as borrowers"): Ava pulls their name+email from the `clients` roster, emits `new_contacts` with `tags:['borrower']` for anyone not in CRM, and `contact_updates` (add_tags) for anyone already in it — in the same reply.
+### Personal Assistant is "Ada" + contact tag updates — SHIPPED 2026-02
+- Assistant identifies as **Ada** — the SAME persona as the borrower concierge inside the client portal. One unified AI brand across broker and borrower portals; system prompt tells her not to explain the two-hat setup unless asked.
+- **New `contact_updates` block** — Ada can now add tags (or replace tags, append/overwrite notes) on contacts already in the CRM. Handler `_apply_contact_updates` resolves by `id` > `email` > case-insensitive `name`. Additive `add_tags` preserves existing tags; `set_tags` replaces the whole set. Frontend renders a green "CRM Updated" card with the tags that were added.
+- **`contacts_index` now includes `id` and current `tags`** so Ada can (a) reference contacts precisely, (b) skip re-adding tags a contact already has.
+- **Anti-hallucination guardrail** — the system prompt now includes a hard rule: NEVER claim to have added/tagged/updated/sent anything unless the corresponding fenced block is emitted in the SAME reply. This was the root cause of "she said okay it's done and nothing happened" — the LLM used to write "Done!" without emitting the mutation block.
+- Handles the mixed case ("add my existing clients Rod, Jose, Breona to the CRM as borrowers"): Ada pulls their name+email from the `clients` roster, emits `new_contacts` with `tags:['borrower']` for anyone not in CRM, and `contact_updates` (add_tags) for anyone already in it — in the same reply.
 - New pytest coverage: 3 cases (identity, contact_updates tags persistence, non-hallucination for unknown contacts) in `test_assistant_new_contacts.py`, all passing alongside the 5 prior tests.
 
 ### Ada — Borrower AI Concierge — SHIPPED 2026-02 (updated with Proforma 2026-02)
