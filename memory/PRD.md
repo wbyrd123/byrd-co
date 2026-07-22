@@ -1,5 +1,14 @@
 # Byrd & CO — Product Requirements
 
+## Backlog
+- P0: Redeploy production (`byrd-co.com`) to ship Ada/Proforma/CRM-tags/Marketplace/Postmark-unlock live.
+- P1: Automatic reminder emails when client docs missing X days
+- P2: Postmark inbound routing → route replies back into Personal Assistant
+- P2: Tighten DMARC to p=quarantine after 2-4 weeks
+- P2: Rate-limit `/public/lender/apply` (basic per-IP throttle)
+- P3: Refactor `server.py` (~6,900 lines) into modular routes: `auth/`, `scenarios/`, `lender_marketplace/`, `ai/`, `pdf/`, `crm/`
+
+
 ## Original problem statement
 Commercial Real Estate Broker website + client portal + broker admin + Deal Engine + token-gated lender view, transactional emails.
 
@@ -30,12 +39,19 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - **Email Delivery status widget + Send Test button on the admin Overview** — shows Postmark configuration (from address), 30-day sent/failed counts, last success/failure timestamps, last error text, and a health chip (Healthy / Recent Failures / Not Configured). Includes an inline **Send Test** action (prefilled with `waynebyrd11@gmail.com`, editable) that fires a canary email through Postmark synchronously and shows the exact raw error inline if it fails — includes friendly detection of the common "pending approval" and "sender signature" errors — 2026-02
 - **Assistant email send fix** — POST /admin/assistant/email/send now sends via the verified `POSTMARK_FROM` Sender Signature with the admin's real email in Reply-To, returns HTTP 400 (not 502) so Cloudflare passes the JSON error through, and surfaces failures as a persistent inline red "Not sent" banner on the draft card. Every send (test + assistant) is logged in `db.assistant_emails` with status + error for the status widget — 2026-02
 
-## Backlog
-- P0: Redeploy production to activate Postmark env vars
-- P1: Automatic reminder emails when client docs missing X days
-- P2: Postmark inbound routing → route replies back into Personal Assistant
-- P2: Tighten DMARC to p=quarantine after 2-4 weeks
-- P3: Real Marketplace (lender self-onboarding + term-sheet capture)
+### Lender Marketplace — SHIPPED 2026-02
+Complete self-registration + credit-box + term-sheet marketplace. New surfaces:
+- **Public** `/lenders/apply` — public application form (institution, primary contact, credit box). Confirmation email via Postmark. Public footer link "Become a Lending Partner" wired.
+- **Admin** — new "Marketplace applications" card at top of `/admin/lenders` with Approve/Reject buttons. Approve creates a `role='lender'` user + one-time activation link + Postmark email.
+- **Lender** — `/lender/activate/:token` (password setup) → `/lender/portal` (3 tabs: My Credit Box · Active Invites · My Term Sheets). Full structured term-sheet form (17 fields including rate_type, floating index/spread, LTV/LTC, amort, term, IO, recourse, prepay, fees, expiration, contingencies).
+- **Term sheet flow** — lender submits → admin sees on scenario's new **Term Sheets tab** side-by-side w/ Accept/Counter/Pass actions → borrower sees them in their portal under each scenario. Broker notes visible to both lender (via Postmark) AND borrower (in portal).
+- **Auto-match invites** — Scenario Lenders tab shows a green "Marketplace Matches" card with self-registered approved lenders that fit; one-click Invite per lender or "Invite all N". Never auto-sends without broker confirmation.
+- **Personal Assistant hook** — when a term sheet is submitted, Ada (admin PA) gets a task "Review term sheet from {lender} on {scenario}".
+- **Role isolation verified**: lender ≠ admin ≠ client. `require_lender` dep guards `/lender/*` routes.
+- **Data model additions**: `lenders.approval_status` (pending/approved/rejected), `lenders.self_registered`, `lenders.owner_user_id`; new collections `term_sheets`, `lender_activation_tokens`; `users.role='lender'`.
+- **Bug fix (blocker for the Lenders tab)**: `AdminScenarioDetail.LendersTab` referenced an undefined `attached` var (leftover from docs refactor) — was crashing the whole tab to blank. Fixed.
+- **Admin Guide** — new "Lender Marketplace" section with 6-step walkthrough.
+- **Verified by testing agent (iteration 8): 25/25 backend pytest cases PASS + all critical frontend flows.**
 
 ### Personal Assistant is "Ada" + contact tag updates — SHIPPED 2026-02
 - Assistant identifies as **Ada** — the SAME persona as the borrower concierge inside the client portal. One unified AI brand across broker and borrower portals; system prompt tells her not to explain the two-hat setup unless asked.

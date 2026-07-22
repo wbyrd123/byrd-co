@@ -90,14 +90,14 @@ export default function LenderPortal() {
         <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Your Portal</div>
         <h1 className="font-serif text-3xl font-bold">Welcome back, {me?.name || "Lender"}</h1>
         <div className="mt-6 flex flex-wrap gap-2 border-b border-[#E4DFD1]">
+          <TabBtn active={tab === "credit"} onClick={() => setTab("credit")} testId="tab-credit">
+            <Sliders size={13} /> My Credit Box
+          </TabBtn>
           <TabBtn active={tab === "invites"} onClick={() => setTab("invites")} testId="tab-invites">
             <Inbox size={13} /> Active Invites ({invites.length})
           </TabBtn>
           <TabBtn active={tab === "sheets"} onClick={() => setTab("sheets")} testId="tab-sheets">
             <FileText size={13} /> My Term Sheets ({termSheets.length})
-          </TabBtn>
-          <TabBtn active={tab === "credit"} onClick={() => setTab("credit")} testId="tab-credit">
-            <Sliders size={13} /> My Credit Box
           </TabBtn>
         </div>
       </div>
