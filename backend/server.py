@@ -7476,7 +7476,11 @@ async def _ada_apply_upload(user: dict, block: dict) -> Optional[dict]:
     draft = await db.borrower_ada_drafts.find_one({"id": draft_id, "client_id": user["id"]}, {"_id": 0})
     if not draft or draft.get("status") == "uploaded":
         return None
-    dl = await db.client_docs.find_one({"id": target_line_id, "client_id": user["id"]})
+    dl = None
+    try:
+        dl = await _resolve_client_doc_for_user(target_line_id, user)
+    except HTTPException:
+        dl = None
     if not dl or dl.get("system"):
         return None
     # Copy the preview file into a real, permanent file on the doc line

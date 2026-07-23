@@ -1,12 +1,22 @@
 # Byrd & CO — Product Requirements
 
 ## Backlog
-- P0: Redeploy production (`byrd-co.com`) to ship Ada/Proforma/CRM-tags/Marketplace/Postmark-unlock/PortalPolish live.
+- P0: Redeploy production (`byrd-co.com`) to ship Ada/Proforma/CRM-tags/Marketplace/Postmark-unlock/PortalPolish/MultiSponsor/MultiFileUploads live.
 - P1: Automatic reminder emails when client docs missing X days
 - P2: Postmark inbound routing → route replies back into Personal Assistant
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
 - P2: Rate-limit `/public/lender/apply` and `/public/password-reset/request` (basic per-IP throttle)
-- P3: Refactor `server.py` (~7,000 lines) into modular routes
+- P2: Automated weekly Postmark lender-activity summary emails
+- P3: Refactor `server.py` (~7,650 lines) into modular routes
+
+### Multi-File Uploads Per Doc Line — SHIPPED 2026-02
+Every doc line item now accepts many files (e.g., 3 years of tax returns, multi-page entity docs). Applies uniformly to borrower portal, admin scenario page, and lender view.
+- **Schema**: `client_docs.files: [{file_id, filename, content_type, size, uploaded_at, uploaded_by}]`. Legacy `file_id` still tracks the "latest" file for backward compat. Reads use `_ensure_doc_files_meta` which auto-synthesizes a 1-item array from legacy rows.
+- **Endpoints added/changed**: `POST /client/docs/{doc_id}/upload` now appends (was: replace). New `DELETE /client/docs/{doc_id}/files/{file_id}` (borrower) and `POST/DELETE /admin/scenarios/{sid}/docs/{doc_id}/upload|files/{fid}` (broker upload-on-behalf + surgical file delete). New `GET /lender-view/{token}/doc/{doc_id}/zip` bundles every file on one line. `/lender-view/{token}/doc/{doc_id}` accepts `?file_id=` to fetch a specific attachment; all-docs zip and admin `docs.zip` now iterate every file (not just latest).
+- **Auth helper**: `_resolve_client_doc_for_user` lets linked sponsors upload/delete on their own doc lines even when the doc row's legacy `client_id` field differs. Ada's finalize-into-doc-line path (`_ada_apply_upload`) now uses the same helper for symmetry and preserves prior files.
+- **Frontend**: ClientPortal.jsx renders `files[]` with per-file delete + "Add file" button. AdminScenarioDetail.jsx renders per-file list with "+ Add another file", per-row delete icon, and BROKER/ADA badges on uploaded_by. LenderView.jsx shows a "N files" chip; multi-file lines get "Download all" (zip); single-file lines keep "View".
+- **Cascade**: doc deletion, scenario deletion, and client deletion all now clear every underlying `client_files` row (both legacy `file_id` and every entry in `files[]`).
+- **Verified by testing agent (iteration 10): 16/16 pytest cases** covering borrower multi-upload as linked sponsor, admin upload-on-behalf, single-file delete, status transitions (`pending↔uploaded`), scenario docs.zip across lines, lender view file_count/files/file_id/per-doc zip/all-docs zip, legacy backward-compat empty-row handling, and cascade delete.
 
 ### Multi-Sponsor Architecture — SHIPPED 2026-02
 Deals now support multiple sponsors with role-based doc scoping. Anyone with ≥20% ownership is auto-flagged as a guarantor and gets their own document channel + fee agreement.
