@@ -8,7 +8,16 @@
 - P2: Rate-limit `/public/lender/apply` and `/public/password-reset/request` (basic per-IP throttle)
 - P3: Refactor `server.py` (~7,000 lines) into modular routes
 
-### Portal polish + Password Reset — SHIPPED 2026-02
+### Multi-Sponsor Architecture — SHIPPED 2026-02
+Deals now support multiple sponsors with role-based doc scoping. Anyone with ≥20% ownership is auto-flagged as a guarantor and gets their own document channel + fee agreement.
+- **Data model**: `scen.sponsors[]` array (replaces single `scen.sponsor`; legacy shape auto-migrates on read via `_ensure_sponsors_array`). Each sponsor: `{id, name, entity, credit_score, liquidity, net_worth, ownership_pct, role: "managing"|"guarantor"|"passive", is_guarantor, client_user_id}`. Only one `managing` per scenario — enforced on create + patch (auto-demotes prior managing).
+- **Doc scoping**: `client_docs.sponsor_id` — `null` = shared (property/business, all sponsors + lenders see); set = personal (only that sponsor's linked client sees). Auto-tagged at scenario creation: personal-category items → managing sponsor, everything else → shared.
+- **Admin UX**: Package tab has a repeating Sponsors card with "+ Add Sponsor", per-card role/guarantor toggle + **Link to Client Account dropdown** (grants portal access). Documents tab has a "Viewing docs for" filter dropdown + inline sponsor selector on every doc row + "Shared" chip.
+- **Client portal**: `/client/me` filters strictly by sponsor scope. If Alice is linked as one sponsor and Bob's docs are scoped to him, Alice cannot see Bob's docs (even when she's also the scenario's primary `client_id`). Every sponsor with a `client_user_id` gets their own personalized doc pile.
+- **Fee agreement per-sponsor**: send endpoint accepts `sponsor_id`; a separate `Signed Fee Agreement` doc line is created per sponsor. Prior sent-to-same-sponsor agreements are superseded. Sponsors without a linked client account cannot be sent to (returns 400).
+- **Lender view**: `pkg.sponsors[]` returns sanitized fields (name, entity, ownership%, role, is_guarantor, FICO, liquidity, net worth) — no `client_user_id` leak. LenderView.jsx renders each sponsor as a card with a Managing/Guarantor/Passive chip.
+- **Admin Guide** updated: Scenarios card has new Step 2.5 (multi-sponsor), Step 3 rewritten (per-sponsor doc scoping + filter dropdown), Fee Agreement Step 1 rewritten (sponsor dropdown).
+- **Verified by testing agent (iteration 9): 13/13 pytest cases + 18/18 prior regression tests = 31/31 total.**
 - **No more auto-invite on client creation** — `POST /admin/invites` no longer sends the welcome email. Broker now triggers manually via new **Send Portal Invite** button on the client detail page (`/admin/clients/{id}`) or the Add Client dialog. Prevents the "client got a welcome email before broker could set up scenarios/fee agreement" bug. New endpoint: `POST /admin/users/{uid}/send-invite` (reuses unused token or generates a new one).
 - **Password reset flow** — works for all 3 roles (admin/client/lender). New endpoints: `POST /public/password-reset/request` (uniform 200 response, no email disclosure), `GET /public/password-reset/{token}` (verify + masked email), `POST /public/password-reset/{token}` (set new password, invalidates other unused tokens). 60-min token expiry, one-time use. New pages `/portal/forgot-password` and `/portal/reset-password/:token`. "Forgot password?" link added to `/portal/login`. Postmark template `tmpl_password_reset` added.
 - **"New Construction" property type** — added to shared `PROPERTY_TYPES` list (`dealData.js`) + Lender Marketplace apply page + lender portal credit box.
@@ -21,6 +30,8 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 ## Personas
 - Wayne / Caleb Byrd — brokers (admins)
 - Sponsors / borrowers — clients
+### Portal polish + Password Reset — SHIPPED 2026-02
+
 - Lenders — token-gated read-only viewers
 
 ## Core features (built)

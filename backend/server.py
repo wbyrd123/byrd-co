@@ -1192,13 +1192,15 @@ async def client_me(user=Depends(require_client)):
             if (fa_sponsor is None) or (fa_sponsor in my_ids):
                 pending_by_key[(fa["scenario_id"], fa_sponsor)] = fa["token"]
         for d in docs:
-            # Filter: skip docs scoped to a sponsor that isn't this user's
+            # Filter: skip docs scoped to a sponsor this user isn't linked to.
+            # NOTE: no primary-client bypass — if the scenario has sponsor scoping,
+            # respect it strictly even for the primary client_id (they still see all
+            # docs that ARE linked to them because they're linked as a sponsor, plus
+            # every shared doc).
             sid = d["scenario_id"]
             doc_sponsor = d.get("sponsor_id")
             my_ids = my_sponsor_ids_by_scen.get(sid, set())
-            is_primary = any(sc.get("client_id") == user["id"] for sc in scenarios_raw if sc["id"] == sid)
-            if doc_sponsor and doc_sponsor not in my_ids and not is_primary:
-                # Scoped to another sponsor — hide from this user
+            if doc_sponsor and doc_sponsor not in my_ids:
                 continue
             if d.get("file_id") and d["file_id"] in files_by_id:
                 d["file"] = files_by_id[d["file_id"]]
@@ -2051,16 +2053,21 @@ async def update_scenario(sid: str, body: ScenarioUpdate, admin=Depends(require_
     update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if not update:
         raise HTTPException(status_code=400, detail="Nothing to update")
-    # If caller supplied sponsors[] — normalize (ensure ids, at least one 'managing')
+    # If caller supplied sponsors[] — normalize (ensure ids, enforce single 'managing')
     if "sponsors" in update:
         sponsors = update["sponsors"] or []
-        has_managing = False
-        for s in sponsors:
+        managing_indices = []
+        for i, s in enumerate(sponsors):
             if not s.get("id"):
                 s["id"] = str(uuid.uuid4())
             if s.get("role") == "managing":
-                has_managing = True
-        if sponsors and not has_managing:
+                managing_indices.append(i)
+        if len(managing_indices) > 1:
+            # Multiple managings after normalization — keep the LAST one, demote the rest
+            keeper = managing_indices[-1]
+            for i in managing_indices[:-1]:
+                sponsors[i]["role"] = "guarantor"
+        elif not managing_indices and sponsors:
             sponsors[0]["role"] = "managing"
         update["sponsors"] = sponsors
         # Drop legacy sponsor if we're moving to array shape
