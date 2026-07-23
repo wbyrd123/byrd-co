@@ -1056,7 +1056,7 @@ function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility,
     if (sponsorFilter === "shared") return !d.sponsor_id;
     return d.sponsor_id === sponsorFilter;
   });
-  const uploaded = docs.filter((d) => d.file_id).length;
+  const uploaded = docs.filter((d) => (d.files && d.files.length) || d.file_id).length;
   const reviewed = docs.filter((d) => d.status === "reviewed").length;
   const pct = docs.length ? Math.round((reviewed / docs.length) * 100) : 0;
 
@@ -1225,8 +1225,8 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
   const save = async () => { await onUpdate(doc.id, { status, notes }); setDirty(false); };
   const quickStatus = async (s) => { setStatus(s); await onUpdate(doc.id, { status: s, notes }); setDirty(false); };
 
-  const downloadFile = async () => {
-    const res = await api.get(`/files/${doc.file.id}`, { responseType: "blob" });
+  const downloadFile = async (fileId) => {
+    const res = await api.get(`/files/${fileId}`, { responseType: "blob" });
     const url = URL.createObjectURL(res.data);
     window.open(url, "_blank");
   };
@@ -1246,17 +1246,29 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
         reader.onerror = reject;
         reader.readAsDataURL(file);
       });
-      await api.post(`/client/docs/${doc.id}/upload`, {
+      // Admin upload-on-behalf: appends to files[] (doesn't overwrite prior uploads)
+      await api.post(`/admin/scenarios/${scenarioId}/docs/${doc.id}/upload`, {
         filename: file.name,
         content_type: file.type || "application/octet-stream",
         data_b64: b64,
       });
-      toast.success("Uploaded");
+      toast.success("Uploaded on borrower's behalf");
       onReload();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Upload failed");
     } finally {
       setUploading(false);
+    }
+  };
+
+  const removeFile = async (fileId, filename) => {
+    if (!window.confirm(`Remove "${filename}" from this line?`)) return;
+    try {
+      await api.delete(`/admin/scenarios/${scenarioId}/docs/${doc.id}/files/${fileId}`);
+      toast.success("File removed");
+      onReload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to remove file");
     }
   };
 
@@ -1299,19 +1311,62 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
         </select>
       </div>
       <div className="px-4 py-3">
-        {doc.file ? (
-          <div className="text-sm">
-            <button onClick={downloadFile} className="inline-flex items-center gap-1 text-[#1A1A1A] hover:text-[#C89434]" data-testid={`doc-download-${doc.id}`}>
-              <Download size={12} /> {doc.file.filename}
-            </button>
-            <div className="text-[11px] text-[#6B6558] mt-0.5">{formatSize(doc.file.size)}</div>
-          </div>
-        ) : (
-          <label className="inline-flex items-center gap-1 text-[11px] text-[#6B6558] cursor-pointer hover:text-[#1A1A1A]" data-testid={`doc-upload-${doc.id}`}>
-            <input type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile(f); e.target.value = ""; }} disabled={uploading} />
-            {uploading ? "Uploading…" : "Upload for client"}
-          </label>
-        )}
+        {(() => {
+          const files = doc.files && doc.files.length
+            ? doc.files
+            : (doc.file ? [{ id: doc.file.id, filename: doc.file.filename, size: doc.file.size, uploaded_by: "client" }] : []);
+          if (!files.length) {
+            return (
+              <label className="inline-flex items-center gap-1 text-[11px] text-[#6B6558] cursor-pointer hover:text-[#1A1A1A]" data-testid={`doc-upload-${doc.id}`}>
+                <input type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile(f); e.target.value = ""; }} disabled={uploading} />
+                {uploading ? "Uploading…" : "Upload for client"}
+              </label>
+            );
+          }
+          return (
+            <div className="space-y-1" data-testid={`doc-files-${doc.id}`}>
+              {files.map((fi) => (
+                <div key={fi.id} className="flex items-center gap-1 text-sm group" data-testid={`admin-file-row-${fi.id}`}>
+                  <button
+                    onClick={() => downloadFile(fi.id)}
+                    className="inline-flex items-center gap-1 text-[#1A1A1A] hover:text-[#C89434] min-w-0 flex-1"
+                    title={fi.filename}
+                    data-testid={`doc-download-${fi.id}`}
+                  >
+                    <Download size={12} className="shrink-0" />
+                    <span className="truncate">{fi.filename}</span>
+                  </button>
+                  <span className="text-[10px] text-[#6B6558] shrink-0">{formatSize(fi.size)}</span>
+                  {fi.uploaded_by === "broker" && (
+                    <span className="text-[9px] font-mono uppercase text-[#7A5410] tracking-widest shrink-0">Broker</span>
+                  )}
+                  {fi.uploaded_by === "ada" && (
+                    <span className="text-[9px] font-mono uppercase text-[#23446E] tracking-widest shrink-0">Ada</span>
+                  )}
+                  {!doc.system && (
+                    <button
+                      onClick={() => removeFile(fi.id, fi.filename)}
+                      className="text-[#8A1F1A] hover:text-[#5A0F0A] shrink-0 opacity-60 group-hover:opacity-100 transition-opacity"
+                      title="Remove this file"
+                      data-testid={`admin-delete-file-${fi.id}`}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
+              ))}
+              {!doc.system && (
+                <label
+                  className="inline-flex items-center gap-1 text-[10px] text-[#6B6558] cursor-pointer hover:text-[#1A1A1A] mt-1"
+                  data-testid={`doc-add-file-${doc.id}`}
+                >
+                  <input type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile(f); e.target.value = ""; }} disabled={uploading} />
+                  {uploading ? "Uploading…" : "+ Add another file"}
+                </label>
+              )}
+            </div>
+          );
+        })()}
         <input
           value={notes}
           onChange={(e) => { setNotes(e.target.value); setDirty(true); }}
@@ -1450,9 +1505,17 @@ function CopyDocsDialog({ scenarioId, onClose, onCopy }) {
                         <input type="checkbox" checked={picked.has(d.id)} onChange={() => toggle(d.id)} />
                         <div className="flex-1 min-w-0">
                           <div className="font-medium truncate">{d.label}</div>
-                          <div className="text-[11px] text-[#6B6558]">{d.category}{d.file ? ` · ${d.file.filename}` : " · not yet uploaded"}</div>
+                          <div className="text-[11px] text-[#6B6558]">
+                            {d.category}
+                            {(() => {
+                              const cnt = (d.files && d.files.length) || (d.file ? 1 : 0);
+                              if (!cnt) return " · not yet uploaded";
+                              if (cnt === 1) return ` · ${(d.files?.[0]?.filename) || d.file?.filename || "1 file"}`;
+                              return ` · ${cnt} files attached`;
+                            })()}
+                          </div>
                         </div>
-                        {d.file && <span className="byrd-chip byrd-chip-blue text-[10px]">File included</span>}
+                        {((d.files && d.files.length) || d.file) && <span className="byrd-chip byrd-chip-blue text-[10px]">{(d.files?.length || 1)} file{(d.files?.length || 1) > 1 ? "s" : ""}</span>}
                       </label>
                     ))}
                   </div>
@@ -1804,8 +1867,12 @@ function ShareVisibilityDialog({ scen, dialog, onClose, onSubmit }) {
                   </div>
                   <div className="text-[11px] text-[#6B6558] mt-0.5 truncate">
                     {d.category}
-                    {d.file?.filename && <> · {d.file.filename}</>}
-                    {!d.file_id && <> · <span className="text-[#8A1F1A]">Not uploaded yet</span></>}
+                    {(() => {
+                      const cnt = (d.files && d.files.length) || (d.file ? 1 : 0);
+                      if (cnt === 1) return <> · {d.files?.[0]?.filename || d.file?.filename}</>;
+                      if (cnt > 1) return <> · {cnt} files</>;
+                      return <> · <span className="text-[#8A1F1A]">Not uploaded yet</span></>;
+                    })()}
                   </div>
                 </div>
                 <div className="inline-flex rounded-md border border-[#E4DFD1] overflow-hidden text-[11px]">

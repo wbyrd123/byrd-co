@@ -1,0 +1,39 @@
+{
+  "summary": "Multi-file upload per document line — 16/16 backend pytest PASS + full frontend UI validation. Borrower (linked sponsor) can upload N files to one doc line; each returns unique file_id; /client/me returns files[] in insertion order with uploaded_by tag; deleting last file resets status to 'pending'. Admin upload-on-behalf tags uploaded_by='broker' and appears in borrower view. Admin scenario docs.zip bundles ALL files across ALL lines. Lender view exposes file_count + files[] when viewable, supports file_id query param, per-doc zip, and all-docs zip includes every file. Legacy backward-compat: /populate_doc_files returns files:[] even for empty rows. Doc delete cascades — all underlying client_files rows removed. Frontend: borrower portal shows N files chip, per-file delete, 'Add file' relabel (verified 2-file upload then delete). Admin scenario Documents tab renders per-file listing with '+ Add another file' link, BROKER tag on admin-uploaded file, individual delete icons.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Admin scenario detail — Documents tab",
+        "issues": [
+          "React hydration warning still present: '<span> cannot be a child of <option>'. Source: AdminScenarioDetail.jsx line 1088 — a <Sel> select renders <option> whose value contains a <span> (data-ve-dynamic instrumentation). Carry-over from iter 9. Non-blocking but flag for cleanup."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_multi_file_upload.py",
+    "/app/test_reports/pytest/multi_file_upload.xml"
+  ],
+  "action_items": [
+    "Optional: investigate the persistent hydration warning ('<span> child of <option>' in AdminScenarioDetail sponsor filter Sel). Same issue was flagged in iteration_9."
+  ],
+  "critical_code_review_comments": [
+    "server.py:7479 (_ada_apply_upload): filters by client_id=user.id which will NOT match when the doc's client_id points to a legacy user but user is a linked sponsor. Ada upload-into-existing-doc-line preservation was NOT exercised in this test run because the setup requires an Ada draft. If a linked sponsor uses Ada to generate a doc and target a doc line whose client_id≠user.id, _ada_apply_upload will silently return None. Consider routing through _resolve_client_doc_for_user for symmetry with client_upload.",
+    "server.py:1946 _ensure_doc_files_meta correctly handles legacy file_id-only rows by generating a synthetic 1-item files[]. Verified empty-row path.",
+    "Multi-file endpoints (POST/DELETE /client/docs/{doc_id}/files/{fid}, /admin/scenarios/{sid}/docs/{doc_id}/files/{fid}) properly authenticate via _resolve_client_doc_for_user; linked-sponsor gating works.",
+    "server.py is now 7653 lines (up from 7248) — modular split increasingly urgent."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_multi_file_upload.py (new — 16 pytest cases, self-cleaning around permanent 3-Sponsor Test Deal scenario)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% (borrower + admin flows verified)"},
+  "test_credentials": "Admin: wayne@byrd-co.com / byrdco2026. Client: sample@example.com / sample123.",
+  "seed_data_creation": "Tests use permanent scenario c4d98f0b-... and PFS doc a9e4380f-... Uploads are cleaned up via admin delete-file endpoint before AND after each module. TestDeleteCascade creates+deletes a TEST_MultiCascade doc line. No leftover data.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run: `python -m pytest backend/tests/test_multi_file_upload.py -v -o addopts=''`. Tests are idempotent and self-cleaning around the permanent 3-Sponsor Test Deal. Coverage: borrower multi-upload as linked-sponsor, admin upload-on-behalf, individual file delete, status transitions (pending↔uploaded), scenario docs.zip aggregation across lines, lender-view multi-file (file_count/files[]/file_id query/per-doc zip/all-docs zip), legacy compat empty-row files[], and delete cascade removing underlying client_files. Frontend validated with browser automation (see screenshots in .screenshots/). Ada finalize preservation path (_ada_apply_upload) not exercised — requires an Ada draft; noted as code-review comment.",
+  "rca of the issue": "N/A — no failures. Only a carry-over design nit (hydration warning) remains from iter 9."
+}

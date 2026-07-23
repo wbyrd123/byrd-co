@@ -86,9 +86,11 @@ export default function LenderView() {
     }
   };
 
-  const openDoc = async (docId) => {
+  const openDoc = async (docId, fileId = null) => {
     try {
-      const res = await fetch(`${API_BASE}/lender-view/${token}/doc/${docId}?session_token=${encodeURIComponent(session)}`);
+      const q = new URLSearchParams({ session_token: session });
+      if (fileId) q.set("file_id", fileId);
+      const res = await fetch(`${API_BASE}/lender-view/${token}/doc/${docId}?${q.toString()}`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || "Not authorized");
@@ -96,6 +98,26 @@ export default function LenderView() {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       window.open(url, "_blank");
+    } catch (e) {
+      toast.error(e.message);
+    }
+  };
+
+  const downloadDocZip = async (docId, label) => {
+    try {
+      const res = await fetch(`${API_BASE}/lender-view/${token}/doc/${docId}/zip?session_token=${encodeURIComponent(session)}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to bundle files");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(label || "document").replace(/[^\w\-]+/g, "_")}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     } catch (e) {
       toast.error(e.message);
     }
@@ -365,20 +387,66 @@ export default function LenderView() {
             <>
               <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Available Now</div>
               <div className="mt-2 space-y-2">
-                {readyDocs.map((d) => (
-                  <div key={d.id} className="flex items-center justify-between border border-[#E4DFD1] rounded-md p-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <FileText size={16} className="text-[#C89434] shrink-0" />
-                      <div className="min-w-0">
-                        <div className="font-semibold text-sm truncate">{d.label}</div>
-                        <div className="text-xs text-[#6B6558]">{d.category}</div>
+                {readyDocs.map((d) => {
+                  const files = d.files || [];
+                  const multi = files.length > 1;
+                  return (
+                    <div key={d.id} className="border border-[#E4DFD1] rounded-md p-3" data-testid={`lender-doc-${d.id}`}>
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <FileText size={16} className="text-[#C89434] shrink-0" />
+                          <div className="min-w-0">
+                            <div className="font-semibold text-sm truncate">
+                              {d.label}
+                              {multi && (
+                                <span className="ml-2 text-[10px] font-mono uppercase text-[#23446E] tracking-widest">
+                                  {files.length} files
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-xs text-[#6B6558]">{d.category}</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {multi ? (
+                            <button
+                              onClick={() => downloadDocZip(d.id, d.label)}
+                              className="byrd-btn byrd-btn-outline h-9 px-3 text-xs"
+                              data-testid={`lender-download-doc-zip-${d.id}`}
+                            >
+                              <Download size={12} /> Download all
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => openDoc(d.id, files[0]?.id)}
+                              className="byrd-btn byrd-btn-outline h-9 px-3 text-xs"
+                              data-testid={`lender-view-doc-${d.id}`}
+                            >
+                              <Download size={12} /> View
+                            </button>
+                          )}
+                        </div>
                       </div>
+                      {multi && (
+                        <ul className="mt-2 pl-6 space-y-1 border-t border-[#E4DFD1]/70 pt-2">
+                          {files.map((fi) => (
+                            <li key={fi.id} className="flex items-center gap-2 text-xs">
+                              <FileText size={12} className="text-[#6B6558] shrink-0" />
+                              <button
+                                onClick={() => openDoc(d.id, fi.id)}
+                                className="flex-1 min-w-0 text-left truncate text-[#1A1A1A] hover:text-[#C89434]"
+                                data-testid={`lender-view-file-${fi.id}`}
+                                title={fi.filename}
+                              >
+                                {fi.filename}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
-                    <button onClick={() => openDoc(d.id)} className="byrd-btn byrd-btn-outline h-9 px-3 text-xs" data-testid={`lender-view-doc-${d.id}`}>
-                      <Download size={12} /> View
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </>
           )}

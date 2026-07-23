@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import AdaChatPanel from "@/byrd/AdaChatPanel";
 import {
   LogOut, Upload, FileText, Download, Phone, Mail, CheckCircle2, Circle, CircleAlert,
-  ChevronDown, ChevronRight, PenLine,
+  ChevronDown, ChevronRight, PenLine, Trash2,
 } from "lucide-react";
 
 const groupByCategory = (docs) => {
@@ -53,6 +53,17 @@ export default function ClientPortal() {
       toast.error(err?.response?.data?.detail || "Upload failed");
     } finally {
       setUploading(null);
+    }
+  };
+
+  const handleDeleteFile = async (docId, fileId, filename) => {
+    if (!window.confirm(`Remove "${filename}" from this line?`)) return;
+    try {
+      await api.delete(`/client/docs/${docId}/files/${fileId}`);
+      toast.success("Removed");
+      load();
+    } catch (err) {
+      toast.error(err?.response?.data?.detail || "Failed to remove");
     }
   };
 
@@ -220,7 +231,12 @@ export default function ClientPortal() {
                               </div>
                               <div className="space-y-2">
                                 {list.map((d) => {
-                                  const hasFile = !!d.file;
+                                  const files = d.files || (d.file ? [{
+                                    id: d.file.id, filename: d.file.filename,
+                                    size: d.file.size, content_type: d.file.content_type,
+                                    uploaded_at: d.file.uploaded_at, uploaded_by: "client",
+                                  }] : []);
+                                  const hasFile = files.length > 0;
                                   const isFeeAgreement = d.label === "Signed Fee Agreement";
                                   const pendingSignToken = d.pending_sign_token;
                                   const iconMap = {
@@ -233,79 +249,110 @@ export default function ClientPortal() {
                                     <div
                                       key={d.id}
                                       data-testid={`client-doc-${d.id}`}
-                                      className={`border ${isFeeAgreement ? "border-[#C89434] bg-[#FBEFD3]/40" : "border-[#E4DFD1] bg-white"} rounded-md p-3 md:p-4 flex flex-col md:flex-row md:items-center gap-3`}
+                                      className={`border ${isFeeAgreement ? "border-[#C89434] bg-[#FBEFD3]/40" : "border-[#E4DFD1] bg-white"} rounded-md p-3 md:p-4`}
                                     >
-                                      <div className="w-9 h-9 shrink-0 rounded-md bg-[#F3EEE0] border border-[#E4DFD1] grid place-items-center">
-                                        {iconMap[d.status]}
-                                      </div>
-                                      <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-2 flex-wrap">
-                                          <div className="font-semibold">{d.label}</div>
-                                          {d.required && <span className="text-[10px] font-mono uppercase text-[#C89434] tracking-widest">Required</span>}
-                                          {isFeeAgreement && (
-                                            <span className="text-[10px] font-mono uppercase text-[#7A5410] tracking-widest">Managed by Byrd &amp; CO</span>
+                                      <div className="flex flex-col md:flex-row md:items-center gap-3">
+                                        <div className="w-9 h-9 shrink-0 rounded-md bg-[#F3EEE0] border border-[#E4DFD1] grid place-items-center">
+                                          {iconMap[d.status]}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <div className="flex items-center gap-2 flex-wrap">
+                                            <div className="font-semibold">{d.label}</div>
+                                            {d.required && <span className="text-[10px] font-mono uppercase text-[#C89434] tracking-widest">Required</span>}
+                                            {isFeeAgreement && (
+                                              <span className="text-[10px] font-mono uppercase text-[#7A5410] tracking-widest">Managed by Byrd &amp; CO</span>
+                                            )}
+                                            {files.length > 1 && (
+                                              <span className="text-[10px] font-mono uppercase text-[#23446E] tracking-widest" data-testid={`file-count-${d.id}`}>
+                                                {files.length} files
+                                              </span>
+                                            )}
+                                          </div>
+                                          {d.notes && (
+                                            <div className={`text-xs mt-1 ${isFeeAgreement ? "text-[#6B6558]" : "text-[#8A1F1A]"}`}>
+                                              {isFeeAgreement ? "" : "Note from broker: "}{d.notes}
+                                            </div>
                                           )}
                                         </div>
-                                        {hasFile && (
-                                          <div className="text-xs text-[#6B6558] mt-1 truncate">
-                                            {d.file.filename} · {fmtSize(d.file.size)}
-                                          </div>
-                                        )}
-                                        {d.notes && (
-                                          <div className={`text-xs mt-1 ${isFeeAgreement ? "text-[#6B6558]" : "text-[#8A1F1A]"}`}>
-                                            {isFeeAgreement ? "" : "Note from broker: "}{d.notes}
-                                          </div>
-                                        )}
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <StatusChip status={d.status} />
+                                          {isFeeAgreement && pendingSignToken && (
+                                            <a
+                                              href={`/fee-agreement/${pendingSignToken}`}
+                                              target="_blank" rel="noopener noreferrer"
+                                              className="byrd-btn byrd-btn-primary h-9 px-3 text-xs"
+                                              data-testid={`sign-now-${d.id}`}
+                                            >
+                                              <PenLine size={12} /> Sign Now
+                                            </a>
+                                          )}
+                                          {!isFeeAgreement && (
+                                            <label
+                                              className={`byrd-btn h-9 px-3 text-xs cursor-pointer ${
+                                                hasFile ? "byrd-btn-outline" : "byrd-btn-primary"
+                                              }`}
+                                              data-testid={`upload-${d.id}`}
+                                            >
+                                              <Upload size={12} />
+                                              {uploading === d.id ? "Uploading…" : hasFile ? "Add file" : "Upload"}
+                                              <input
+                                                type="file" className="hidden"
+                                                onChange={(e) => {
+                                                  const f = e.target.files?.[0];
+                                                  if (f) handleUpload(d.id, f);
+                                                  e.target.value = "";
+                                                }}
+                                                disabled={uploading === d.id}
+                                              />
+                                            </label>
+                                          )}
+                                        </div>
                                       </div>
-                                      <div className="flex items-center gap-2 flex-wrap">
-                                        <StatusChip status={d.status} />
-                                        {hasFile && (
-                                          <a
-                                            href={`${API_BASE}/files/${d.file.id}?tok=${localStorage.getItem("ac_token")}`}
-                                            target="_blank" rel="noopener noreferrer"
-                                            onClick={async (e) => {
-                                              e.preventDefault();
-                                              const res = await api.get(`/files/${d.file.id}`, { responseType: "blob" });
-                                              const url = URL.createObjectURL(res.data);
-                                              window.open(url, "_blank");
-                                            }}
-                                            className="byrd-btn byrd-btn-ghost h-9 px-3 text-xs"
-                                            data-testid={`view-${d.id}`}
-                                          >
-                                            <Download size={12} /> View
-                                          </a>
-                                        )}
-                                        {isFeeAgreement && pendingSignToken && (
-                                          <a
-                                            href={`/fee-agreement/${pendingSignToken}`}
-                                            target="_blank" rel="noopener noreferrer"
-                                            className="byrd-btn byrd-btn-primary h-9 px-3 text-xs"
-                                            data-testid={`sign-now-${d.id}`}
-                                          >
-                                            <PenLine size={12} /> Sign Now
-                                          </a>
-                                        )}
-                                        {!isFeeAgreement && (
-                                          <label
-                                            className={`byrd-btn h-9 px-3 text-xs cursor-pointer ${
-                                              hasFile ? "byrd-btn-outline" : "byrd-btn-primary"
-                                            }`}
-                                            data-testid={`upload-${d.id}`}
-                                          >
-                                            <Upload size={12} />
-                                            {uploading === d.id ? "Uploading…" : hasFile ? "Replace" : "Upload"}
-                                            <input
-                                              type="file" className="hidden"
-                                              onChange={(e) => {
-                                                const f = e.target.files?.[0];
-                                                if (f) handleUpload(d.id, f);
-                                                e.target.value = "";
-                                              }}
-                                              disabled={uploading === d.id}
-                                            />
-                                          </label>
-                                        )}
-                                      </div>
+                                      {hasFile && (
+                                        <ul className="mt-3 space-y-1.5 pl-1 border-t border-[#E4DFD1]/70 pt-2" data-testid={`files-${d.id}`}>
+                                          {files.map((fi) => (
+                                            <li
+                                              key={fi.id}
+                                              className="flex items-center gap-2 text-xs group"
+                                              data-testid={`file-row-${fi.id}`}
+                                            >
+                                              <FileText size={13} className="text-[#23446E] shrink-0" />
+                                              <a
+                                                href={`${API_BASE}/files/${fi.id}?tok=${localStorage.getItem("ac_token")}`}
+                                                target="_blank" rel="noopener noreferrer"
+                                                onClick={async (e) => {
+                                                  e.preventDefault();
+                                                  const res = await api.get(`/files/${fi.id}`, { responseType: "blob" });
+                                                  const url = URL.createObjectURL(res.data);
+                                                  window.open(url, "_blank");
+                                                }}
+                                                className="flex-1 min-w-0 truncate text-[#23446E] hover:underline"
+                                                data-testid={`view-file-${fi.id}`}
+                                                title={fi.filename}
+                                              >
+                                                {fi.filename}
+                                              </a>
+                                              <span className="text-[#8A8272] shrink-0">{fmtSize(fi.size)}</span>
+                                              {fi.uploaded_by === "broker" && (
+                                                <span className="text-[9px] font-mono uppercase text-[#7A5410] tracking-widest">By broker</span>
+                                              )}
+                                              {fi.uploaded_by === "ada" && (
+                                                <span className="text-[9px] font-mono uppercase text-[#23446E] tracking-widest">By Ada</span>
+                                              )}
+                                              {!isFeeAgreement && fi.uploaded_by !== "system" && (
+                                                <button
+                                                  onClick={() => handleDeleteFile(d.id, fi.id, fi.filename)}
+                                                  className="text-[#8A1F1A] hover:text-[#5A0F0A] shrink-0 opacity-60 group-hover:opacity-100 transition-opacity"
+                                                  title="Remove this file"
+                                                  data-testid={`delete-file-${fi.id}`}
+                                                >
+                                                  <Trash2 size={12} />
+                                                </button>
+                                              )}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      )}
                                     </div>
                                   );
                                 })}
@@ -348,7 +395,7 @@ export default function ClientPortal() {
               <ul className="mt-3 text-sm space-y-2 list-disc list-inside text-[#C9C1AF]">
                 <li>Each loan has its own list — upload each doc to the right deal.</li>
                 <li>PDFs are ideal — up to 15 MB per file.</li>
-                <li>Replacing an upload overwrites the previous version.</li>
+                <li>Attach multiple files to the same line (e.g., 3 years of tax returns) — nothing gets overwritten.</li>
                 <li>Rejected? Check the broker note and re-upload.</li>
               </ul>
             </div>

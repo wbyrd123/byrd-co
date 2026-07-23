@@ -1042,10 +1042,18 @@ async def admin_delete_client(client_id: str, admin=Depends(require_admin)):
             status_code=409,
             detail=f"This client has {scen_count} loan scenario{'s' if scen_count != 1 else ''}. Delete or reassign them first, then delete the client.",
         )
-    orphan_docs = await db.client_docs.find({"client_id": client_id}, {"_id": 0, "file_id": 1}).to_list(2000)
-    file_ids = [d["file_id"] for d in orphan_docs if d.get("file_id")]
+    orphan_docs = await db.client_docs.find(
+        {"client_id": client_id}, {"_id": 0, "file_id": 1, "files": 1},
+    ).to_list(2000)
+    file_ids = set()
+    for d in orphan_docs:
+        if d.get("file_id"):
+            file_ids.add(d["file_id"])
+        for m in (d.get("files") or []):
+            if m.get("file_id"):
+                file_ids.add(m["file_id"])
     if file_ids:
-        await db.client_files.delete_many({"id": {"$in": file_ids}})
+        await db.client_files.delete_many({"id": {"$in": list(file_ids)}})
     await db.client_docs.delete_many({"client_id": client_id})
     await db.invites.delete_many({"user_id": client_id})
     await db.users.delete_one({"id": client_id})
@@ -1174,11 +1182,6 @@ async def client_me(user=Depends(require_client)):
         docs = await db.client_docs.find(
             {"scenario_id": {"$in": scen_ids}}, {"_id": 0},
         ).sort("order", 1).to_list(5000)
-        file_ids = [d["file_id"] for d in docs if d.get("file_id")]
-        files_by_id: Dict[str, dict] = {}
-        if file_ids:
-            async for f in db.client_files.find({"id": {"$in": file_ids}}, {"_id": 0, "data_b64": 0}):
-                files_by_id[f["id"]] = f
         # Fetch pending fee agreements FOR THIS USER (matched by sponsor_id or legacy scenario-level)
         pending_by_key: Dict[str, str] = {}
         async for fa in db.fee_agreements.find(
@@ -1191,22 +1194,21 @@ async def client_me(user=Depends(require_client)):
             my_ids = my_sponsor_ids_by_scen.get(fa["scenario_id"], set())
             if (fa_sponsor is None) or (fa_sponsor in my_ids):
                 pending_by_key[(fa["scenario_id"], fa_sponsor)] = fa["token"]
+        # Filter first (respect sponsor scoping), then attach files metadata in bulk
+        visible_docs: list[dict] = []
         for d in docs:
-            # Filter: skip docs scoped to a sponsor this user isn't linked to.
-            # NOTE: no primary-client bypass — if the scenario has sponsor scoping,
-            # respect it strictly even for the primary client_id (they still see all
-            # docs that ARE linked to them because they're linked as a sponsor, plus
-            # every shared doc).
             sid = d["scenario_id"]
             doc_sponsor = d.get("sponsor_id")
             my_ids = my_sponsor_ids_by_scen.get(sid, set())
             if doc_sponsor and doc_sponsor not in my_ids:
                 continue
-            if d.get("file_id") and d["file_id"] in files_by_id:
-                d["file"] = files_by_id[d["file_id"]]
+            visible_docs.append(d)
+        await _populate_doc_files(visible_docs)
+        for d in visible_docs:
+            sid = d["scenario_id"]
+            doc_sponsor = d.get("sponsor_id")
             # Expose the signing token ONLY on this user's own pinned fee-agreement line
             if d.get("label") == FEE_AGREEMENT_DOC_LABEL:
-                # Prefer sponsor-scoped agreement if this doc is scoped to a sponsor
                 tok = pending_by_key.get((sid, doc_sponsor)) or pending_by_key.get((sid, None))
                 if tok:
                     d["pending_sign_token"] = tok
@@ -1231,42 +1233,54 @@ async def client_me(user=Depends(require_client)):
     return {"user": user, "scenarios": out_scenarios}
 
 
-@api.post("/client/docs/{doc_id}/upload")
-async def client_upload(doc_id: str, body: DocUploadInput, user=Depends(require_client)):
-    d = await db.client_docs.find_one({"id": doc_id, "client_id": user["id"]})
+async def _resolve_client_doc_for_user(doc_id: str, user: dict) -> dict:
+    """Fetch a doc the user is authorized to modify — either as primary client_id
+    OR as a linked sponsor on the scenario. Raises 404 if unavailable."""
+    d = await db.client_docs.find_one({"id": doc_id})
     if not d:
         raise HTTPException(status_code=404, detail="Doc not found")
+    # Primary client match
+    if d.get("client_id") == user["id"]:
+        return d
+    # Linked-sponsor match: user must be a linked sponsor on this scenario, AND
+    # the doc must be either shared (no sponsor_id) or scoped to this user's sponsor.
+    scen = await db.scenarios.find_one(
+        {"id": d.get("scenario_id")}, {"_id": 0, "sponsors": 1, "client_id": 1},
+    )
+    if not scen:
+        raise HTTPException(status_code=404, detail="Doc not found")
+    my_sponsor_ids = {sp["id"] for sp in (scen.get("sponsors") or []) if sp.get("client_user_id") == user["id"]}
+    if not my_sponsor_ids:
+        raise HTTPException(status_code=404, detail="Doc not found")
+    doc_sponsor = d.get("sponsor_id")
+    if doc_sponsor and doc_sponsor not in my_sponsor_ids:
+        raise HTTPException(status_code=404, detail="Doc not found")
+    return d
+
+
+@api.post("/client/docs/{doc_id}/upload")
+async def client_upload(doc_id: str, body: DocUploadInput, user=Depends(require_client)):
+    """Append a new file to a doc line. A single line can hold many files
+    (e.g., 3 years of tax returns, multi-page entity docs). Marks status='uploaded'.
+    Works for both the primary client and any linked sponsor on the scenario."""
+    d = await _resolve_client_doc_for_user(doc_id, user)
     if d.get("system"):
         raise HTTPException(status_code=400, detail="This line is managed by Byrd & CO and can't be uploaded to directly.")
-    try:
-        raw = base64.b64decode(body.data_b64, validate=True)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid base64")
-    if len(raw) > MAX_FILE_BYTES:
-        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_MB}MB limit")
-    if d.get("file_id"):
-        await db.client_files.delete_one({"id": d["file_id"]})
-    file_id = str(uuid.uuid4())
-    await db.client_files.insert_one({
-        "id": file_id,
-        "doc_id": doc_id,
-        "client_id": user["id"],
-        "scenario_id": d.get("scenario_id"),
-        "filename": body.filename,
-        "content_type": body.content_type,
-        "size": len(raw),
-        "data_b64": body.data_b64,
-        "uploaded_at": now_iso(),
-    })
-    await db.client_docs.update_one(
-        {"id": doc_id},
-        {"$set": {
-            "file_id": file_id,
-            "status": "uploaded",
-            "updated_at": now_iso(),
-        }},
-    )
-    return {"ok": True, "file_id": file_id}
+    meta = await _append_file_to_doc(d, body.data_b64, body.filename, body.content_type,
+                                     uploaded_by="client")
+    return {"ok": True, "file_id": meta["file_id"]}
+
+
+@api.delete("/client/docs/{doc_id}/files/{file_id}")
+async def client_delete_doc_file(doc_id: str, file_id: str, user=Depends(require_client)):
+    """Borrower removes one specific file from a doc line without wiping the whole line."""
+    d = await _resolve_client_doc_for_user(doc_id, user)
+    if d.get("system"):
+        raise HTTPException(status_code=400, detail="This line is managed by Byrd & CO.")
+    updated = await _remove_file_from_doc(d, file_id)
+    if updated:
+        updated.pop("_id", None)
+    return {"ok": True, "doc": updated}
 
 
 @api.get("/files/{file_id}")
@@ -1923,6 +1937,173 @@ async def _hydrate_sponsors(sponsors: list) -> list:
     return out
 
 
+# ---------- MULTI-FILE UPLOADS PER DOC LINE ----------
+# A client_docs row can hold many attached files (e.g., 3 years of tax returns
+# on a single "Tax Returns" line). Storage stays in `client_files`. Each doc row
+# tracks a `files: []` audit list. Legacy `file_id` remains the "latest" pointer
+# for backward compat with older code paths.
+
+def _ensure_doc_files_meta(doc: dict) -> list[dict]:
+    """Return the list of file-meta dicts attached to a doc row.
+    Migrates legacy `file_id`-only rows into a 1-item array on read."""
+    files = doc.get("files")
+    if isinstance(files, list) and files:
+        return files
+    if doc.get("file_id"):
+        return [{
+            "file_id": doc["file_id"],
+            "filename": doc.get("filename") or "document",
+            "content_type": doc.get("content_type"),
+            "size": doc.get("size"),
+            "uploaded_at": doc.get("updated_at") or doc.get("created_at"),
+            "uploaded_by": "client",
+        }]
+    return []
+
+
+async def _populate_doc_files(docs: list[dict]) -> None:
+    """Attach a `files` array of {id, filename, content_type, size, uploaded_at, uploaded_by}
+    to each doc, hydrated from the client_files collection. Never includes file bytes.
+    Also keeps the legacy `file` object (latest single file) so old UIs still work."""
+    all_file_ids = set()
+    per_doc_metas = []
+    for d in docs:
+        metas = _ensure_doc_files_meta(d)
+        per_doc_metas.append(metas)
+        for m in metas:
+            if m.get("file_id"):
+                all_file_ids.add(m["file_id"])
+    files_by_id: dict[str, dict] = {}
+    if all_file_ids:
+        async for f in db.client_files.find(
+            {"id": {"$in": list(all_file_ids)}}, {"_id": 0, "data_b64": 0},
+        ):
+            files_by_id[f["id"]] = f
+    for d, metas in zip(docs, per_doc_metas):
+        out = []
+        for m in metas:
+            f = files_by_id.get(m.get("file_id")) or {}
+            out.append({
+                "id": m.get("file_id"),
+                "filename": m.get("filename") or f.get("filename") or "document",
+                "content_type": m.get("content_type") or f.get("content_type"),
+                "size": m.get("size") if m.get("size") is not None else f.get("size"),
+                "uploaded_at": m.get("uploaded_at") or f.get("uploaded_at"),
+                "uploaded_by": m.get("uploaded_by") or "client",
+            })
+        d["files"] = out
+        # Legacy `file` mirror = latest file (for older UI paths)
+        if out and d.get("file_id"):
+            latest = files_by_id.get(d["file_id"])
+            if latest:
+                d["file"] = latest
+
+
+async def _append_file_to_doc(doc: dict, data_b64: str, filename: str, content_type: str,
+                              uploaded_by: str = "client") -> dict:
+    """Insert a client_files row and append meta to doc.files[]. Also updates the
+    legacy file_id/filename/size fields to point to the latest file so older code
+    that reads them still works. Sets status to 'uploaded' when at least one file exists.
+    Returns the meta dict of the newly added file."""
+    try:
+        raw = base64.b64decode(data_b64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64")
+    if len(raw) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_MB}MB limit")
+    file_id = str(uuid.uuid4())
+    now = now_iso()
+    await db.client_files.insert_one({
+        "id": file_id,
+        "doc_id": doc["id"],
+        "client_id": doc.get("client_id"),
+        "scenario_id": doc.get("scenario_id"),
+        "filename": filename,
+        "content_type": content_type,
+        "size": len(raw),
+        "data_b64": data_b64,
+        "uploaded_at": now,
+        "uploaded_by": uploaded_by,
+    })
+    meta = {
+        "file_id": file_id,
+        "filename": filename,
+        "content_type": content_type,
+        "size": len(raw),
+        "uploaded_at": now,
+        "uploaded_by": uploaded_by,
+    }
+    # Migrate legacy row: if `files` doesn't exist yet, seed from current file_id.
+    existing_files = _ensure_doc_files_meta(doc)
+    new_files = list(existing_files) + [meta]
+    # De-dupe against the case where legacy meta already points to same file_id
+    # (shouldn't happen for a new upload — new id is uuid — but guard anyway):
+    seen = set()
+    deduped = []
+    for m in new_files:
+        fid = m.get("file_id")
+        if fid in seen:
+            continue
+        seen.add(fid)
+        deduped.append(m)
+    await db.client_docs.update_one(
+        {"id": doc["id"]},
+        {"$set": {
+            "files": deduped,
+            "file_id": file_id,  # legacy: latest file
+            "filename": filename,
+            "content_type": content_type,
+            "size": len(raw),
+            "status": "uploaded",
+            "updated_at": now,
+        }},
+    )
+    return meta
+
+
+async def _remove_file_from_doc(doc: dict, file_id: str) -> dict:
+    """Remove one file (by file_id) from a doc line. Deletes the underlying blob.
+    If no files remain, resets status back to 'pending' and clears legacy pointers.
+    Returns the refreshed doc."""
+    metas = _ensure_doc_files_meta(doc)
+    remaining = [m for m in metas if m.get("file_id") != file_id]
+    if len(remaining) == len(metas):
+        raise HTTPException(status_code=404, detail="File not attached to this doc")
+    # Delete the underlying blob (only if not referenced elsewhere)
+    other_ref = await db.client_docs.find_one(
+        {"id": {"$ne": doc["id"]}, "files.file_id": file_id},
+        {"_id": 0, "id": 1},
+    )
+    if not other_ref:
+        legacy_ref = await db.client_docs.find_one(
+            {"id": {"$ne": doc["id"]}, "file_id": file_id},
+            {"_id": 0, "id": 1},
+        )
+        if not legacy_ref:
+            await db.client_files.delete_one({"id": file_id})
+    # Recompute latest pointer
+    now = now_iso()
+    if remaining:
+        latest = remaining[-1]
+        set_fields = {
+            "files": remaining,
+            "file_id": latest.get("file_id"),
+            "filename": latest.get("filename"),
+            "content_type": latest.get("content_type"),
+            "size": latest.get("size"),
+            "status": "uploaded",
+            "updated_at": now,
+        }
+        await db.client_docs.update_one({"id": doc["id"]}, {"$set": set_fields})
+    else:
+        await db.client_docs.update_one(
+            {"id": doc["id"]},
+            {"$set": {"files": [], "status": "pending", "updated_at": now},
+             "$unset": {"file_id": "", "filename": "", "content_type": "", "size": ""}},
+        )
+    return await db.client_docs.find_one({"id": doc["id"]}, {"_id": 0})
+
+
 @api.get("/admin/scenarios/doc-templates")
 async def list_doc_templates(admin=Depends(require_admin)):
     """Preset checklists a broker can pick when starting a new scenario."""
@@ -2035,10 +2216,7 @@ async def get_scenario(sid: str, admin=Depends(require_admin)):
     sponsors = _ensure_sponsors_array(d)
     d["sponsors"] = await _hydrate_sponsors(sponsors)
     docs = await db.client_docs.find({"scenario_id": sid}, {"_id": 0}).sort("order", 1).to_list(500)
-    for cd in docs:
-        if cd.get("file_id"):
-            f = await db.client_files.find_one({"id": cd["file_id"]}, {"_id": 0, "data_b64": 0})
-            cd["file"] = f
+    await _populate_doc_files(docs)
     d["docs"] = docs
     d["client_docs"] = docs
     d["shares"] = await db.scenario_shares.find({"scenario_id": sid}, {"_id": 0}).sort("created_at", -1).to_list(200)
@@ -2087,10 +2265,18 @@ async def delete_scenario(sid: str, admin=Depends(require_admin)):
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Not found")
     # Cascade: drop scenario docs + their files + share metadata
-    docs = await db.client_docs.find({"scenario_id": sid}, {"_id": 0, "file_id": 1}).to_list(2000)
-    file_ids = [d["file_id"] for d in docs if d.get("file_id")]
+    docs = await db.client_docs.find(
+        {"scenario_id": sid}, {"_id": 0, "file_id": 1, "files": 1},
+    ).to_list(2000)
+    file_ids = set()
+    for d in docs:
+        if d.get("file_id"):
+            file_ids.add(d["file_id"])
+        for m in (d.get("files") or []):
+            if m.get("file_id"):
+                file_ids.add(m["file_id"])
     if file_ids:
-        await db.client_files.delete_many({"id": {"$in": file_ids}})
+        await db.client_files.delete_many({"id": {"$in": list(file_ids)}})
     await db.client_docs.delete_many({"scenario_id": sid})
     await db.scenario_shares.delete_many({"scenario_id": sid})
     await db.share_views.delete_many({"scenario_id": sid})
@@ -2117,6 +2303,7 @@ async def scenario_add_doc(sid: str, body: DocCreate, admin=Depends(require_admi
         "status": "pending",
         "notes": "",
         "file_id": None,
+        "files": [],
         "order": next_order,
         "created_at": now,
         "updated_at": now,
@@ -2149,8 +2336,10 @@ async def scenario_delete_doc(sid: str, doc_id: str, admin=Depends(require_admin
         raise HTTPException(status_code=404, detail="Doc not found")
     if d.get("system"):
         raise HTTPException(status_code=400, detail="This document line is system-managed and can't be deleted here.")
-    if d.get("file_id"):
-        await db.client_files.delete_one({"id": d["file_id"]})
+    # Delete every file attached to this line (both legacy file_id + new files[])
+    file_ids = {m.get("file_id") for m in _ensure_doc_files_meta(d) if m.get("file_id")}
+    if file_ids:
+        await db.client_files.delete_many({"id": {"$in": list(file_ids)}})
     await db.client_docs.delete_one({"id": doc_id})
     # Clean up any share overrides that pointed to this doc
     await db.scenario_shares.update_many(
@@ -2158,6 +2347,34 @@ async def scenario_delete_doc(sid: str, doc_id: str, admin=Depends(require_admin
         {"$unset": {f"doc_overrides.{doc_id}": ""}, "$pull": {"doc_grants": doc_id}},
     )
     return {"ok": True}
+
+
+@api.post("/admin/scenarios/{sid}/docs/{doc_id}/upload")
+async def admin_upload_doc_file(sid: str, doc_id: str, body: DocUploadInput,
+                                admin=Depends(require_admin)):
+    """Broker uploads a file into a borrower's doc line on their behalf.
+    Common when borrowers email documents directly to the broker."""
+    d = await db.client_docs.find_one({"id": doc_id, "scenario_id": sid})
+    if not d:
+        raise HTTPException(status_code=404, detail="Doc not found")
+    if d.get("system"):
+        raise HTTPException(status_code=400, detail="This document line is system-managed.")
+    meta = await _append_file_to_doc(d, body.data_b64, body.filename, body.content_type,
+                                     uploaded_by="broker")
+    return {"ok": True, "file_id": meta["file_id"]}
+
+
+@api.delete("/admin/scenarios/{sid}/docs/{doc_id}/files/{file_id}")
+async def admin_delete_doc_file(sid: str, doc_id: str, file_id: str,
+                                admin=Depends(require_admin)):
+    """Broker removes one specific file from a doc line (e.g., borrower sent a wrong page)."""
+    d = await db.client_docs.find_one({"id": doc_id, "scenario_id": sid})
+    if not d:
+        raise HTTPException(status_code=404, detail="Doc not found")
+    updated = await _remove_file_from_doc(d, file_id)
+    if updated:
+        updated.pop("_id", None)
+    return {"ok": True, "doc": updated}
 
 
 @api.get("/admin/scenarios/{sid}/docs/copy-source")
@@ -2177,10 +2394,7 @@ async def scenario_docs_copy_source(sid: str, admin=Depends(require_admin)):
         docs = await db.client_docs.find(
             {"scenario_id": s["id"]}, {"_id": 0},
         ).sort("order", 1).to_list(500)
-        for d in docs:
-            if d.get("file_id"):
-                f = await db.client_files.find_one({"id": d["file_id"]}, {"_id": 0, "data_b64": 0})
-                d["file"] = f
+        await _populate_doc_files(docs)
         if not docs:
             continue
         result.append({
@@ -2216,24 +2430,48 @@ async def scenario_docs_copy(sid: str, body: ScenarioDocCopy, admin=Depends(requ
     copied = []
     for sd in source_docs:
         new_doc_id = str(uuid.uuid4())
-        new_file_id = None
-        # Deep-copy the file if present so each scenario is self-contained
-        if sd.get("file_id"):
-            f = await db.client_files.find_one({"id": sd["file_id"]}, {"_id": 0})
-            if f:
-                new_file_id = str(uuid.uuid4())
-                await db.client_files.insert_one({
-                    "id": new_file_id,
-                    "doc_id": new_doc_id,
-                    "client_id": dest.get("client_id"),
-                    "scenario_id": sid,
-                    "filename": f.get("filename"),
-                    "content_type": f.get("content_type"),
-                    "size": f.get("size"),
-                    "data_b64": f.get("data_b64"),
-                    "uploaded_at": now,
-                    "copied_from_doc_id": sd["id"],
-                })
+        # Deep-copy every attached file so each scenario is self-contained.
+        src_metas = _ensure_doc_files_meta(sd)
+        new_metas: list[dict] = []
+        latest_new_file_id: Optional[str] = None
+        latest_filename = None
+        latest_ct = None
+        latest_size = None
+        for sm in src_metas:
+            src_fid = sm.get("file_id")
+            if not src_fid:
+                continue
+            f = await db.client_files.find_one({"id": src_fid}, {"_id": 0})
+            if not f:
+                continue
+            new_fid = str(uuid.uuid4())
+            await db.client_files.insert_one({
+                "id": new_fid,
+                "doc_id": new_doc_id,
+                "client_id": dest.get("client_id"),
+                "scenario_id": sid,
+                "filename": f.get("filename"),
+                "content_type": f.get("content_type"),
+                "size": f.get("size"),
+                "data_b64": f.get("data_b64"),
+                "uploaded_at": now,
+                "uploaded_by": sm.get("uploaded_by") or "client",
+                "copied_from_doc_id": sd["id"],
+                "copied_from_file_id": src_fid,
+            })
+            meta = {
+                "file_id": new_fid,
+                "filename": f.get("filename") or sm.get("filename"),
+                "content_type": f.get("content_type") or sm.get("content_type"),
+                "size": f.get("size") if f.get("size") is not None else sm.get("size"),
+                "uploaded_at": now,
+                "uploaded_by": sm.get("uploaded_by") or "client",
+            }
+            new_metas.append(meta)
+            latest_new_file_id = new_fid
+            latest_filename = meta["filename"]
+            latest_ct = meta["content_type"]
+            latest_size = meta["size"]
         new_doc = {
             "id": new_doc_id,
             "scenario_id": sid,
@@ -2241,9 +2479,13 @@ async def scenario_docs_copy(sid: str, body: ScenarioDocCopy, admin=Depends(requ
             "label": sd.get("label", "Document"),
             "category": sd.get("category", "Other"),
             "required": sd.get("required", True),
-            "status": "uploaded" if new_file_id else "pending",
+            "status": "uploaded" if new_metas else "pending",
             "notes": sd.get("notes", ""),
-            "file_id": new_file_id,
+            "files": new_metas,
+            "file_id": latest_new_file_id,
+            "filename": latest_filename,
+            "content_type": latest_ct,
+            "size": latest_size,
             "order": next_order,
             "created_at": now,
             "updated_at": now,
@@ -2958,10 +3200,17 @@ async def public_fee_agreement_sign(token: str, body: PublicSignBody, request: R
         scen, client, admin_signer, fa["broker_fee_pct"],
         agreement_date=fa["agreement_date"], signatures=signatures,
     )
-    # Delete any prior file on the doc line to avoid stale copies
-    old = await db.client_docs.find_one({"id": fa["doc_id"]}, {"_id": 0, "file_id": 1})
-    if old and old.get("file_id"):
-        await db.client_files.delete_one({"id": old["file_id"]})
+    # Delete any prior signed file(s) on the doc line to avoid stale copies (fee agreements pin ONE signed PDF)
+    old = await db.client_docs.find_one({"id": fa["doc_id"]}, {"_id": 0, "file_id": 1, "files": 1})
+    old_fids = set()
+    if old:
+        if old.get("file_id"):
+            old_fids.add(old["file_id"])
+        for m in (old.get("files") or []):
+            if m.get("file_id"):
+                old_fids.add(m["file_id"])
+    if old_fids:
+        await db.client_files.delete_many({"id": {"$in": list(old_fids)}})
     file_id = str(uuid.uuid4())
     await db.client_files.insert_one({
         "id": file_id,
@@ -2979,6 +3228,14 @@ async def public_fee_agreement_sign(token: str, body: PublicSignBody, request: R
         {"id": fa["doc_id"]},
         {"$set": {
             "file_id": file_id,
+            "files": [{
+                "file_id": file_id,
+                "filename": "Byrd & CO — Fee Agreement (Signed).pdf",
+                "content_type": "application/pdf",
+                "size": len(pdf_bytes),
+                "uploaded_at": now,
+                "uploaded_by": "system",
+            }],
             "status": "reviewed",
             "notes": f"Signed by {signatures['borrower_name']} and countersigned by {signatures['broker_name']} on {now.split('T')[0]}.",
             "updated_at": now,
@@ -3019,35 +3276,40 @@ async def public_fee_agreement_sign(token: str, body: PublicSignBody, request: R
 
 @api.get("/admin/scenarios/{sid}/docs.zip")
 async def admin_scenario_docs_zip(sid: str, admin=Depends(require_admin)):
-    """Bundle every uploaded document on this scenario into a single ZIP."""
+    """Bundle every uploaded document on this scenario into a single ZIP (all files across all lines)."""
     import zipfile
     from io import BytesIO
     scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
     if not scen:
         raise HTTPException(status_code=404, detail="Scenario not found")
     docs = await db.client_docs.find(
-        {"scenario_id": sid, "file_id": {"$ne": None}}, {"_id": 0},
+        {"scenario_id": sid}, {"_id": 0},
     ).sort("order", 1).to_list(500)
+    docs = [d for d in docs if _ensure_doc_files_meta(d)]
     if not docs:
         raise HTTPException(status_code=404, detail="No documents uploaded yet")
     buf = BytesIO()
     used_names = set()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for cd in docs:
-            f = await db.client_files.find_one({"id": cd["file_id"]})
-            if not f:
-                continue
-            raw = base64.b64decode(f["data_b64"])
             label = (cd.get("label") or "document").replace("/", "-").replace("\\", "-").strip()
-            base_name = f["filename"] or "file"
-            name = f"{label} - {base_name}"
-            n, i = name, 1
-            while n in used_names:
-                stem, dot, ext = name.rpartition(".")
-                n = f"{stem} ({i}).{ext}" if dot else f"{name} ({i})"
-                i += 1
-            used_names.add(n)
-            zf.writestr(n, raw)
+            for m in _ensure_doc_files_meta(cd):
+                fid = m.get("file_id")
+                if not fid:
+                    continue
+                f = await db.client_files.find_one({"id": fid})
+                if not f:
+                    continue
+                raw = base64.b64decode(f["data_b64"])
+                base_name = f.get("filename") or m.get("filename") or "file"
+                name = f"{label} - {base_name}"
+                n, i = name, 1
+                while n in used_names:
+                    stem, dot, ext = name.rpartition(".")
+                    n = f"{stem} ({i}).{ext}" if dot else f"{name} ({i})"
+                    i += 1
+                used_names.add(n)
+                zf.writestr(n, raw)
     buf.seek(0)
     safe_name = "".join(c if ord(c) < 128 and c not in '\\/:*?"<>|' else "_" for c in (scen.get('name') or 'scenario'))
     fname = f"byrd-{safe_name.replace(' ', '_')}-{sid[:8]}.zip"
@@ -3333,6 +3595,7 @@ async def lender_get_package(token: str, session_token: Optional[str] = None):
     # Every scenario doc is a candidate; the doc's own lender_visibility drives the default,
     # and per-share overrides can flip individual docs to included/on_request/hidden.
     scen_docs = await db.client_docs.find({"scenario_id": share["scenario_id"]}, {"_id": 0}).sort("order", 1).to_list(500)
+    await _populate_doc_files(scen_docs)
     doc_map = {d["id"]: d for d in scen_docs}
 
     docs_out = []
@@ -3340,14 +3603,27 @@ async def lender_get_package(token: str, session_token: Optional[str] = None):
         eff = _effective_doc_visibility(share, doc_map, cd["id"])
         if eff == "hidden":
             continue
-        has_file = bool(cd.get("file_id"))
+        files_meta = cd.get("files") or []
+        has_file = bool(files_meta) or bool(cd.get("file_id"))
         viewable = has_file and eff == "included"
+        # Only expose file list when actually included; otherwise just show count
+        lender_files = []
+        if viewable:
+            for fm in files_meta:
+                lender_files.append({
+                    "id": fm.get("id"),
+                    "filename": fm.get("filename"),
+                    "size": fm.get("size"),
+                    "content_type": fm.get("content_type"),
+                })
         docs_out.append({
             "id": cd["id"],
             "label": cd["label"],
             "category": cd.get("category"),
             "visibility": cd.get("lender_visibility", "on_request"),
             "has_file": has_file,
+            "file_count": len(files_meta),
+            "files": lender_files,
             "viewable": viewable,
             "requires_request": eff == "on_request",
         })
@@ -3390,7 +3666,11 @@ async def lender_get_package(token: str, session_token: Optional[str] = None):
 
 
 @api.get("/lender-view/{token}/doc/{doc_id}")
-async def lender_get_doc(token: str, doc_id: str, session_token: Optional[str] = None):
+async def lender_get_doc(token: str, doc_id: str,
+                         session_token: Optional[str] = None,
+                         file_id: Optional[str] = None):
+    """Fetch one file from a doc line. `file_id` picks a specific attachment
+    (defaults to the first/only file for backwards compat)."""
     share, session = await _require_view_session(token, session_token)
     scen = await db.scenarios.find_one({"id": share["scenario_id"]})
     if not scen:
@@ -3405,18 +3685,83 @@ async def lender_get_doc(token: str, doc_id: str, session_token: Optional[str] =
         raise HTTPException(status_code=404, detail="Doc not part of this package")
     if eff != "included":
         raise HTTPException(status_code=403, detail="Access not granted for this document yet")
-    if not cd.get("file_id"):
+    metas = _ensure_doc_files_meta(cd)
+    if not metas:
         raise HTTPException(status_code=404, detail="Document not uploaded")
-    f = await db.client_files.find_one({"id": cd["file_id"]})
+    # Verify file_id belongs to this doc line (prevents ID guessing across lines)
+    if file_id:
+        allowed = {m.get("file_id") for m in metas}
+        if file_id not in allowed:
+            raise HTTPException(status_code=404, detail="File not part of this document")
+        target_id = file_id
+    else:
+        target_id = metas[0].get("file_id")
+    f = await db.client_files.find_one({"id": target_id})
     if not f:
         raise HTTPException(status_code=404, detail="File missing")
     await _log_view(scen["id"], share["id"], session, "view_doc",
-                    extra={"doc_id": doc_id, "doc_label": cd.get("label")})
+                    extra={"doc_id": doc_id, "doc_label": cd.get("label"),
+                           "file_id": target_id, "filename": f.get("filename")})
     raw = base64.b64decode(f["data_b64"])
     return Response(
         content=raw,
         media_type=f.get("content_type", "application/octet-stream"),
         headers={"Content-Disposition": f'inline; filename="{f["filename"]}"'},
+    )
+
+
+@api.get("/lender-view/{token}/doc/{doc_id}/zip")
+async def lender_get_doc_zip(token: str, doc_id: str, session_token: Optional[str] = None):
+    """Bundle all files attached to ONE doc line into a zip (e.g., all tax returns)."""
+    import zipfile
+    from io import BytesIO
+    share, session = await _require_view_session(token, session_token)
+    scen = await db.scenarios.find_one({"id": share["scenario_id"]})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    cd = await db.client_docs.find_one({"id": doc_id, "scenario_id": share["scenario_id"]})
+    if not cd:
+        raise HTTPException(status_code=404, detail="Doc not part of this package")
+    attach_map = {doc_id: cd}
+    eff = _effective_doc_visibility(share, attach_map, doc_id)
+    if eff != "included":
+        raise HTTPException(status_code=403, detail="Access not granted for this document yet")
+    metas = _ensure_doc_files_meta(cd)
+    if not metas:
+        raise HTTPException(status_code=404, detail="Document not uploaded")
+    buf = BytesIO()
+    used = set()
+    included = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for m in metas:
+            fid = m.get("file_id")
+            if not fid:
+                continue
+            f = await db.client_files.find_one({"id": fid})
+            if not f:
+                continue
+            base_name = f.get("filename") or "file"
+            name, i = base_name, 1
+            while name in used:
+                stem, dot, ext = base_name.rpartition(".")
+                name = f"{stem} ({i}).{ext}" if dot else f"{base_name} ({i})"
+                i += 1
+            used.add(name)
+            included.append(name)
+            zf.writestr(name, base64.b64decode(f["data_b64"]))
+    if not included:
+        raise HTTPException(status_code=404, detail="No files to download")
+    buf.seek(0)
+    await _log_view(scen["id"], share["id"], session, "download_doc_zip",
+                    extra={"doc_id": doc_id, "doc_label": cd.get("label"),
+                           "file_count": len(included), "files": included})
+    label = (cd.get("label") or "document").replace("/", "-").replace("\\", "-").strip()
+    safe = "".join(c if ord(c) < 128 and c not in '\\/:*?"<>|' else "_" for c in label)
+    fname = f"byrd-{safe.replace(' ', '_')}-{share['id'][:8]}.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
 
@@ -3476,23 +3821,28 @@ async def lender_docs_zip(token: str, session_token: Optional[str] = None):
     included_names = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for cd in docs:
-            if not cd.get("file_id"):
+            metas = _ensure_doc_files_meta(cd)
+            if not metas:
                 continue
-            f = await db.client_files.find_one({"id": cd["file_id"]})
-            if not f:
-                continue
-            raw = base64.b64decode(f["data_b64"])
             label = (cd.get("label") or "document").replace("/", "-").replace("\\", "-").strip()
-            base_name = f["filename"] or "file"
-            name = f"{label} - {base_name}"
-            n, i = name, 1
-            while n in used_names:
-                stem, dot, ext = name.rpartition(".")
-                n = f"{stem} ({i}).{ext}" if dot else f"{name} ({i})"
-                i += 1
-            used_names.add(n)
-            included_names.append(n)
-            zf.writestr(n, raw)
+            for m in metas:
+                fid = m.get("file_id")
+                if not fid:
+                    continue
+                f = await db.client_files.find_one({"id": fid})
+                if not f:
+                    continue
+                raw = base64.b64decode(f["data_b64"])
+                base_name = f.get("filename") or m.get("filename") or "file"
+                name = f"{label} - {base_name}"
+                n, i = name, 1
+                while n in used_names:
+                    stem, dot, ext = name.rpartition(".")
+                    n = f"{stem} ({i}).{ext}" if dot else f"{name} ({i})"
+                    i += 1
+                used_names.add(n)
+                included_names.append(n)
+                zf.writestr(n, raw)
     if not included_names:
         raise HTTPException(status_code=404, detail="No files to download")
     buf.seek(0)
@@ -6922,12 +7272,13 @@ async def _ada_turn_context(user: dict) -> str:
         async for d in db.client_docs.find(
             {"scenario_id": {"$in": scen_ids}},
             {"_id": 0, "id": 1, "scenario_id": 1, "label": 1, "category": 1, "required": 1,
-             "status": 1, "notes": 1, "file_id": 1},
+             "status": 1, "notes": 1, "file_id": 1, "files": 1},
         ).sort("order", 1):
             docs_by_scen.setdefault(d["scenario_id"], []).append({
                 "doc_line_id": d["id"], "label": d["label"], "category": d.get("category"),
                 "required": d.get("required", False), "status": d.get("status"),
-                "has_file": bool(d.get("file_id")),
+                "has_file": bool(d.get("file_id")) or bool(d.get("files")),
+                "file_count": len(d.get("files") or []) or (1 if d.get("file_id") else 0),
                 "broker_note": d.get("notes") if d.get("status") == "rejected" else None,
             })
     drafts = await db.borrower_ada_drafts.find(
@@ -7141,10 +7492,22 @@ async def _ada_apply_upload(user: dict, block: dict) -> Optional[dict]:
         "content_type": preview["content_type"], "size": preview["size"],
         "data_b64": preview["data_b64"], "uploaded_at": now, "uploaded_by_ada": True,
     })
-    if dl.get("file_id"):
-        await db.client_files.delete_one({"id": dl["file_id"]})
+    # Preserve any existing uploads on the line; Ada's generated doc is simply ADDED as another file.
+    existing_metas = _ensure_doc_files_meta(dl)
+    new_meta = {
+        "file_id": new_file_id,
+        "filename": filename,
+        "content_type": preview["content_type"],
+        "size": preview["size"],
+        "uploaded_at": now,
+        "uploaded_by": "ada",
+    }
+    existing_metas.append(new_meta)
     await db.client_docs.update_one({"id": target_line_id},
-        {"$set": {"file_id": new_file_id, "status": "uploaded",
+        {"$set": {"file_id": new_file_id, "filename": filename,
+                  "content_type": preview["content_type"], "size": preview["size"],
+                  "files": existing_metas,
+                  "status": "uploaded",
                   "notes": f"Uploaded via Ada on {now.split('T')[0]}", "updated_at": now}})
     await db.borrower_ada_drafts.update_one({"id": draft_id},
         {"$set": {"status": "uploaded", "uploaded_file_id": new_file_id, "updated_at": now}})
