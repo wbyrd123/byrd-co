@@ -284,6 +284,37 @@ export default function LenderView() {
           </div>
         </div>
 
+        {/* Sponsors */}
+        {(pkg.sponsors || []).length > 0 && (
+          <div className="byrd-card p-6" data-testid="lender-sponsors">
+            <h3 className="font-serif text-xl font-bold mb-3">
+              Sponsors ({pkg.sponsors.length})
+            </h3>
+            <p className="text-[11px] text-[#6B6558] mb-3">Every guarantor listed here is on the loan.</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {pkg.sponsors.map((sp, idx) => (
+                <div key={idx} className="border border-[#E4DFD1] rounded-md p-4 bg-white">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="font-semibold">{sp.name}</div>
+                    <div className="flex items-center gap-1">
+                      {sp.role === "managing" && <span className="byrd-chip byrd-chip-gold">Managing</span>}
+                      {sp.is_guarantor && sp.role !== "managing" && <span className="byrd-chip">Guarantor</span>}
+                      {sp.role === "passive" && <span className="byrd-chip">Passive</span>}
+                    </div>
+                  </div>
+                  {sp.entity && <div className="text-xs text-[#6B6558] mt-1">Entity: {sp.entity}</div>}
+                  <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                    <div><span className="text-[#6B6558]">Ownership:</span> <b>{sp.ownership_pct != null ? `${sp.ownership_pct}%` : "—"}</b></div>
+                    <div><span className="text-[#6B6558]">FICO:</span> {sp.credit_score || "—"}</div>
+                    <div><span className="text-[#6B6558]">Liquidity:</span> {sp.liquidity != null ? fmtMoney(sp.liquidity) : "—"}</div>
+                    <div><span className="text-[#6B6558]">Net Worth:</span> {sp.net_worth != null ? fmtMoney(sp.net_worth) : "—"}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Sources & Uses */}
         {su.length > 0 && (
           <div className="byrd-card p-6">

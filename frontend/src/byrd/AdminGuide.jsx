@@ -270,13 +270,20 @@ export default function AdminGuide() {
           <p>The template seeds the checklist. Rename, add, or delete lines any time.</p>
         </Step>
         <Step n="2" title="Package tab &mdash; the numbers.">
-          <p>Field-by-field: sponsor, property, loan request, financials, construction, sources &amp; uses, notes. Everything auto-saves.</p>
+          <p>Field-by-field: sponsors, property, loan request, financials, construction, sources &amp; uses, notes. Everything auto-saves.</p>
           <p>Numbers drive the sizing bar at the top: <b>LTV, LTC, DSCR, Debt Yield, NOI, monthly P&amp;I</b>. DSCR turns green if &ge;1.25, red if &lt;1.0.</p>
         </Step>
-        <Step n="3" title="Documents tab &mdash; per-scenario folder.">
-          <p>Every scenario has its own document folder. Add / edit / delete lines directly. Set each line to <b>Pending / Uploaded / Reviewed / Rejected</b>. Client sees whatever notes you write.</p>
+        <Step n="2.5" title="Multiple sponsors — the new way.">
+          <p>The Package tab has a <b>Sponsors ({"{"}n{"}"})</b> card with a <b>+ Add Sponsor</b> button. Each sponsor gets: Name, Entity, FICO, Liquidity, Net Worth, plus:</p>
+          <p><b>Ownership %</b> &mdash; drives the guarantor auto-flag. Anyone ≥20% is auto-checked as a guarantor (overridable).</p>
+          <p><b>Role</b> &mdash; one <em>Managing Sponsor</em> per deal (the person you talk to; only one can be Managing), plus any number of <em>Guarantors</em> or <em>Passive</em> investors.</p>
+          <p><b>Link to Client Account</b> &mdash; pick from the dropdown to give that sponsor their own portal login. Passive investors typically get "No portal access" so you handle their docs. Guarantors should be linked so they can upload their own PFS + sign their own fee agreement.</p>
+        </Step>
+        <Step n="3" title="Documents tab &mdash; per-scenario, per-sponsor.">
+          <p>Every scenario has its own document folder. Personal docs (PFS, tax returns, resume, credit auth) are automatically scoped to the <b>Managing Sponsor</b> at scenario creation; shared docs (T-12, rent roll, PSA) are marked "Shared".</p>
+          <p>Use the <b>"Viewing docs for" dropdown</b> at the top of the Documents tab to filter by sponsor — see just Bob's personal docs, or Alice's, or property-only. Each doc line also has an inline <b>sponsor selector</b> so you can move a line between sponsors or make it Shared.</p>
           <p>Each line has a <b>lender visibility</b> toggle: <b>Hidden</b> (lender never learns it exists), <b>Req.</b> (visible in the list but locked; lender must ask, you grant per lender), or <b>Included</b> (auto-rides with any lender link).</p>
-          <p>Rule of thumb: property docs (rent roll, T-12, photos, PSA) &rarr; Included. Personal docs (PFS, tax returns, bank statements) &rarr; Req.</p>
+          <p>Rule of thumb: property docs (rent roll, T-12, photos, PSA) &rarr; Shared + Included. Personal docs (PFS, tax returns, bank statements) &rarr; scoped to their sponsor + Req.</p>
         </Step>
         <Step n="4" title="Copy documents between a client's scenarios.">
           <p>If a client has two deals with you and some docs overlap (Personal Tax Returns is the same PDF for a hotel purchase and an MF refi), use <b>Copy from Another Scenario</b> in the Documents tab.</p>
@@ -293,13 +300,15 @@ export default function AdminGuide() {
       <Card id="fee-agreement" icon={PenLine} title="Fee Agreement — E-Signature">
         <p className="text-sm text-[#6B6558] -mt-2 mb-4">
           Every scenario needs a signed Byrd &amp; CO fee agreement before you shop the deal.
-          The signing flow is built right into the Documents tab.
+          When there are multiple guarantor sponsors, <b>each one signs their own fee agreement</b> —
+          you pick who to send to via the sponsor dropdown on the fee-agreement card.
         </p>
 
-        <Step n="1" title="Enter the broker fee and preview.">
+        <Step n="1" title="Enter the broker fee and pick the sponsor.">
           <p>Open a scenario &rarr; <b>Documents</b> tab. The <b>Broker fee &amp; e-signature</b> card sits at the very top.</p>
-          <p>Type the fee percentage (e.g. <InlineCode>1.25</InlineCode> for 1.25%) &mdash; that's the number that fills the <em>Fee: __% of the total loan amount</em> line in the agreement.</p>
-          <p>Click <b>View Draft</b> to open a PDF of the agreement pre-filled with everything the template needs: borrower name and email, entity, property address and type, loan purpose (from the loan type on the scenario), fee %, today's date, and the broker who's sending it (Wayne or Caleb — whoever is logged in).</p>
+          <p>Type the fee percentage (e.g. <InlineCode>1.25</InlineCode> for 1.25%) &mdash; the same fee applies to every sponsor's agreement.</p>
+          <p>If the scenario has multiple sponsors, use the <b>"Send to Sponsor" dropdown</b> to pick which one you're sending to. Only sponsors <em>with a linked client account</em> appear here (the ones without portal access can't be sent to — link them first on the Package tab).</p>
+          <p>Click <b>View Draft</b> to preview the agreement pre-filled with everything the template needs: borrower name and email, entity, property address, loan purpose, fee %, today's date, and the broker who's sending it (Wayne or Caleb — whoever is logged in).</p>
         </Step>
 
         <Step n="2" title="Send for signature.">

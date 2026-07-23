@@ -1,0 +1,53 @@
+{
+  "summary": "Multi-sponsor architecture regression: 11/13 backend pytest pass. Two spec-deviation failures found (auto-demote managing on PATCH, and /client/me primary-client exemption ignoring sponsor scoping). Frontend Package + Documents tabs verified visually: 3 sponsor cards with Managing/Guarantor chips, Add Sponsor works, 'Viewing docs for' filter dropdown present, Fee Agreement card shows sponsor dropdown + per-sponsor fee_agreements list with SENT/SUPERSEDED chips. Lender view returns sanitized sponsors[] (no client_user_id leak). Backward-compat scenario (legacy body.sponsor) correctly migrates to sponsors[0] with role=managing + client_user_id=scen.client_id. Fee-agreement send-to-Bob (unlinked) correctly returns 400.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "PATCH /api/admin/scenarios/{sid}",
+        "issue": "Spec says only one 'managing' sponsor per deal. When caller sends sponsors[] with two sponsors both role='managing' (e.g. promoting Bob without demoting Alice), backend does NOT auto-demote the prior managing. Current logic at server.py:2055-2064 only checks 'has_managing' (>=1) and never enforces uniqueness. Result: both remain 'managing'. Fix: after normalization, if >1 managing, keep the newly-promoted one and demote the rest to 'guarantor' (or the earliest one and warn caller)."
+      },
+      {
+        "endpoint": "GET /api/client/me",
+        "issue": "Spec: 'user sees only shared docs + docs scoped to sponsors they're linked to'. Current code at server.py:1199-1201 has `is_primary` exemption: if user is scen.client_id (primary client), they see ALL docs regardless of sponsor_id. In the tested case sample@example.com is both primary client_id AND Alice's sponsor.client_user_id, so PATCHing a doc to Bob's sponsor_id still shows it in the borrower view. This is a security/scoping bug — a docket auto-tagged to Bob (a different sponsor) leaks to Alice. Fix: drop the `is_primary` exemption OR only apply it when the user is primary client and NOT linked to any sponsor on that scenario."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Admin scenario detail",
+        "issues": [
+          "React hydration warning in console: 'In HTML, <span> cannot be a child of <option>' — appears somewhere in a <select>. Non-blocking but flag to fix (search for JSX rendering a span inside <option>)."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_multi_sponsor.py",
+    "/app/test_reports/pytest/multi_sponsor.xml"
+  ],
+  "action_items": [
+    "Fix PATCH /admin/scenarios/{sid} to enforce single managing sponsor (auto-demote prior managing when a different one is promoted).",
+    "Fix /api/client/me: remove or narrow the `is_primary` exemption so docs scoped to a sponsor the user is NOT linked to are hidden — even when the user is the primary client_id.",
+    "Investigate React hydration warning: <span> child inside <option> in admin scenario detail."
+  ],
+  "critical_code_review_comments": [
+    "server.py:2055-2064 PATCH sponsors: uniqueness of role='managing' not enforced. Multiple managing roles can coexist after PATCH. Recommend explicit demotion step.",
+    "server.py:1194-1211 /client/me: `is_primary` exemption defeats sponsor-scoping filter for the primary client. Since a scenario's primary client_id is often also linked as a sponsor, this exemption is redundant and introduces a leak path.",
+    "server.py is still 7248 lines — carry-forward from iter 8. Consider modular split.",
+    "In POST /admin/scenarios, personal-category auto-tagging heuristic uses substring matches ('PFS', 'Tax Return') on English labels. Consider a robust `is_personal` template flag on each item to avoid future breakage if labels are localized/renamed."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_multi_sponsor.py (new — 13 pytest test cases, self-cleaning)"
+  ],
+  "success_rate": {"backend": "85% (11/13)", "frontend": "100% of critical multi-sponsor UI flows verified"},
+  "test_credentials": "Admin: wayne@byrd-co.com / byrdco2026. Client: sample@example.com / sample123.",
+  "seed_data_creation": "Tests create 2 TEST_ prefixed scenarios per run (TEST_MS_3sponsors, TEST_MS_legacy) and delete both in test_99_cleanup. Also creates 1 scenario_share for lender view (deleted with parent scenario cascade). No leftover TEST_ data.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression suite at /app/backend/tests/test_multi_sponsor.py. Run: `python -m pytest backend/tests/test_multi_sponsor.py -v -o addopts=''`. Two failing tests (test_04 auto-demote, test_07 client_me primary-exemption) are legitimate spec deviations, NOT test bugs — they should pass once main agent fixes the backend logic noted in action_items. The permanent 3-sponsor demo scenario id (c4d98f0b-f8d6-4399-abde-ccad9312c953) exists for manual testing and is not touched by the pytest suite.",
+  "rca of the issue": "test_04: PATCH /admin/scenarios/{sid} normalization block loops sponsors setting has_managing=True when any role=='managing'. Never counts nor enforces uniqueness → two managing sponsors persist. test_07: /client/me filter has `if doc_sponsor and doc_sponsor not in my_ids and not is_primary: continue`. When user is primary client_id, is_primary=True and the filter is skipped entirely — sponsor scoping bypassed. Fix scoped to those two conditionals in server.py."
+}

@@ -493,7 +493,7 @@ function OverviewTab({ scen, m }) {
 
 // --------------- PACKAGE TAB (edit) ---------------
 function PackageTab({ scen, clients, patch, patchSection, setScen }) {
-  const sponsor = scen.sponsor || {};
+  const sponsors = scen.sponsors || [];
   const prop = scen.property_info || {};
   const loan = scen.loan_request || {};
   const fin = scen.financials || {};
@@ -504,7 +504,6 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
     const v = raw === "" ? null : cast(raw);
     patchFn({ [k]: v });
   };
-  const spSet = set("sponsor", patchSection("sponsor"));
   const prSet = set("property_info", patchSection("property_info"));
   const lnSet = set("loan_request", patchSection("loan_request"));
   const fnSet = set("financials", patchSection("financials"));
@@ -548,13 +547,127 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
       </section>
 
       <section className="byrd-card p-6">
-        <h3 className="font-serif text-xl font-bold mb-4">Sponsor</h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Field label="Sponsor Name"><Inp defaultValue={sponsor.name || ""} onBlur={spSet("name")} data-testid="sp-name" /></Field>
-          <Field label="Entity / Borrower"><Inp defaultValue={sponsor.entity || ""} onBlur={spSet("entity")} /></Field>
-          <Field label="FICO"><Inp type="number" defaultValue={sponsor.credit_score ?? ""} onBlur={spSet("credit_score", int)} /></Field>
-          <Field label="Liquidity ($)"><Inp type="number" defaultValue={sponsor.liquidity ?? ""} onBlur={spSet("liquidity", num)} /></Field>
-          <Field label="Net Worth ($)"><Inp type="number" defaultValue={sponsor.net_worth ?? ""} onBlur={spSet("net_worth", num)} /></Field>
+        <div className="flex items-baseline justify-between mb-4">
+          <div>
+            <h3 className="font-serif text-xl font-bold">Sponsors ({sponsors.length})</h3>
+            <p className="text-[11px] text-[#6B6558] mt-1">Anyone with ≥20% ownership typically needs to be on the loan. Link each sponsor to a client account so they get their own document portal + can sign their own fee agreement.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              const next = [...sponsors, {
+                id: (crypto?.randomUUID?.() || Math.random().toString(36).slice(2)),
+                name: "", entity: "", credit_score: null, liquidity: null, net_worth: null,
+                ownership_pct: null,
+                role: sponsors.length === 0 ? "managing" : "guarantor",
+                is_guarantor: true,
+                client_user_id: null,
+              }];
+              patch({ sponsors: next });
+            }}
+            className="byrd-btn byrd-btn-dark h-9 px-3 text-xs"
+            data-testid="add-sponsor-btn"
+          >
+            + Add Sponsor
+          </button>
+        </div>
+        {sponsors.length === 0 && (
+          <div className="text-sm text-[#6B6558] italic border border-dashed border-[#E4DFD1] rounded-md p-4 text-center">
+            No sponsors yet. Click <b>Add Sponsor</b> to add the first one.
+          </div>
+        )}
+        <div className="space-y-4">
+          {sponsors.map((sp, idx) => {
+            const updateSp = (patchObj) => {
+              const next = [...sponsors];
+              next[idx] = { ...next[idx], ...patchObj };
+              // If role changes to managing, demote any other managing to guarantor
+              if (patchObj.role === "managing") {
+                next.forEach((s, i) => { if (i !== idx && s.role === "managing") next[i] = { ...s, role: "guarantor" }; });
+              }
+              // Auto-flag guarantor if ownership_pct changes
+              if ("ownership_pct" in patchObj) {
+                const op = patchObj.ownership_pct;
+                if (op != null && op >= 20) next[idx].is_guarantor = true;
+              }
+              patch({ sponsors: next });
+            };
+            const removeSp = () => {
+              if (!window.confirm(`Remove ${sp.name || "this sponsor"}?`)) return;
+              const next = sponsors.filter((_, i) => i !== idx);
+              patch({ sponsors: next });
+            };
+            return (
+              <div key={sp.id || idx} className="border border-[#E4DFD1] rounded-md p-4 bg-white" data-testid={`sponsor-card-${idx}`}>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">Sponsor #{idx + 1}</span>
+                    {sp.role === "managing" && <span className="byrd-chip byrd-chip-gold">Managing</span>}
+                    {sp.is_guarantor && sp.role !== "managing" && <span className="byrd-chip">Guarantor</span>}
+                    {sp.role === "passive" && <span className="byrd-chip">Passive</span>}
+                  </div>
+                  <button type="button" onClick={removeSp} className="text-[11px] text-[#8A1F1A] hover:underline" data-testid={`sponsor-remove-${idx}`}>Remove</button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <Field label="Sponsor Name">
+                    <Inp defaultValue={sp.name || ""} onBlur={(e) => updateSp({ name: e.target.value })} data-testid={`sp-name-${idx}`} />
+                  </Field>
+                  <Field label="Entity / Borrower">
+                    <Inp defaultValue={sp.entity || ""} onBlur={(e) => updateSp({ entity: e.target.value })} />
+                  </Field>
+                  <Field label="Ownership %">
+                    <Inp
+                      type="number"
+                      step="0.1"
+                      defaultValue={sp.ownership_pct ?? ""}
+                      onBlur={(e) => {
+                        const v = e.target.value === "" ? null : Number(e.target.value);
+                        updateSp({ ownership_pct: v });
+                      }}
+                      data-testid={`sp-ownership-${idx}`}
+                    />
+                  </Field>
+                  <Field label="FICO">
+                    <Inp type="number" defaultValue={sp.credit_score ?? ""} onBlur={(e) => updateSp({ credit_score: e.target.value === "" ? null : parseInt(e.target.value) })} />
+                  </Field>
+                  <Field label="Liquidity ($)">
+                    <Inp type="number" defaultValue={sp.liquidity ?? ""} onBlur={(e) => updateSp({ liquidity: e.target.value === "" ? null : Number(e.target.value) })} />
+                  </Field>
+                  <Field label="Net Worth ($)">
+                    <Inp type="number" defaultValue={sp.net_worth ?? ""} onBlur={(e) => updateSp({ net_worth: e.target.value === "" ? null : Number(e.target.value) })} />
+                  </Field>
+                  <Field label="Role">
+                    <Sel value={sp.role || "guarantor"} onChange={(e) => updateSp({ role: e.target.value })} data-testid={`sp-role-${idx}`}>
+                      <option value="managing">Managing Sponsor</option>
+                      <option value="guarantor">Guarantor</option>
+                      <option value="passive">Passive</option>
+                    </Sel>
+                  </Field>
+                  <Field label="Guarantor?">
+                    <label className="inline-flex items-center gap-2 h-10 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={!!sp.is_guarantor}
+                        onChange={(e) => updateSp({ is_guarantor: e.target.checked })}
+                        data-testid={`sp-guarantor-${idx}`}
+                      />
+                      <span className="text-[#2A2A2A]">{sp.is_guarantor ? "Signs the note" : "Not on the loan"}</span>
+                    </label>
+                  </Field>
+                  <Field label="Link to Client Account">
+                    <Sel
+                      value={sp.client_user_id || ""}
+                      onChange={(e) => updateSp({ client_user_id: e.target.value || null })}
+                      data-testid={`sp-client-link-${idx}`}
+                    >
+                      <option value="">— No portal access (you upload for them)</option>
+                      {clients.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.email}</option>)}
+                    </Sel>
+                  </Field>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -673,6 +786,13 @@ function FeeAgreementCard({ scen, feeDoc, onReload }) {
   const [fee, setFee] = useState(scen.broker_fee_pct != null ? String(scen.broker_fee_pct) : "");
   const [feeStatus, setFeeStatus] = useState(null); // {status, signed_at, ...} — from /fee-agreement endpoint
   const [busy, setBusy] = useState(false);
+  // Sponsor selection for multi-sponsor scenarios
+  const sponsors = scen.sponsors || [];
+  const signableSponsors = sponsors.filter((s) => s.is_guarantor && s.client_user_id);
+  const managingSponsor = sponsors.find((s) => s.role === "managing");
+  const defaultSponsorId = managingSponsor?.id || (signableSponsors[0]?.id) || "";
+  const [selectedSponsorId, setSelectedSponsorId] = useState(defaultSponsorId);
+  useEffect(() => { setSelectedSponsorId(defaultSponsorId); }, [defaultSponsorId]);
 
   const loadStatus = () => {
     api.get(`/admin/scenarios/${scen.id}/fee-agreement`)
@@ -709,8 +829,11 @@ function FeeAgreementCard({ scen, feeDoc, onReload }) {
     }
     setBusy(true);
     try {
-      await api.post(`/admin/scenarios/${scen.id}/fee-agreement/send`, { broker_fee_pct: parseFloat(fee) });
-      toast.success("Sent to borrower for signature");
+      await api.post(`/admin/scenarios/${scen.id}/fee-agreement/send`, {
+        broker_fee_pct: parseFloat(fee),
+        sponsor_id: selectedSponsorId || null,
+      });
+      toast.success(`Sent for signature${selectedSponsorId ? " to selected sponsor" : ""}`);
       loadStatus();
       onReload && onReload();
     } catch (e) {
@@ -784,6 +907,23 @@ function FeeAgreementCard({ scen, feeDoc, onReload }) {
           <div className="text-[11px] text-[#6B6558] mt-1">Of total loan amount, paid at closing.</div>
         </div>
         <div className="flex items-end gap-2 flex-wrap">
+          {signableSponsors.length > 0 && !isSigned && (
+            <div>
+              <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Send to Sponsor</label>
+              <select
+                value={selectedSponsorId}
+                onChange={(e) => setSelectedSponsorId(e.target.value)}
+                data-testid="fee-sponsor-select"
+                className="mt-1 h-11 min-w-[220px] px-3 rounded-md border border-[#E4DFD1] bg-white text-sm"
+              >
+                {signableSponsors.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name || "Sponsor"}{s.ownership_pct != null ? ` (${s.ownership_pct}%)` : ""}{s.role === "managing" ? " · Managing" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           {!isSigned && (
             <>
               <button
@@ -839,9 +979,34 @@ function FeeAgreementCard({ scen, feeDoc, onReload }) {
         </div>
       </div>
 
-      {!scen.client_id && (
+      {!scen.client_id && (scen.sponsors || []).length === 0 && (
         <div className="mt-3 text-[12px] text-[#8A1F1A] inline-flex items-center gap-1">
           <AlertCircle size={12} /> Link a client to this scenario before sending the fee agreement.
+        </div>
+      )}
+      {(scen.sponsors || []).length > 0 && signableSponsors.length === 0 && (
+        <div className="mt-3 text-[12px] text-[#8A1F1A] inline-flex items-center gap-1">
+          <AlertCircle size={12} /> No sponsor has a linked client account yet. Add a client link on the Overview tab so they can sign.
+        </div>
+      )}
+      {(scen.fee_agreements || []).length > 0 && (
+        <div className="mt-4 border-t border-[#E4DFD1] pt-3">
+          <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] mb-2">// Fee Agreements ({scen.fee_agreements.length})</div>
+          <div className="space-y-1">
+            {scen.fee_agreements.map((fa) => {
+              const sp = (scen.sponsors || []).find((s) => s.id === fa.sponsor_id);
+              return (
+                <div key={fa.id} className="text-xs flex items-center justify-between border border-[#E4DFD1] rounded-md px-3 py-2 bg-white">
+                  <div>
+                    <b>{sp?.name || fa.borrower_name_at_send || "Signer"}</b>
+                    <span className="text-[#6B6558] ml-2">{fa.broker_fee_pct}%</span>
+                    <span className={`ml-2 byrd-chip text-[10px] ${fa.status === "signed" ? "byrd-chip-green" : fa.status === "sent" ? "byrd-chip-gold" : ""}`}>{fa.status}</span>
+                  </div>
+                  <div className="text-[10px] text-[#6B6558]">{fa.signed_at ? new Date(fa.signed_at).toLocaleDateString() : new Date(fa.created_at).toLocaleDateString()}</div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -875,13 +1040,24 @@ function FeeStatusBadge({ signed, sent, feeStatus, feeDoc }) {
 
 function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility, onCopyDocs, onReload }) {
   const allDocs = scen.docs || scen.client_docs || [];
+  const sponsors = scen.sponsors || [];
   // Split the pinned fee-agreement line out — it renders in its own card at the top
   const feeAgreementDoc = allDocs.find((d) => d.label === "Signed Fee Agreement");
-  const docs = allDocs.filter((d) => d.label !== "Signed Fee Agreement");
+  const nonFeeDocs = allDocs.filter((d) => d.label !== "Signed Fee Agreement");
   const [copyOpen, setCopyOpen] = useState(false);
+  const [sponsorFilter, setSponsorFilter] = useState("all");
+  // Apply sponsor filter
+  const docs = nonFeeDocs.filter((d) => {
+    if (sponsorFilter === "all") return true;
+    if (sponsorFilter === "shared") return !d.sponsor_id;
+    return d.sponsor_id === sponsorFilter;
+  });
   const uploaded = docs.filter((d) => d.file_id).length;
   const reviewed = docs.filter((d) => d.status === "reviewed").length;
   const pct = docs.length ? Math.round((reviewed / docs.length) * 100) : 0;
+
+  const sponsorLookup = {};
+  sponsors.forEach((s) => { sponsorLookup[s.id] = s; });
 
   return (
     <div className="space-y-4">
@@ -897,18 +1073,34 @@ function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility,
             <div className="h-full bg-[#C89434] transition-[width] duration-500" style={{ width: `${pct}%` }} />
           </div>
         </div>
-        {scen.client_id && (
-          <button
-            onClick={() => setCopyOpen(true)}
-            className="byrd-btn byrd-btn-outline"
-            data-testid="copy-from-scenario-btn"
-          >
-            <Copy size={14} /> Copy from Another Scenario
-          </button>
-        )}
+        <div className="flex items-center gap-2 flex-wrap">
+          {sponsors.length > 0 && (
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] font-mono uppercase tracking-widest text-[#6B6558]">Viewing docs for</label>
+              <Sel value={sponsorFilter} onChange={(e) => setSponsorFilter(e.target.value)} data-testid="docs-sponsor-filter" className="h-9 w-[240px]">
+                <option value="all">All sponsors + shared</option>
+                <option value="shared">Property &amp; business only</option>
+                {sponsors.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name || "Sponsor"} ({s.ownership_pct != null ? `${s.ownership_pct}%` : "—"})
+                  </option>
+                ))}
+              </Sel>
+            </div>
+          )}
+          {scen.client_id && (
+            <button
+              onClick={() => setCopyOpen(true)}
+              className="byrd-btn byrd-btn-outline"
+              data-testid="copy-from-scenario-btn"
+            >
+              <Copy size={14} /> Copy from Another Scenario
+            </button>
+          )}
+        </div>
       </div>
 
-      <AddDocForm onAdd={onAddDoc} />
+      <AddDocForm onAdd={onAddDoc} sponsors={sponsors} defaultSponsorId={sponsorFilter !== "all" && sponsorFilter !== "shared" ? sponsorFilter : ""} />
 
       <div className="byrd-card overflow-hidden">
         <div className="hidden md:grid grid-cols-[2fr_.9fr_1fr_1.4fr_1.2fr] border-b border-[#E4DFD1] bg-[#FBF8F1]">
@@ -926,6 +1118,8 @@ function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility,
             key={d.id}
             doc={d}
             scenarioId={scen.id}
+            sponsors={sponsors}
+            sponsorLookup={sponsorLookup}
             onUpdate={onUpdateDoc}
             onRemove={() => onRemoveDoc(d.id, d.label)}
             onToggleVisibility={onToggleVisibility}
@@ -945,25 +1139,29 @@ function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility,
   );
 }
 
-function AddDocForm({ onAdd }) {
+function AddDocForm({ onAdd, sponsors = [], defaultSponsorId = "" }) {
   const [label, setLabel] = useState("");
   const [category, setCategory] = useState("Other");
   const [required, setRequired] = useState(true);
+  const [sponsorId, setSponsorId] = useState(defaultSponsorId);
   const [busy, setBusy] = useState(false);
+
+  // Follow filter changes
+  useEffect(() => { setSponsorId(defaultSponsorId || ""); }, [defaultSponsorId]);
 
   const submit = async (e) => {
     e.preventDefault();
     if (!label.trim()) { toast.error("Give it a name"); return; }
     setBusy(true);
     try {
-      await onAdd({ label: label.trim(), category, required });
+      await onAdd({ label: label.trim(), category, required, sponsor_id: sponsorId || null });
       setLabel(""); setCategory("Other"); setRequired(true);
     } finally { setBusy(false); }
   };
 
   return (
-    <form onSubmit={submit} className="byrd-card p-4 flex flex-col md:flex-row gap-3 md:items-end" data-testid="add-doc-form">
-      <div className="flex-1">
+    <form onSubmit={submit} className="byrd-card p-4 flex flex-col md:flex-row gap-3 md:items-end flex-wrap" data-testid="add-doc-form">
+      <div className="flex-1 min-w-[200px]">
         <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Document label</label>
         <input value={label} onChange={(e) => setLabel(e.target.value)}
           data-testid="add-doc-label"
@@ -983,6 +1181,17 @@ function AddDocForm({ onAdd }) {
           <option>Other</option>
         </select>
       </div>
+      {sponsors.length > 0 && (
+        <div>
+          <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Sponsor</label>
+          <select value={sponsorId} onChange={(e) => setSponsorId(e.target.value)}
+            data-testid="add-doc-sponsor"
+            className="mt-1 w-full h-10 px-3 rounded-md border border-[#E4DFD1] bg-white text-sm">
+            <option value="">Shared (property/business)</option>
+            {sponsors.map((s) => <option key={s.id} value={s.id}>{s.name || "Sponsor"}</option>)}
+          </select>
+        </div>
+      )}
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} />
         Required
@@ -1001,7 +1210,7 @@ const DOC_STATUS_OPTIONS = [
   { v: "rejected", label: "Rejected" },
 ];
 
-function ScenarioDocRow({ doc, scenarioId, onUpdate, onRemove, onToggleVisibility, onReload }) {
+function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, onUpdate, onRemove, onToggleVisibility, onReload }) {
   const [notes, setNotes] = useState(doc.notes || "");
   const [status, setStatus] = useState(doc.status);
   const [dirty, setDirty] = useState(false);
@@ -1053,7 +1262,26 @@ function ScenarioDocRow({ doc, scenarioId, onUpdate, onRemove, onToggleVisibilit
     <div className="grid grid-cols-1 md:grid-cols-[2fr_.9fr_1fr_1.4fr_1.2fr] border-b border-[#E4DFD1] last:border-b-0 items-center" data-testid={`scen-doc-${doc.id}`}>
       <div className="px-4 py-3">
         <div className="font-semibold">{doc.label}</div>
-        {doc.required && <div className="text-[10px] font-mono uppercase text-[#C89434] tracking-widest mt-0.5">Required</div>}
+        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+          {doc.required && <div className="text-[10px] font-mono uppercase text-[#C89434] tracking-widest">Required</div>}
+          {sponsors.length > 0 && (
+            doc.sponsor_id && sponsorLookup[doc.sponsor_id]
+              ? <span className="byrd-chip byrd-chip-gold text-[10px]" data-testid={`doc-sponsor-chip-${doc.id}`}>👤 {sponsorLookup[doc.sponsor_id].name || "Sponsor"}</span>
+              : <span className="byrd-chip text-[10px]">Shared</span>
+          )}
+          {sponsors.length > 0 && !doc.system && (
+            <select
+              value={doc.sponsor_id || ""}
+              onChange={(e) => onUpdate(doc.id, { sponsor_id: e.target.value || "" })}
+              className="text-[10px] h-6 px-1 rounded border border-[#E4DFD1] bg-white ml-1"
+              data-testid={`doc-sponsor-select-${doc.id}`}
+              title="Change scope"
+            >
+              <option value="">Shared</option>
+              {sponsors.map((s) => <option key={s.id} value={s.id}>{s.name || "Sponsor"}</option>)}
+            </select>
+          )}
+        </div>
       </div>
       <div className="px-4 py-3 text-sm text-[#6B6558]">{doc.category}</div>
       <div className="px-4 py-3">

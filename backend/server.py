@@ -297,12 +297,16 @@ class DocCreate(BaseModel):
     label: str
     category: Optional[str] = "Other"
     required: bool = True
+    sponsor_id: Optional[str] = None   # null = shared (property/business); set = scoped to sponsor
 
 
 class DocUpdate(BaseModel):
     label: Optional[str] = None
     status: Optional[Literal["pending", "uploaded", "reviewed", "rejected"]] = None
     notes: Optional[str] = None
+    sponsor_id: Optional[str] = None   # pass empty string "" to clear to null
+    category: Optional[str] = None
+    required: Optional[bool] = None
 
 
 class DocUploadInput(BaseModel):
@@ -1145,12 +1149,26 @@ async def password_reset_confirm(token: str, body: PasswordResetConfirm):
 # ================ Client portal ================
 @api.get("/client/me")
 async def client_me(user=Depends(require_client)):
-    """Borrower view — docs grouped by scenario. Each scenario gets its own checklist."""
-    scenarios = await db.scenarios.find(
-        {"client_id": user["id"]},
-        {"_id": 0, "id": 1, "name": 1, "status": 1, "loan_request": 1, "property_info": 1, "created_at": 1},
-    ).sort("created_at", 1).to_list(200)
-    scen_ids = [s["id"] for s in scenarios]
+    """Borrower view — docs grouped by scenario. A user can see a scenario if:
+      • they are the primary client (scen.client_id == user.id) — legacy behavior, OR
+      • they are linked to one of the scenario's sponsors (scen.sponsors[].client_user_id == user.id)
+    Within each scenario, they only see: shared docs (sponsor_id null) + docs scoped to their linked sponsor."""
+    # Find all scenarios where the user is either primary client OR a linked sponsor
+    scen_cursor = db.scenarios.find(
+        {"$or": [
+            {"client_id": user["id"]},
+            {"sponsors.client_user_id": user["id"]},
+        ]},
+        {"_id": 0},
+    ).sort("created_at", 1)
+    scenarios_raw = await scen_cursor.to_list(200)
+    # For each scenario, figure out which sponsor(s) this user represents
+    my_sponsor_ids_by_scen: Dict[str, set] = {}
+    for s in scenarios_raw:
+        sponsors = _ensure_sponsors_array(s)
+        my_ids = {sp["id"] for sp in sponsors if sp.get("client_user_id") == user["id"]}
+        my_sponsor_ids_by_scen[s["id"]] = my_ids
+    scen_ids = [s["id"] for s in scenarios_raw]
     docs_by_scen: Dict[str, list] = {sid: [] for sid in scen_ids}
     if scen_ids:
         docs = await db.client_docs.find(
@@ -1161,22 +1179,38 @@ async def client_me(user=Depends(require_client)):
         if file_ids:
             async for f in db.client_files.find({"id": {"$in": file_ids}}, {"_id": 0, "data_b64": 0}):
                 files_by_id[f["id"]] = f
-        # Fetch pending fee agreements so we can surface a Sign Now action on the portal line
-        pending_by_scen: Dict[str, str] = {}
+        # Fetch pending fee agreements FOR THIS USER (matched by sponsor_id or legacy scenario-level)
+        pending_by_key: Dict[str, str] = {}
         async for fa in db.fee_agreements.find(
             {"scenario_id": {"$in": scen_ids}, "status": "sent"},
-            {"_id": 0, "scenario_id": 1, "token": 1},
+            {"_id": 0, "scenario_id": 1, "token": 1, "sponsor_id": 1},
         ):
-            pending_by_scen[fa["scenario_id"]] = fa["token"]
+            # Only surface if this fee agreement is for a sponsor this user represents
+            # (or if no sponsor_id set — legacy scenario-level agreement for primary client)
+            fa_sponsor = fa.get("sponsor_id")
+            my_ids = my_sponsor_ids_by_scen.get(fa["scenario_id"], set())
+            if (fa_sponsor is None) or (fa_sponsor in my_ids):
+                pending_by_key[(fa["scenario_id"], fa_sponsor)] = fa["token"]
         for d in docs:
+            # Filter: skip docs scoped to a sponsor that isn't this user's
+            sid = d["scenario_id"]
+            doc_sponsor = d.get("sponsor_id")
+            my_ids = my_sponsor_ids_by_scen.get(sid, set())
+            is_primary = any(sc.get("client_id") == user["id"] for sc in scenarios_raw if sc["id"] == sid)
+            if doc_sponsor and doc_sponsor not in my_ids and not is_primary:
+                # Scoped to another sponsor — hide from this user
+                continue
             if d.get("file_id") and d["file_id"] in files_by_id:
                 d["file"] = files_by_id[d["file_id"]]
-            # Expose the signing token ONLY on the borrower's own pinned fee-agreement line
-            if d.get("label") == FEE_AGREEMENT_DOC_LABEL and d["scenario_id"] in pending_by_scen:
-                d["pending_sign_token"] = pending_by_scen[d["scenario_id"]]
-            docs_by_scen.setdefault(d["scenario_id"], []).append(d)
+            # Expose the signing token ONLY on this user's own pinned fee-agreement line
+            if d.get("label") == FEE_AGREEMENT_DOC_LABEL:
+                # Prefer sponsor-scoped agreement if this doc is scoped to a sponsor
+                tok = pending_by_key.get((sid, doc_sponsor)) or pending_by_key.get((sid, None))
+                if tok:
+                    d["pending_sign_token"] = tok
+            docs_by_scen.setdefault(sid, []).append(d)
     out_scenarios = []
-    for s in scenarios:
+    for s in scenarios_raw:
         lr = s.get("loan_request") or {}
         prop = s.get("property_info") or {}
         location = ""
@@ -1289,11 +1323,26 @@ BYRD_LINE = colors.HexColor("#E4DFD1")
 
 # ---------- Models ----------
 class SponsorInfo(BaseModel):
+    """Legacy single-sponsor shape — kept for backward compatibility in API bodies.
+    New code should use the `Sponsor` model + `sponsors[]` array on the scenario."""
     name: Optional[str] = ""
     entity: Optional[str] = ""
     credit_score: Optional[int] = None
     liquidity: Optional[float] = None
     net_worth: Optional[float] = None
+
+
+class Sponsor(BaseModel):
+    id: Optional[str] = None                    # server-assigned uuid on save
+    name: str = ""
+    entity: Optional[str] = ""
+    credit_score: Optional[int] = None
+    liquidity: Optional[float] = None
+    net_worth: Optional[float] = None
+    ownership_pct: Optional[float] = None       # 0-100; drives is_guarantor auto-flag
+    role: Literal["managing", "guarantor", "passive"] = "guarantor"
+    is_guarantor: bool = True                   # derived from ownership_pct >= 20 by default; overridable
+    client_user_id: Optional[str] = None        # linked client account (grants portal access to their docs)
 
 
 class PropertyInfo(BaseModel):
@@ -1349,7 +1398,8 @@ class AttachedDoc(BaseModel):
 class ScenarioCreate(BaseModel):
     name: str
     client_id: Optional[str] = None
-    sponsor: SponsorInfo = Field(default_factory=SponsorInfo)
+    sponsor: Optional[SponsorInfo] = None       # legacy single-sponsor (still accepted, auto-migrated)
+    sponsors: List[Sponsor] = Field(default_factory=list)
     property_info: PropertyInfo = Field(default_factory=PropertyInfo)
     loan_request: LoanRequest = Field(default_factory=LoanRequest)
     financials: Financials = Field(default_factory=Financials)
@@ -1358,7 +1408,7 @@ class ScenarioCreate(BaseModel):
     attached_docs: List[AttachedDoc] = Field(default_factory=list)
     notes: Optional[str] = ""
     business_plan: Optional[str] = ""
-    doc_template: Optional[str] = None  # Key from DOC_TEMPLATES; defaults to "purchase"
+    doc_template: Optional[str] = None
 
 
 class ScenarioDocCopy(BaseModel):
@@ -1370,7 +1420,8 @@ class ScenarioUpdate(BaseModel):
     name: Optional[str] = None
     status: Optional[Literal["draft", "shopping", "term_sheet", "closed", "lost"]] = None
     client_id: Optional[str] = None
-    sponsor: Optional[SponsorInfo] = None
+    sponsor: Optional[SponsorInfo] = None                # legacy
+    sponsors: Optional[List[Sponsor]] = None
     property_info: Optional[PropertyInfo] = None
     loan_request: Optional[LoanRequest] = None
     financials: Optional[Financials] = None
@@ -1823,6 +1874,53 @@ def _clean_scenario(doc: dict) -> dict:
     return doc
 
 
+def _ensure_sponsors_array(scen: dict) -> list:
+    """Backward-compat: if scenario has legacy `sponsor` (single obj) but no `sponsors[]`,
+    convert on-the-fly. Assigns an id to each sponsor. Also auto-flags is_guarantor for
+    ownership >= 20% when explicit flag missing."""
+    sponsors = scen.get("sponsors")
+    if not isinstance(sponsors, list) or not sponsors:
+        legacy = scen.get("sponsor") or {}
+        if any(v not in (None, "", 0) for v in legacy.values()):
+            sponsors = [{
+                "id": str(uuid.uuid4()),
+                "name": legacy.get("name") or "",
+                "entity": legacy.get("entity") or "",
+                "credit_score": legacy.get("credit_score"),
+                "liquidity": legacy.get("liquidity"),
+                "net_worth": legacy.get("net_worth"),
+                "ownership_pct": 100,
+                "role": "managing",
+                "is_guarantor": True,
+                "client_user_id": scen.get("client_id"),
+            }]
+        else:
+            sponsors = []
+    # Fill missing ids + auto-flag guarantors
+    for s in sponsors:
+        if not s.get("id"):
+            s["id"] = str(uuid.uuid4())
+        if s.get("is_guarantor") is None:
+            op = s.get("ownership_pct")
+            s["is_guarantor"] = bool(op is not None and op >= 20)
+        s.setdefault("role", "guarantor")
+    return sponsors
+
+
+async def _hydrate_sponsors(sponsors: list) -> list:
+    """Attach {client:{name,email}} to each sponsor with a client_user_id."""
+    out = []
+    for s in sponsors:
+        s2 = dict(s)
+        if s2.get("client_user_id"):
+            u = await db.users.find_one({"id": s2["client_user_id"]},
+                                       {"_id": 0, "name": 1, "email": 1, "id": 1})
+            if u:
+                s2["client"] = u
+        out.append(s2)
+    return out
+
+
 @api.get("/admin/scenarios/doc-templates")
 async def list_doc_templates(admin=Depends(require_admin)):
     """Preset checklists a broker can pick when starting a new scenario."""
@@ -1839,6 +1937,34 @@ async def create_scenario(body: ScenarioCreate, admin=Depends(require_admin)):
         if not client:
             raise HTTPException(status_code=400, detail="Client not found")
     payload = body.model_dump()
+    # Merge legacy `sponsor` into `sponsors[]` if provided that way
+    legacy = payload.pop("sponsor", None)
+    sponsors = payload.pop("sponsors", []) or []
+    if legacy and any(v not in (None, "", 0) for v in (legacy or {}).values()) and not sponsors:
+        sponsors = [{
+            "id": str(uuid.uuid4()),
+            "name": legacy.get("name") or "",
+            "entity": legacy.get("entity") or "",
+            "credit_score": legacy.get("credit_score"),
+            "liquidity": legacy.get("liquidity"),
+            "net_worth": legacy.get("net_worth"),
+            "ownership_pct": 100,
+            "role": "managing",
+            "is_guarantor": True,
+            "client_user_id": body.client_id,
+        }]
+    # Ensure every sponsor has an id + auto-flag guarantors + at least one "managing"
+    has_managing = False
+    for s in sponsors:
+        if not s.get("id"):
+            s["id"] = str(uuid.uuid4())
+        if s.get("is_guarantor") is None:
+            op = s.get("ownership_pct")
+            s["is_guarantor"] = bool(op is not None and op >= 20)
+        if s.get("role") == "managing":
+            has_managing = True
+    if sponsors and not has_managing:
+        sponsors[0]["role"] = "managing"
     template_key = payload.pop("doc_template", None) or DEFAULT_SCENARIO_TEMPLATE_KEY
     if template_key not in DOC_TEMPLATES:
         template_key = DEFAULT_SCENARIO_TEMPLATE_KEY
@@ -1849,20 +1975,28 @@ async def create_scenario(body: ScenarioCreate, admin=Depends(require_admin)):
         "broker_id": admin["id"],
         "status": "draft",
         **payload,
+        "sponsors": sponsors,
         "doc_template": template_key,
         "created_at": now,
         "updated_at": now,
     }
     await db.scenarios.insert_one(doc)
     # Seed scenario doc checklist from the chosen template
+    # Personal-category docs auto-scope to the Managing sponsor. Others = shared (sponsor_id=None).
+    managing = next((s for s in sponsors if s.get("role") == "managing"), None)
+    managing_id = managing["id"] if managing else None
     template_items = DOC_TEMPLATES[template_key]["items"]
+    PERSONAL_CATEGORIES = {"Personal", "Personal Financial"}
     for i, item in enumerate(template_items):
+        cat = item.get("category", "Other")
+        is_personal = cat in PERSONAL_CATEGORIES or "PFS" in item.get("label", "") or "Tax Return" in item.get("label", "")
         await db.client_docs.insert_one({
             "id": str(uuid.uuid4()),
             "scenario_id": sid,
-            "client_id": body.client_id,  # denormalized so the borrower can query their own docs
+            "client_id": body.client_id,
+            "sponsor_id": managing_id if is_personal else None,
             "label": item.get("label", "Document"),
-            "category": item.get("category", "Other"),
+            "category": cat,
             "required": item.get("required", True),
             "status": "pending",
             "notes": "",
@@ -1895,16 +2029,20 @@ async def get_scenario(sid: str, admin=Depends(require_admin)):
     if d.get("client_id"):
         client = await db.users.find_one({"id": d["client_id"]}, {"_id": 0, "password_hash": 0})
         d["client"] = client
-    # Docs now live on the scenario itself
+    # Ensure sponsors[] exists (auto-migrate from legacy sponsor)
+    sponsors = _ensure_sponsors_array(d)
+    d["sponsors"] = await _hydrate_sponsors(sponsors)
     docs = await db.client_docs.find({"scenario_id": sid}, {"_id": 0}).sort("order", 1).to_list(500)
     for cd in docs:
         if cd.get("file_id"):
             f = await db.client_files.find_one({"id": cd["file_id"]}, {"_id": 0, "data_b64": 0})
             cd["file"] = f
     d["docs"] = docs
-    # Backward-compat alias used by older callers/AI code paths
     d["client_docs"] = docs
     d["shares"] = await db.scenario_shares.find({"scenario_id": sid}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    # Fee agreements per sponsor
+    fas = await db.fee_agreements.find({"scenario_id": sid}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    d["fee_agreements"] = fas
     return d
 
 
@@ -1913,6 +2051,20 @@ async def update_scenario(sid: str, body: ScenarioUpdate, admin=Depends(require_
     update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if not update:
         raise HTTPException(status_code=400, detail="Nothing to update")
+    # If caller supplied sponsors[] — normalize (ensure ids, at least one 'managing')
+    if "sponsors" in update:
+        sponsors = update["sponsors"] or []
+        has_managing = False
+        for s in sponsors:
+            if not s.get("id"):
+                s["id"] = str(uuid.uuid4())
+            if s.get("role") == "managing":
+                has_managing = True
+        if sponsors and not has_managing:
+            sponsors[0]["role"] = "managing"
+        update["sponsors"] = sponsors
+        # Drop legacy sponsor if we're moving to array shape
+        update["sponsor"] = None
     update["updated_at"] = now_iso()
     res = await db.scenarios.update_one({"id": sid}, {"$set": update})
     if res.matched_count == 0:
@@ -1951,6 +2103,7 @@ async def scenario_add_doc(sid: str, body: DocCreate, admin=Depends(require_admi
         "id": str(uuid.uuid4()),
         "scenario_id": sid,
         "client_id": scen.get("client_id"),
+        "sponsor_id": body.sponsor_id or None,
         "label": body.label,
         "category": body.category or "Other",
         "required": body.required,
@@ -1971,6 +2124,9 @@ async def scenario_update_doc(sid: str, doc_id: str, body: DocUpdate, admin=Depe
     update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if not update:
         raise HTTPException(status_code=400, detail="Nothing to update")
+    # Empty-string sponsor_id => clear to None
+    if update.get("sponsor_id") == "":
+        update["sponsor_id"] = None
     update["updated_at"] = now_iso()
     res = await db.client_docs.update_one({"id": doc_id, "scenario_id": sid}, {"$set": update})
     if res.matched_count == 0:
@@ -2505,10 +2661,16 @@ def _fee_agreement_signed_email(client_name: str, sender_first: str, scen_name: 
     return subject, html, text
 
 
-async def _ensure_fee_agreement_doc_line(scenario_id: str, client_id: Optional[str]) -> str:
-    """Get or create the pinned 'Signed Fee Agreement' doc line at the top of the checklist.
-    Returns its doc_id."""
-    existing = await db.client_docs.find_one({"scenario_id": scenario_id, "label": FEE_AGREEMENT_DOC_LABEL}, {"_id": 0})
+async def _ensure_fee_agreement_doc_line(scenario_id: str, client_id: Optional[str],
+                                          sponsor_id: Optional[str] = None) -> str:
+    """Get or create a pinned 'Signed Fee Agreement' doc line per SPONSOR (or scenario-level
+    when no sponsor is passed). Returns its doc_id."""
+    q: dict = {"scenario_id": scenario_id, "label": FEE_AGREEMENT_DOC_LABEL}
+    if sponsor_id:
+        q["sponsor_id"] = sponsor_id
+    else:
+        q["sponsor_id"] = None
+    existing = await db.client_docs.find_one(q, {"_id": 0})
     if existing:
         return existing["id"]
     now = now_iso()
@@ -2517,14 +2679,15 @@ async def _ensure_fee_agreement_doc_line(scenario_id: str, client_id: Optional[s
         "id": doc_id,
         "scenario_id": scenario_id,
         "client_id": client_id,
+        "sponsor_id": sponsor_id,
         "label": FEE_AGREEMENT_DOC_LABEL,
         "category": "Fee Agreement",
         "required": True,
         "status": "pending",
-        "notes": "Signed automatically once the borrower and Byrd & CO countersign the fee agreement.",
+        "notes": "Signed automatically once the sponsor and Byrd & CO countersign the fee agreement.",
         "file_id": None,
         "order": -1000,  # pinned to the top
-        "lender_visibility": "hidden",  # this is a Byrd/borrower doc, never shown to lenders
+        "lender_visibility": "hidden",
         "created_at": now,
         "updated_at": now,
         "system": True,
@@ -2555,26 +2718,48 @@ async def scenario_fee_agreement_preview(sid: str, admin=Depends(require_admin))
 
 
 class FeeAgreementSend(BaseModel):
-    broker_fee_pct: Optional[float] = None  # If provided, saves onto the scenario first
+    broker_fee_pct: Optional[float] = None
+    sponsor_id: Optional[str] = None   # NEW: which sponsor is signing. Required if scenario has sponsors[]
 
 
 @api.post("/admin/scenarios/{sid}/fee-agreement/send")
 async def scenario_fee_agreement_send(sid: str, body: FeeAgreementSend, background: BackgroundTasks, admin=Depends(require_admin)):
-    """Send the fee agreement to the borrower for e-signature.
-    Creates (or refreshes) a pinned 'Signed Fee Agreement' doc line and a signing session token."""
+    """Send the fee agreement to a specific sponsor for e-signature. If the scenario has sponsors[],
+    the caller must pass sponsor_id. Falls back to primary client for legacy scenarios."""
     scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
     if not scen:
         raise HTTPException(status_code=404, detail="Scenario not found")
-    if not scen.get("client_id"):
-        raise HTTPException(status_code=400, detail="Link a client to this scenario first")
-    client = await db.users.find_one({"id": scen["client_id"]}, {"_id": 0, "password_hash": 0})
+    # Resolve who's signing: sponsor lookup > primary client
+    signer_user_id: Optional[str] = None
+    signer_sponsor_id: Optional[str] = body.sponsor_id
+    sponsors = _ensure_sponsors_array(scen)
+    if body.sponsor_id:
+        sp = next((s for s in sponsors if s["id"] == body.sponsor_id), None)
+        if not sp:
+            raise HTTPException(status_code=404, detail="Sponsor not found on this scenario")
+        signer_user_id = sp.get("client_user_id")
+        if not signer_user_id:
+            raise HTTPException(status_code=400, detail="This sponsor is not linked to a client account — link them first so they can sign.")
+    elif sponsors:
+        # No explicit sponsor_id passed; if there's a managing sponsor with a client, use them
+        managing = next((s for s in sponsors if s.get("role") == "managing" and s.get("client_user_id")), None)
+        if managing:
+            signer_user_id = managing["client_user_id"]
+            signer_sponsor_id = managing["id"]
+        else:
+            raise HTTPException(status_code=400, detail="Pick a sponsor to send this fee agreement to")
+    else:
+        # Legacy: no sponsors array — fall back to scenario.client_id
+        signer_user_id = scen.get("client_id")
+        if not signer_user_id:
+            raise HTTPException(status_code=400, detail="Link a client (or a sponsor) to this scenario first")
+    client = await db.users.find_one({"id": signer_user_id}, {"_id": 0, "password_hash": 0})
     if not client:
-        raise HTTPException(status_code=404, detail="Client not found")
+        raise HTTPException(status_code=404, detail="Signer user not found")
     if not client.get("email"):
-        raise HTTPException(status_code=400, detail="Client has no email on file")
+        raise HTTPException(status_code=400, detail="Signer has no email on file")
 
     now = now_iso()
-    # Save the fee pct if provided
     if body.broker_fee_pct is not None:
         if body.broker_fee_pct <= 0 or body.broker_fee_pct > 10:
             raise HTTPException(status_code=400, detail="Fee must be between 0 and 10")
@@ -2583,18 +2768,22 @@ async def scenario_fee_agreement_send(sid: str, body: FeeAgreementSend, backgrou
     if scen.get("broker_fee_pct") is None:
         raise HTTPException(status_code=400, detail="Enter the broker fee percentage first")
 
-    doc_id = await _ensure_fee_agreement_doc_line(sid, client["id"])
+    doc_id = await _ensure_fee_agreement_doc_line(sid, client["id"], sponsor_id=signer_sponsor_id)
     token = uuid.uuid4().hex + uuid.uuid4().hex
 
-    # Supersede any pending prior request
-    await db.fee_agreements.update_many(
-        {"scenario_id": sid, "status": "sent"},
-        {"$set": {"status": "superseded", "superseded_at": now}},
-    )
+    # Supersede any pending prior request FOR THE SAME SPONSOR
+    prior_q = {"scenario_id": sid, "status": "sent"}
+    if signer_sponsor_id:
+        prior_q["sponsor_id"] = signer_sponsor_id
+    else:
+        prior_q["sponsor_id"] = None
+    await db.fee_agreements.update_many(prior_q, {"$set": {"status": "superseded", "superseded_at": now}})
+
     fa = {
         "id": str(uuid.uuid4()),
         "scenario_id": sid,
         "client_id": client["id"],
+        "sponsor_id": signer_sponsor_id,
         "doc_id": doc_id,
         "token": token,
         "broker_fee_pct": scen["broker_fee_pct"],
@@ -2603,6 +2792,7 @@ async def scenario_fee_agreement_send(sid: str, body: FeeAgreementSend, backgrou
         "sent_by_admin_email": admin.get("email"),
         "sent_by_admin_phone": admin.get("phone"),
         "borrower_email_at_send": client["email"],
+        "borrower_name_at_send": client.get("name"),
         "agreement_date": datetime.now(timezone.utc).date().isoformat(),
         "status": "sent",
         "created_at": now,
@@ -2618,10 +2808,9 @@ async def scenario_fee_agreement_send(sid: str, body: FeeAgreementSend, backgrou
 
     await db.client_docs.update_one(
         {"id": doc_id},
-        {"$set": {"status": "pending", "notes": "Sent to borrower for signature.", "updated_at": now}},
+        {"$set": {"status": "pending", "notes": "Sent to signer for signature.", "updated_at": now}},
     )
 
-    # Email the client with the signing link
     sender_first = (admin.get("name") or "Byrd").split(" ")[0]
     sign_url = f"{public_base_url()}/fee-agreement/{token}" if public_base_url() else f"/fee-agreement/{token}"
     subj, html, text = _fee_agreement_email_body(
@@ -3126,10 +3315,24 @@ async def lender_get_package(token: str, session_token: Optional[str] = None):
     # Strip client PII from the outer payload
     watermark = f"{session.get('viewer_institution')} — {session.get('viewer_name')}"
 
+    # Sanitize sponsors for lender view — drop client account ids + PII flags
+    sponsors_out = []
+    for sp in _ensure_sponsors_array(scen):
+        sponsors_out.append({
+            "name": sp.get("name") or "—",
+            "entity": sp.get("entity"),
+            "ownership_pct": sp.get("ownership_pct"),
+            "role": sp.get("role"),
+            "is_guarantor": sp.get("is_guarantor"),
+            "credit_score": sp.get("credit_score"),
+            "liquidity": sp.get("liquidity"),
+            "net_worth": sp.get("net_worth"),
+        })
     return {
         "name": scen.get("name"),
         "status": scen.get("status"),
-        "sponsor": scen.get("sponsor"),
+        "sponsor": scen.get("sponsor"),         # legacy field kept for backward compat
+        "sponsors": sponsors_out,               # new: array of all sponsors
         "property_info": scen.get("property_info"),
         "loan_request": scen.get("loan_request"),
         "financials": scen.get("financials"),
