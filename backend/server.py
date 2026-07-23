@@ -3159,6 +3159,39 @@ async def share_views(sid: str, share_id: str, admin=Depends(require_admin)):
     return views
 
 
+@api.get("/admin/scenarios/{sid}/shares/activity-summary")
+async def share_activity_summary(sid: str, admin=Depends(require_admin)):
+    """Return one row per share with view counts + last activity timestamp."""
+    shares = await db.scenario_shares.find(
+        {"scenario_id": sid}, {"_id": 0, "id": 1},
+    ).to_list(500)
+    out = {}
+    for sh in shares:
+        views = await db.share_views.find(
+            {"scenario_id": sid, "share_id": sh["id"]}, {"_id": 0, "action": 1, "viewed_at": 1}
+        ).sort("viewed_at", -1).to_list(500)
+        opened = sum(1 for v in views if v.get("action") == "view_scenario")
+        downloads = sum(1 for v in views if v.get("action") in ("view_doc", "download_pdf", "download_zip"))
+        last_ts = views[0].get("viewed_at") if views else None
+        out[sh["id"]] = {"scenario_opens": opened, "doc_downloads": downloads, "last_activity_at": last_ts}
+    return out
+
+
+class ShareNoteUpdate(BaseModel):
+    note: str = Field(default="", max_length=2000)
+
+
+@api.patch("/admin/scenarios/{sid}/shares/{share_id}/note")
+async def update_share_note(sid: str, share_id: str, body: ShareNoteUpdate, admin=Depends(require_admin)):
+    res = await db.scenario_shares.update_one(
+        {"id": share_id, "scenario_id": sid},
+        {"$set": {"note": body.note, "updated_at": now_iso()}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Share not found")
+    return {"ok": True, "note": body.note}
+
+
 @api.post("/admin/scenarios/{sid}/shares/{share_id}/grant/{doc_id}")
 async def grant_doc_access(sid: str, share_id: str, doc_id: str, admin=Depends(require_admin)):
     share = await db.scenario_shares.find_one({"id": share_id, "scenario_id": sid})
@@ -3294,6 +3327,8 @@ async def lender_get_package(token: str, session_token: Optional[str] = None):
     if not scen:
         raise HTTPException(status_code=404, detail="Scenario not found")
     metrics = compute_scenario_metrics(scen)
+    # Log activity — lender opened the deal package
+    await _log_view(share["scenario_id"], share["id"], session, "view_scenario")
 
     # Every scenario doc is a candidate; the doc's own lender_visibility drives the default,
     # and per-share overrides can flip individual docs to included/on_request/hidden.

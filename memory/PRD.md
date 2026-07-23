@@ -56,7 +56,7 @@ Commercial Real Estate Broker website + client portal + broker admin + Deal Engi
 - **Email Delivery status widget + Send Test button on the admin Overview** — shows Postmark configuration (from address), 30-day sent/failed counts, last success/failure timestamps, last error text, and a health chip (Healthy / Recent Failures / Not Configured). Includes an inline **Send Test** action (prefilled with `waynebyrd11@gmail.com`, editable) that fires a canary email through Postmark synchronously and shows the exact raw error inline if it fails — includes friendly detection of the common "pending approval" and "sender signature" errors — 2026-02
 - **Assistant email send fix** — POST /admin/assistant/email/send now sends via the verified `POSTMARK_FROM` Sender Signature with the admin's real email in Reply-To, returns HTTP 400 (not 502) so Cloudflare passes the JSON error through, and surfaces failures as a persistent inline red "Not sent" banner on the draft card. Every send (test + assistant) is logged in `db.assistant_emails` with status + error for the status widget — 2026-02
 
-### Lender Marketplace — SHIPPED 2026-02
+### Lender Marketplace — SHIPPED 2026-02 (extended with activity + notes 2026-03)
 Complete self-registration + credit-box + term-sheet marketplace. New surfaces:
 - **Public** `/lenders/apply` — public application form (institution, primary contact, credit box). Confirmation email via Postmark. Public footer link "Become a Lending Partner" wired.
 - **Admin** — new "Marketplace applications" card at top of `/admin/lenders` with Approve/Reject buttons. Approve creates a `role='lender'` user + one-time activation link + Postmark email.

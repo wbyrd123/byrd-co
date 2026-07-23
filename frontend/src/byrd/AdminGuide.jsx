@@ -430,8 +430,12 @@ export default function AdminGuide() {
         <Step n="4" title="Per-lender doc visibility overrides">
           <p>If a serious lender clicks <b>Request Full Data Room</b>, the share card in the Lenders tab flips to show a Requested date. Open <b>Manage Visibility</b> on that share and flip individual docs to <b>Included</b> just for that lender &mdash; other lenders keep the default view.</p>
         </Step>
-        <Step n="5" title="Audit trail">
-          <p>Every action (opened package, viewed a doc, downloaded PDF, requested docs) is logged per share. Great signal for who's actually serious.</p>
+        <Step n="5" title="Activity chip + private notes on each share">
+          <p>Every share on the Lenders tab shows a small activity chip: <b>"Opened 2× · 3 downloads · yesterday"</b> or <b>"Not yet opened"</b>. That's the fastest way to see which lenders are actually engaged.</p>
+          <p>Each share also has an inline <b>private note</b> ("Add note" / "Edit"). Use it for context you want to remember about that share &mdash; <em>"Promised T-12 by Friday"</em>, <em>"Prefers 5-year term, non-recourse"</em>, <em>"Called Tuesday, following up Friday."</em> Notes are private to admins; the lender never sees them.</p>
+        </Step>
+        <Step n="6" title="Full audit trail">
+          <p>Every action (opened package, viewed a doc, downloaded PDF, requested docs) is logged per share. Great signal for who's actually serious. The activity chip above summarizes it; the full log is available via <InlineCode>GET /admin/scenarios/&#123;sid&#125;/shares/&#123;share_id&#125;/views</InlineCode>.</p>
         </Step>
       </Card>
 

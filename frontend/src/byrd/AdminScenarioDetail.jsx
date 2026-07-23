@@ -94,13 +94,15 @@ export default function AdminScenarioDetail() {
   const [shareDialog, setShareDialog] = useState(null);
   const [termSheets, setTermSheets] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
+  const [shareActivity, setShareActivity] = useState({});
   // shareDialog shape: { mode: "create"|"edit", lenderId?, lenderName?, share?, overrides }
 
   const load = () => api.get(`/admin/scenarios/${id}`).then((r) => setScen(r.data));
   const loadTermSheets = () => api.get(`/admin/scenarios/${id}/term-sheets`).then((r) => setTermSheets(r.data)).catch(() => {});
   const loadSuggestions = () => api.get(`/admin/scenarios/${id}/match-suggestions`).then((r) => setSuggestions(r.data)).catch(() => setSuggestions([]));
+  const loadActivity = () => api.get(`/admin/scenarios/${id}/shares/activity-summary`).then((r) => setShareActivity(r.data)).catch(() => setShareActivity({}));
 
-  useEffect(() => { load(); loadTermSheets(); loadSuggestions(); }, [id]);
+  useEffect(() => { load(); loadTermSheets(); loadSuggestions(); loadActivity(); }, [id]);
   useEffect(() => {
     api.get("/admin/clients").then((r) => setClients(r.data));
     api.get("/admin/lenders").then((r) => setLenders(r.data));
@@ -381,6 +383,8 @@ export default function AdminScenarioDetail() {
           lenders={lenders}
           matches={matches}
           suggestions={suggestions}
+          shareActivity={shareActivity}
+          onReloadActivity={loadActivity}
           onInviteSelfReg={async (lender_ids) => {
             try {
               await api.post(`/admin/scenarios/${id}/invite-lenders`, { lender_ids, note: "" });
@@ -1474,7 +1478,7 @@ function CopyDocsDialog({ scenarioId, onClose, onCopy }) {
 }
 
 // --------------- LENDERS TAB ---------------
-function LendersTab({ scen, lenders, matches, suggestions, onInviteSelfReg, runMatch, onOpenSendDialog, onRevoke, onOpenEditVisibility, shareLenderId, setShareLenderId }) {
+function LendersTab({ scen, lenders, matches, suggestions, shareActivity = {}, onReloadActivity, onInviteSelfReg, runMatch, onOpenSendDialog, onRevoke, onOpenEditVisibility, shareLenderId, setShareLenderId }) {
   const scenDocs = scen.docs || scen.client_docs || [];
   const clientDocMap = {};
   scenDocs.forEach((d) => { clientDocMap[d.id] = d; });
@@ -1619,6 +1623,9 @@ function LendersTab({ scen, lenders, matches, suggestions, onInviteSelfReg, runM
           <div className="space-y-4">
             {scen.shares.map((sh) => {
               const c = shareCounts(sh);
+              const act = shareActivity[sh.id] || {};
+              const lastAct = act.last_activity_at ? new Date(act.last_activity_at) : null;
+              const daysAgo = lastAct ? Math.floor((Date.now() - lastAct.getTime()) / 86400000) : null;
               return (
                 <div key={sh.id} className="border border-[#E4DFD1] rounded-md p-4" data-testid={`share-${sh.id}`}>
                   <div className="flex items-start justify-between flex-wrap gap-3">
@@ -1630,15 +1637,27 @@ function LendersTab({ scen, lenders, matches, suggestions, onInviteSelfReg, runM
                         {sh.recipient_email || "—"} · shared {new Date(sh.created_at).toLocaleDateString()}
                         {sh.requested_at && <> · <span className="text-[#7A5410]">Requested docs {new Date(sh.requested_at).toLocaleDateString()}</span></>}
                       </div>
-                      {attached.length > 0 && (
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                          <span className="byrd-chip byrd-chip-green" data-testid={`share-${sh.id}-included-count`}><Check size={10} /> {c.included} Included</span>
-                          <span className="byrd-chip byrd-chip-gold" data-testid={`share-${sh.id}-onrequest-count`}><Eye size={10} /> {c.onReq} On Request</span>
-                          {c.hidden > 0 && (
-                            <span className="byrd-chip byrd-chip-red" data-testid={`share-${sh.id}-hidden-count`}><EyeOff size={10} /> {c.hidden} Hidden</span>
-                          )}
-                        </div>
-                      )}
+                      {/* Activity chip: opened / downloads / last activity */}
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                        {act.scenario_opens > 0 ? (
+                          <span className="byrd-chip byrd-chip-green" data-testid={`share-${sh.id}-activity`}>
+                            <Eye size={10} /> Opened {act.scenario_opens}× · {act.doc_downloads || 0} downloads · {daysAgo === 0 ? "today" : daysAgo === 1 ? "yesterday" : `${daysAgo} days ago`}
+                          </span>
+                        ) : (
+                          <span className="byrd-chip" data-testid={`share-${sh.id}-not-opened`}>Not yet opened</span>
+                        )}
+                        {attached.length > 0 && (
+                          <>
+                            <span className="byrd-chip byrd-chip-green" data-testid={`share-${sh.id}-included-count`}><Check size={10} /> {c.included} Included</span>
+                            <span className="byrd-chip byrd-chip-gold" data-testid={`share-${sh.id}-onrequest-count`}><Eye size={10} /> {c.onReq} On Request</span>
+                            {c.hidden > 0 && (
+                              <span className="byrd-chip byrd-chip-red" data-testid={`share-${sh.id}-hidden-count`}><EyeOff size={10} /> {c.hidden} Hidden</span>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {/* Editable per-lender note */}
+                      <ShareNoteEditor share={sh} scenarioId={scen.id} onSaved={onReloadActivity} />
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">
                       {attached.length > 0 && (
@@ -1956,6 +1975,57 @@ function TermSheetsTab({ scenarioId, termSheets, onReload }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+// ------------- ShareNoteEditor (per-lender broker note) -------------
+function ShareNoteEditor({ share, scenarioId, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [note, setNote] = useState(share.note || "");
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.patch(`/admin/scenarios/${scenarioId}/shares/${share.id}/note`, { note });
+      toast.success("Note saved");
+      setEditing(false);
+      onSaved && onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (!editing) {
+    return (
+      <div className="mt-2 text-[11px] text-[#6B6558] flex items-start gap-2">
+        {share.note ? (
+          <div className="flex-1 italic bg-[#F3EEE0] border-l-2 border-[#C89434] px-2 py-1">"{share.note}"</div>
+        ) : (
+          <div className="flex-1 italic text-[#B8B0A0]">No private note</div>
+        )}
+        <button onClick={() => { setNote(share.note || ""); setEditing(true); }} className="text-[#C89434] hover:underline text-[10px]" data-testid={`edit-note-${share.id}`}>
+          {share.note ? "Edit" : "Add note"}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-2">
+      <textarea
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        placeholder="Private context you want to remember about this share (e.g. 'Promised T-12 by Friday')"
+        className="w-full min-h-[50px] text-xs p-2 border border-[#E4DFD1] rounded-md focus:outline-none focus:border-[#C89434]"
+        maxLength={2000}
+        data-testid={`note-input-${share.id}`}
+      />
+      <div className="flex gap-2 mt-1 justify-end">
+        <button onClick={() => setEditing(false)} className="text-[10px] text-[#6B6558] hover:underline">Cancel</button>
+        <button onClick={save} disabled={saving} className="text-[10px] text-[#C89434] hover:underline font-semibold" data-testid={`save-note-${share.id}`}>{saving ? "Saving…" : "Save note"}</button>
+      </div>
     </div>
   );
 }
