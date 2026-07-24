@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import ScenarioAIChat from "@/byrd/ScenarioAIChat";
 import ScenarioAIFab from "@/byrd/ScenarioAIFab";
+import BulkUploadZone from "@/byrd/BulkUploadZone";
 
 const useDebouncedSave = (fn, delay = 800) => {
   const [timer, setTimer] = useState(null);
@@ -1105,6 +1106,14 @@ function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility,
       </div>
 
       <AddDocForm onAdd={onAddDoc} sponsors={sponsors} defaultSponsorId={sponsorFilter !== "all" && sponsorFilter !== "shared" ? sponsorFilter : ""} />
+
+      <BulkUploadZone
+        scenarioId={scen.id}
+        docs={allDocs}
+        sponsors={sponsors}
+        sponsorFilter={sponsorFilter}
+        onReload={onReload}
+      />
 
       <div className="byrd-card overflow-hidden">
         <div className="hidden md:grid grid-cols-[2fr_.9fr_1fr_1.4fr_1.2fr] border-b border-[#E4DFD1] bg-[#FBF8F1]">

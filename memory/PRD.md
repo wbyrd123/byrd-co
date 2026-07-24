@@ -1,13 +1,25 @@
 # Byrd & CO — Product Requirements
 
 ## Backlog
-- P0: Redeploy production (`byrd-co.com`) to ship Ada/Proforma/CRM-tags/Marketplace/Postmark-unlock/PortalPolish/MultiSponsor/MultiFileUploads live.
+- P0: Redeploy production (`byrd-co.com`) to ship Ada/Proforma/CRM-tags/Marketplace/Postmark-unlock/PortalPolish/MultiSponsor/MultiFileUploads/BulkUpload/LenderTerms live.
 - P1: Automatic reminder emails when client docs missing X days
 - P2: Postmark inbound routing → route replies back into Personal Assistant
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
 - P2: Rate-limit `/public/lender/apply` and `/public/password-reset/request` (basic per-IP throttle)
 - P2: Automated weekly Postmark lender-activity summary emails
-- P3: Refactor `server.py` (~7,650 lines) into modular routes
+- P2: Postmark notification to borrower when broker uploads a doc on their behalf
+- P3: Refactor `server.py` (~7,700 lines) into modular routes
+
+### Lender Non-Circumvention Agreement + Bulk Upload — SHIPPED 2026-02
+**Lender terms:** Every new lender registration now requires accepting a formal Non-Circumvention Agreement before submission. 24-month protection, broad scope (every borrower Byrd & CO introduces), Texas governing law, 1% default broker-fee remedy for violations.
+- **Backend**: `LENDER_TERMS_VERSION="1.0"` + full agreement text in `server.py`. Constants: `LENDER_TERMS_TITLE`, `LENDER_TERMS_EFFECTIVE_DATE`, `LENDER_TERMS_TEXT`. New `GET /public/lender/terms` returns current text. `POST /public/lender/apply` now requires `terms_accepted:true`, non-empty `terms_signature_name` (≥3 chars). Full audit trail persisted on the lender doc: `terms_accepted_at`, `terms_signature_name`, `terms_version`, `terms_ip`, `terms_user_agent`.
+- **Frontend**: `LendersApplyPage.jsx` loads the current terms from the API, shows the full text in a scrollable box, checkbox + typed signature field, submit disabled until both are complete. New public page at `/lenders/terms` (`LendersTermsPage.jsx`) displays the permanent copy.
+- **Migration**: existing lenders (none yet — Wayne confirmed no active lenders pre-launch) are NOT retroactively bound. Clean slate.
+
+**Bulk Upload Zone (admin scenario Documents tab):** Broker can drag-and-drop many files at once; each auto-matches to the right doc line by filename regex; auto-created new lines on-the-fly; every file uploaded uses the admin upload-on-behalf endpoint (tagged uploaded_by='broker').
+- **Component**: `/app/frontend/src/byrd/BulkUploadZone.jsx`. Dashed-orange drop zone, browse-files button, per-file dropdown (target doc line / create new / skip), auto-match confidence indicator, per-row status (pending/uploading/done/error), progress counters ("N auto-matched • N uploaded • N pending"), Clear All, per-row remove.
+- **Auto-match rules**: normalizes filename separators (`_`, `-`, `.`) → spaces, then regex-matches against PFS, tax returns (with year → picks Year 1/2/3), bank statements, gov ID, resume/bio, entity docs (LLC/EIN/operating agreement/W-9), rent roll, T-12, PSA/purchase contract, insurance, appraisal, survey, photos. Tax-return year-to-slot inference uses current year math.
+- **Verified**: dragged 3 files (`PFS_2024.txt`, `Tax_Return_2023.txt`, `Drivers_License.txt`) → all 3 auto-matched to correct lines → uploaded → status flipped to "Uploaded" → BROKER badge shown on each file row. End-to-end tested via browser automation.
 
 ### Multi-File Uploads Per Doc Line — SHIPPED 2026-02
 Every doc line item now accepts many files (e.g., 3 years of tax returns, multi-page entity docs). Applies uniformly to borrower portal, admin scenario page, and lender view.

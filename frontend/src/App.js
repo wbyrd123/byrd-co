@@ -25,6 +25,7 @@ import Unsubscribe from "@/byrd/Unsubscribe";
 import FeeAgreementSign from "@/byrd/FeeAgreementSign";
 import LenderView from "@/byrd/LenderView";
 import LendersApplyPage from "@/byrd/LendersApplyPage";
+import LendersTermsPage from "@/byrd/LendersTermsPage";
 import LenderActivate from "@/byrd/LenderActivate";
 import LenderPortal from "@/byrd/LenderPortal";
 import PortalForgotPassword from "@/byrd/PortalForgotPassword";
@@ -85,6 +86,7 @@ function App() {
             {/* Public lender view (token-gated) */}
             <Route path="/lender/scenario/:token" element={<LenderView />} />
             <Route path="/lenders/apply" element={<LendersApplyPage />} />
+            <Route path="/lenders/terms" element={<LendersTermsPage />} />
             <Route path="/lender/activate/:token" element={<LenderActivate />} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />
             <Route path="/fee-agreement/:token" element={<FeeAgreementSign />} />
