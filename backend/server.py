@@ -6844,10 +6844,21 @@ they've already hired Byrd & CO. You are a helpful concierge whose whole job is 
 
 At the top of every turn you receive a JSON context:
 - The borrower's identity (first name, email, company)
-- The borrower's scenarios (each with loan_type, property_type, location) and per-scenario doc checklists
-- Which specific docs are pending / uploaded / reviewed / rejected
+- The borrower's scenarios — EACH scenario includes: `property` (address, city, state, zip, property_type,
+  year_built, units, sqft, purchase_price, current_value, occupancy_pct), `loan_request` (loan_type,
+  loan_amount, term_months, amort_months, requested_rate_pct, recourse), `financials` (gross_income,
+  vacancy_pct, operating_expenses, capex_reserves, override_noi), `construction_budget` (for construction
+  deals), `sources_uses` (line-item sources & uses), and `sponsors`.
+- Per-scenario doc checklists — which specific docs are pending / uploaded / reviewed / rejected
 - Recent broker notes on any rejected docs
 - Any in-progress `borrower_ada_drafts` (interviews they started but haven't finished)
+
+# GOLDEN RULE — DO NOT ASK FOR DATA THAT IS ALREADY IN CONTEXT.
+The broker has already populated most scenario data before the borrower reaches the portal. Before you ask
+a question — property address, loan amount, purchase price, unit count, NOI, ADR, rate — LOOK at the
+scenario's `property`, `loan_request`, and `financials` blocks. If the value is present (non-null,
+non-empty), USE IT. Only ask the borrower for values that are truly null / missing / clearly incorrect.
+When you use a known value, quickly confirm it inline (e.g., "I have the property at 2200 Main St, Houston TX — is that right?") so the borrower can correct it in one word if needed, then keep moving.
 
 # WHAT YOU CAN DO
 
@@ -7676,10 +7687,43 @@ async def _ada_turn_context(user: dict) -> str:
         "today": datetime.now(timezone.utc).date().isoformat(),
         "scenarios": [{
             "id": s["id"], "name": s.get("name"), "status": s.get("status"),
-            "loan_type": (s.get("loan_request") or {}).get("loan_type"),
-            "property_type": (s.get("property_info") or {}).get("property_type"),
-            "location": ", ".join([p for p in [(s.get("property_info") or {}).get("city"),
-                                                (s.get("property_info") or {}).get("state")] if p]),
+            # Full property snapshot — Ada should NOT re-ask the borrower for anything below
+            # that's already populated. Only ask for values that are null / missing.
+            "property": {
+                "address": (s.get("property_info") or {}).get("address"),
+                "city": (s.get("property_info") or {}).get("city"),
+                "state": (s.get("property_info") or {}).get("state"),
+                "zip": (s.get("property_info") or {}).get("zip"),
+                "property_type": (s.get("property_info") or {}).get("property_type"),
+                "year_built": (s.get("property_info") or {}).get("year_built"),
+                "units": (s.get("property_info") or {}).get("units"),
+                "sqft": (s.get("property_info") or {}).get("sqft"),
+                "purchase_price": (s.get("property_info") or {}).get("purchase_price"),
+                "current_value": (s.get("property_info") or {}).get("current_value"),
+                "occupancy_pct": (s.get("property_info") or {}).get("occupancy_pct"),
+            },
+            "loan_request": {
+                "loan_type": (s.get("loan_request") or {}).get("loan_type"),
+                "loan_amount": (s.get("loan_request") or {}).get("loan_amount"),
+                "term_months": (s.get("loan_request") or {}).get("term_months"),
+                "amort_months": (s.get("loan_request") or {}).get("amort_months"),
+                "requested_rate_pct": (s.get("loan_request") or {}).get("requested_rate_pct"),
+                "recourse": (s.get("loan_request") or {}).get("recourse"),
+            },
+            "financials": {
+                "gross_income": (s.get("financials") or {}).get("gross_income"),
+                "vacancy_pct": (s.get("financials") or {}).get("vacancy_pct"),
+                "operating_expenses": (s.get("financials") or {}).get("operating_expenses"),
+                "capex_reserves": (s.get("financials") or {}).get("capex_reserves"),
+                "override_noi": (s.get("financials") or {}).get("override_noi"),
+            },
+            "construction_budget": s.get("construction_budget") or {},
+            "sources_uses": s.get("sources_uses") or [],
+            "sponsors": [{
+                "name": sp.get("name"), "role": sp.get("role"),
+                "ownership_pct": sp.get("ownership_pct"),
+                "is_guarantor": sp.get("is_guarantor"),
+            } for sp in (s.get("sponsors") or [])],
             "docs": docs_by_scen.get(s["id"], []),
         } for s in scenarios],
         "in_progress_drafts": drafts,
