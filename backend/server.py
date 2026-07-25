@@ -2027,13 +2027,10 @@ def render_scenario_pdf(scen: dict, client: Optional[dict], metrics: dict, water
         if uses:
             elements.append(su_table(uses, "Uses"))
 
-    # Business plan / notes
+    # Business plan (Notes are broker-internal — never rendered on the lender-facing PDF)
     if scen.get("business_plan"):
         elements.append(Paragraph("Business Plan", h2))
         elements.append(Paragraph(scen["business_plan"].replace("\n", "<br/>"), body))
-    if scen.get("notes"):
-        elements.append(Paragraph("Notes", h2))
-        elements.append(Paragraph(scen["notes"].replace("\n", "<br/>"), body))
 
     doc.build(elements, onFirstPage=_watermark_canvas(watermark_text), onLaterPages=_watermark_canvas(watermark_text))
     return buf.getvalue()
@@ -3203,11 +3200,11 @@ def render_executive_summary_pdf(scen: dict, metrics: dict, cfg: dict,
         ]))
         elements.append(spt)
 
-    # Narrative
-    if (cfg.get("narrative") or "").strip():
+    # Narrative — falls back to scenario.business_plan if the summary-specific narrative is empty.
+    effective_narrative = (cfg.get("narrative") or "").strip() or (scen.get("business_plan") or "").strip()
+    if effective_narrative:
         elements.append(Paragraph("Deal Narrative", h2))
-        # Preserve line breaks — replace \n with <br/>
-        narrative_html = (cfg["narrative"] or "").replace("\n", "<br/>")
+        narrative_html = effective_narrative.replace("\n", "<br/>")
         elements.append(Paragraph(narrative_html, body))
 
     # Contact + disclaimer

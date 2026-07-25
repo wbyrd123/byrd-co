@@ -252,6 +252,7 @@ export default function AdminFinancialsTab({ scenarioId, scen, onScenReload }) {
       {/* Executive Summary section */}
       {summary.config && (
         <SummarySection
+          scen={scen}
           scenarioId={scenarioId}
           summary={summary}
           onPatch={patchSummary}
@@ -699,7 +700,7 @@ function ProposalRow({ label, value, onChange }) {
 
 // ---------------- Executive Summary section ----------------
 
-function SummarySection({ scenarioId, summary, onPatch, onUploadPhoto, onDeletePhoto, onPreview, onSaveToPortal, busy, selectedPeriod, uwSet }) {
+function SummarySection({ scen, scenarioId, summary, onPatch, onUploadPhoto, onDeletePhoto, onPreview, onSaveToPortal, busy, selectedPeriod, uwSet }) {
   const cfg = summary.config || {};
   const photos = summary.photos || [];
   const canGenerate = !!selectedPeriod && uwSet;
@@ -726,8 +727,12 @@ function SummarySection({ scenarioId, summary, onPatch, onUploadPhoto, onDeleteP
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Narrative */}
         <div>
-          <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Deal Narrative</label>
-          <NarrativeBox value={cfg.narrative || ""} onSave={(v) => onPatch({ narrative: v })} />
+          <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Deal Narrative <span className="text-[#8A8578] normal-case">— override for the Executive Summary</span></label>
+          <NarrativeBox
+            value={cfg.narrative || ""}
+            businessPlan={scen?.business_plan || ""}
+            onSave={(v) => onPatch({ narrative: v })}
+          />
           <div className="mt-3 space-y-1 text-sm">
             <ToggleRow label="Include property photos" checked={cfg.include_photos !== false} onChange={(v) => onPatch({ include_photos: v })} />
             <ToggleRow label="Include location map" checked={cfg.include_map !== false} onChange={(v) => onPatch({ include_map: v })} />
@@ -780,18 +785,44 @@ function SummarySection({ scenarioId, summary, onPatch, onUploadPhoto, onDeleteP
   );
 }
 
-function NarrativeBox({ value, onSave }) {
+function NarrativeBox({ value, businessPlan, onSave }) {
   const [v, setV] = useState(value);
   useEffect(() => { setV(value); }, [value]);
+  const isEmpty = !v || !v.trim();
+  const bpTrimmed = (businessPlan || "").trim();
+  const copyFromBP = () => {
+    setV(bpTrimmed);
+    onSave(bpTrimmed);
+  };
   return (
-    <textarea
-      value={v}
-      onChange={(e) => setV(e.target.value)}
-      onBlur={() => { if (v !== value) onSave(v); }}
-      placeholder="Value-add multifamily acquisition in the Third Ward submarket. In-place cash flowing at 92% occupancy with room to push rents post-renovation..."
-      className="mt-1 w-full h-40 px-3 py-2 border border-[#E4DFD1] rounded-md text-sm focus:outline-none focus:border-[#C89434] resize-y"
-      data-testid="summary-narrative"
-    />
+    <div>
+      <textarea
+        value={v}
+        onChange={(e) => setV(e.target.value)}
+        onBlur={() => { if (v !== value) onSave(v); }}
+        placeholder={
+          bpTrimmed
+            ? `Leave blank to use the Business Plan from the Package tab, or type a shorter version here for the 1-pager.`
+            : `Value-add multifamily acquisition in the Third Ward submarket. In-place cash flowing at 92% occupancy with room to push rents post-renovation...`
+        }
+        className="mt-1 w-full h-40 px-3 py-2 border border-[#E4DFD1] rounded-md text-sm focus:outline-none focus:border-[#C89434] resize-y"
+        data-testid="summary-narrative"
+      />
+      {isEmpty && bpTrimmed && (
+        <div className="mt-1 flex items-start justify-between gap-3 text-[11px] p-2 rounded-md bg-[#FBEFD3] border border-[#E5B968]">
+          <div className="text-[#7A5410]">
+            <b>Using Business Plan from Package tab:</b><br />
+            <span className="italic">{bpTrimmed.length > 140 ? bpTrimmed.slice(0, 140) + "…" : bpTrimmed}</span>
+          </div>
+          <button onClick={copyFromBP} className="shrink-0 text-[#7A5410] underline hover:no-underline" data-testid="narrative-copy-bp">
+            Edit here
+          </button>
+        </div>
+      )}
+      {isEmpty && !bpTrimmed && (
+        <div className="mt-1 text-[11px] text-[#6B6558]">Empty. The Deal Narrative section will be omitted from the PDF.</div>
+      )}
+    </div>
   );
 }
 

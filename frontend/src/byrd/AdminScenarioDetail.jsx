@@ -788,12 +788,12 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
       </section>
 
       <section className="byrd-card p-6">
-        <h3 className="font-serif text-xl font-bold mb-4">Notes &amp; Business Plan</h3>
+        <h3 className="font-serif text-xl font-bold mb-4">Business Plan &amp; Internal Notes</h3>
         <div className="space-y-4">
-          <Field label="Business Plan (visible on package)">
+          <Field label="Business Plan (shown on Loan Package + Executive Summary)">
             <TA rows={4} defaultValue={scen.business_plan || ""} onBlur={(e) => patch({ business_plan: e.target.value })} />
           </Field>
-          <Field label="Notes (visible on package)">
+          <Field label="Internal Notes (not shared with lenders)">
             <TA rows={3} defaultValue={scen.notes || ""} onBlur={(e) => patch({ notes: e.target.value })} />
           </Field>
         </div>
