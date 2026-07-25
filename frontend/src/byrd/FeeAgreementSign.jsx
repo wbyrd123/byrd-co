@@ -68,8 +68,35 @@ export default function FeeAgreementSign() {
 
   return (
     <ShellHeaderContainer>
+      {/* Steps banner — makes the sign flow crystal clear */}
+      {!alreadySigned && !canceled && (
+        <div className="byrd-card p-4 md:p-5 mb-4 bg-[#FBEFD3]/40 border-[#C89434]" data-testid="fee-steps-banner">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[#7A5410]">// How to sign</div>
+            <div className="flex items-center gap-3 flex-wrap text-sm">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-5 h-5 rounded-full bg-[#1A1A1A] text-[#FBF8F1] grid place-items-center text-[11px] font-bold">1</span>
+                Review the agreement
+              </span>
+              <span className="text-[#C89434]">→</span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-5 h-5 rounded-full bg-[#1A1A1A] text-[#FBF8F1] grid place-items-center text-[11px] font-bold">2</span>
+                Type your name to sign
+              </span>
+              <span className="text-[#C89434]">→</span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-5 h-5 rounded-full bg-[#1A1A1A] text-[#FBF8F1] grid place-items-center text-[11px] font-bold">3</span>
+                Click <span className="font-semibold">Agree &amp; Sign</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6" data-testid="fee-agreement-page">
-        <div className="byrd-card overflow-hidden">
+        {/* On mobile: sign form appears ABOVE the PDF via order-first on the aside.
+            On desktop (lg+): PDF on left, form on right. */}
+        <div className="byrd-card overflow-hidden order-2 lg:order-1">
           <div className="border-b border-[#E4DFD1] px-5 py-4 flex items-center justify-between gap-3 flex-wrap">
             <div className="inline-flex items-center gap-2">
               <div className="w-8 h-8 rounded-md bg-[#F3EEE0] text-[#C89434] grid place-items-center border border-[#E4DFD1]">
@@ -90,22 +117,23 @@ export default function FeeAgreementSign() {
               Download PDF
             </a>
           </div>
-          <object
-            data={pdfUrl}
-            type="application/pdf"
-            className="w-full h-[75vh] bg-[#FBF8F1]"
-            aria-label="Fee agreement PDF"
-          >
-            <div className="p-8 text-center text-[#6B6558] text-sm">
-              Your browser can&apos;t preview PDFs inline.{" "}
-              <a className="underline text-[#1A1A1A]" href={pdfUrl} target="_blank" rel="noopener noreferrer">
-                Open it here.
-              </a>
-            </div>
-          </object>
+          {/* iframe renders reliably in more browsers than <object>, incl. mobile Safari */}
+          <iframe
+            src={pdfUrl}
+            title="Fee agreement PDF"
+            className="w-full h-[75vh] bg-[#FBF8F1] border-0"
+          />
+          <div className="border-t border-[#E4DFD1] bg-[#FBF8F1] px-5 py-3 text-xs text-[#6B6558] flex items-center gap-2 flex-wrap">
+            <FileText size={12} />
+            Can&apos;t see the agreement above?{" "}
+            <a href={pdfUrl} target="_blank" rel="noopener noreferrer" className="underline text-[#1A1A1A] hover:text-[#C89434]">
+              Open the PDF in a new tab
+            </a>
+            {" "}— then come back here to sign.
+          </div>
         </div>
 
-        <aside className="space-y-4">
+        <aside className="space-y-4 order-1 lg:order-2">
           <div className="byrd-card p-5" data-testid="fee-summary">
             <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Summary</div>
             <div className="mt-2 space-y-2 text-sm">
@@ -147,10 +175,10 @@ export default function FeeAgreementSign() {
               </div>
             </div>
           ) : (
-            <div className="byrd-card p-5" data-testid="fee-sign-form">
+            <div className="byrd-card p-5 border-[#C89434] border-2 bg-[#FBEFD3]/30 shadow-md" data-testid="fee-sign-form">
               <div className="inline-flex items-center gap-2 text-[#C89434]">
                 <PenLine size={16} />
-                <span className="font-mono text-[10px] uppercase tracking-widest">// Sign electronically</span>
+                <span className="font-mono text-[10px] uppercase tracking-widest">// Sign electronically here</span>
               </div>
               <label className="block mt-3 text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">
                 Type your full legal name

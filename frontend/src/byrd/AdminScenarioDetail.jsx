@@ -1117,8 +1117,20 @@ function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility,
 
       <div className="byrd-card overflow-hidden">
         <div className="hidden md:grid grid-cols-[2fr_.9fr_1fr_1.4fr_1.2fr] border-b border-[#E4DFD1] bg-[#FBF8F1]">
-          {["Document", "Category", "Status", "File / Notes", "Lender Visibility"].map((h) => (
-            <div key={h} className="px-4 py-3 text-[11px] uppercase font-mono tracking-widest text-[#6B6558]">{h}</div>
+          {[
+            { label: "Document" },
+            { label: "Category" },
+            { label: "Status" },
+            { label: "File / Notes" },
+            { label: "Lender Visibility", tip: "Default for lenders: Hidden / On Request / Included. You can also override per-lender when you Share." },
+          ].map((h) => (
+            <div
+              key={h.label}
+              className="px-4 py-3 text-[11px] uppercase font-mono tracking-widest text-[#6B6558]"
+              title={h.tip || ""}
+            >
+              {h.label}
+            </div>
           ))}
         </div>
         {docs.length === 0 && (
@@ -1386,11 +1398,14 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
         />
       </div>
       <div className="px-4 py-3 flex items-center gap-2">
-        <div className="inline-flex rounded-md border border-[#E4DFD1] overflow-hidden text-[10px]" title="Lender visibility default">
+        <div
+          className="inline-flex rounded-md border border-[#E4DFD1] overflow-hidden text-[10px]"
+          title="Default lender visibility for this document: Hidden = lenders never see it. On Request = lenders see the line title and can ask for it. Included = auto-shared with every lender who gets this deal package."
+        >
           {[
-            { v: "hidden", label: "Hidden", icon: EyeOff },
-            { v: "on_request", label: "Req.", icon: Eye },
-            { v: "included", label: "Included", icon: Check },
+            { v: "hidden", label: "Hidden", icon: EyeOff, tip: "Lenders won't see this doc at all." },
+            { v: "on_request", label: "On Request", icon: Eye, tip: "Lenders see the line title and can request it." },
+            { v: "included", label: "Included", icon: Check, tip: "Lenders auto-see & download this doc." },
           ].map((opt) => {
             const active = currentVis === opt.v;
             return (
@@ -1398,7 +1413,8 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
                 key={opt.v}
                 onClick={() => onToggleVisibility(doc.id, opt.v)}
                 data-testid={`viz-${doc.id}-${opt.v}`}
-                className={`px-2 h-8 inline-flex items-center gap-1 ${active ? "bg-[#1A1A1A] text-white" : "bg-white text-[#2A2A2A] hover:bg-[#F3EEE0]"}`}
+                title={opt.tip}
+                className={`px-2 h-8 inline-flex items-center gap-1 whitespace-nowrap ${active ? "bg-[#1A1A1A] text-white" : "bg-white text-[#2A2A2A] hover:bg-[#F3EEE0]"}`}
               >
                 <opt.icon size={10} /> {opt.label}
               </button>

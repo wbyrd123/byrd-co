@@ -330,6 +330,7 @@ class DocUpdate(BaseModel):
     sponsor_id: Optional[str] = None   # pass empty string "" to clear to null
     category: Optional[str] = None
     required: Optional[bool] = None
+    lender_visibility: Optional[Literal["included", "on_request", "hidden"]] = None
 
 
 class DocUploadInput(BaseModel):
