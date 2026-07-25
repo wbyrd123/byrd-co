@@ -3675,9 +3675,13 @@ def _effective_doc_visibility(share: dict, attach_map: dict, doc_id: str) -> str
     grants = share.get("doc_grants") or []
     if doc_id in grants:
         return "included"
-    # Default: doc's own lender_visibility field; fall back to on_request
+    # Default: doc's own lender_visibility field; fall back to on_request. Honor all three states.
     scen_v = (attach_map.get(doc_id) or {}).get("lender_visibility", "on_request")
-    return "included" if scen_v == "included" else "on_request"
+    if scen_v == "hidden":
+        return "hidden"
+    if scen_v == "included":
+        return "included"
+    return "on_request"
 
 
 @api.get("/lender-view/{token}")
