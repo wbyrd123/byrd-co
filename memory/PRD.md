@@ -10,6 +10,12 @@
 - P2: Postmark notification to borrower when broker uploads a doc on their behalf
 - P3: Refactor `server.py` (~7,700 lines) into modular routes
 
+
+### Admin Delete Term Sheet — SHIPPED 2026-02
+Broker can now delete individual quote submissions from the admin scenario's Term Sheets tab.
+- **Backend**: `DELETE /admin/term-sheets/{tid}` — hard-deletes the term_sheet doc + any attached `term_sheet_files` blob. Removes it from both admin and borrower views. Lender is NOT notified.
+- **Frontend**: Trash icon (top-right of each term sheet card in `AdminScenarioDetail.jsx > TermSheetsTab`) opens a confirmation modal with the lender name and a "cannot be undone" warning. `data-testid=ts-delete-{id}` / `ts-delete-confirm`.
+
 ### Lender Confidentiality Acknowledgement + Bulk Upload — SHIPPED 2026-02
 **Lender terms (LIGHTWEIGHT — v2 iteration):** Full Non-Circumvention Agreement pulled from the lender registration flow to avoid triggering bank legal reviews during DB-building phase. Replaced with a per-package Confidentiality Acknowledgement at the lender-view gate.
 - **Backend**: `LenderApplyBody.terms_accepted` is now Optional and no longer enforced. `LENDER_TERMS_*` constants updated to a 4-point confidentiality acknowledgement (no non-circumvention clause, no signature — just borrower confidentiality + purpose limitation + Byrd introduction courtesy). `LenderGate` requires `acknowledged:true` on every session. Backend enforces via 400 "Please acknowledge the confidentiality notice…". Audit trail on `share_views`: `acknowledged_version`, `acknowledged_at`, `acknowledged_ip`, `acknowledged_user_agent`.

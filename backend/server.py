@@ -4652,6 +4652,18 @@ async def admin_list_term_sheets(sid: str, admin=Depends(require_admin)):
     return sheets
 
 
+@api.delete("/admin/term-sheets/{tid}")
+async def admin_delete_term_sheet(tid: str, admin=Depends(require_admin)):
+    """Hard-delete a term sheet + its attached file. Removes it from both admin and borrower views."""
+    ts = await db.term_sheets.find_one({"id": tid}, {"_id": 0})
+    if not ts:
+        raise HTTPException(status_code=404, detail="Term sheet not found")
+    if ts.get("pdf_file_id"):
+        await db.term_sheet_files.delete_one({"id": ts["pdf_file_id"]})
+    await db.term_sheets.delete_one({"id": tid})
+    return {"ok": True}
+
+
 @api.patch("/admin/term-sheets/{tid}")
 async def admin_set_term_sheet_status(tid: str, body: TermSheetStatusBody,
                                        background: BackgroundTasks, admin=Depends(require_admin)):

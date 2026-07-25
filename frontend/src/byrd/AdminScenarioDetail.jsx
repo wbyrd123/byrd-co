@@ -1947,6 +1947,7 @@ function ShareVisibilityDialog({ scen, dialog, onClose, onSubmit }) {
 // ================= TermSheetsTab (marketplace) =================
 function TermSheetsTab({ scenarioId, termSheets, onReload }) {
   const [actingOn, setActingOn] = useState(null); // {id, status, note}
+  const [deleting, setDeleting] = useState(null); // {id, lender_name}
 
   const setStatus = async () => {
     if (!actingOn) return;
@@ -1960,6 +1961,18 @@ function TermSheetsTab({ scenarioId, termSheets, onReload }) {
       onReload();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed");
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleting) return;
+    try {
+      await api.delete(`/admin/term-sheets/${deleting.id}`);
+      toast.success("Term sheet deleted");
+      setDeleting(null);
+      onReload();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Delete failed");
     }
   };
 
@@ -1993,6 +2006,15 @@ function TermSheetsTab({ scenarioId, termSheets, onReload }) {
                   </div>
                   <div className="text-xs text-[#6B6558] mt-0.5">Submitted {new Date(t.submitted_at).toLocaleString()}</div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setDeleting({ id: t.id, lender_name: t.lender_name })}
+                  className="text-[#8A1F1A] hover:text-[#5A0F0A] p-1 -m-1 opacity-70 hover:opacity-100 transition"
+                  title="Delete this term sheet"
+                  data-testid={`ts-delete-${t.id}`}
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
               <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-2 text-sm">
                 <KV2 label="Rate">{t.interest_rate_pct != null ? `${t.interest_rate_pct}%` : "—"}{t.rate_type ? <span className="text-[10px] text-[#6B6558]"> {t.rate_type}</span> : null}</KV2>
@@ -2089,6 +2111,24 @@ function TermSheetsTab({ scenarioId, termSheets, onReload }) {
               <button onClick={() => setActingOn(null)} className="byrd-btn byrd-btn-outline">Cancel</button>
               <button onClick={setStatus} className="byrd-btn byrd-btn-dark" data-testid="ts-action-confirm">
                 Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleting && (
+        <div className="fixed inset-0 bg-black/40 z-50 grid place-items-center p-4" data-testid="ts-delete-modal">
+          <div className="bg-white rounded-md border border-[#E4DFD1] w-full max-w-md p-6">
+            <div className="font-serif text-xl font-bold">Delete term sheet?</div>
+            <p className="text-sm text-[#2A2A2A] mt-2">
+              This permanently removes <b>{deleting.lender_name}</b>&apos;s term sheet from this scenario. It will disappear from your admin view and the borrower&apos;s portal. The lender is not notified.
+            </p>
+            <p className="text-xs text-[#8A1F1A] mt-2">This action cannot be undone.</p>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button onClick={() => setDeleting(null)} className="byrd-btn byrd-btn-outline" data-testid="ts-delete-cancel">Cancel</button>
+              <button onClick={confirmDelete} className="byrd-btn byrd-btn-dark bg-[#8A1F1A] border-[#8A1F1A] hover:bg-[#5A0F0A]" data-testid="ts-delete-confirm">
+                <Trash2 size={12} /> Delete
               </button>
             </div>
           </div>
