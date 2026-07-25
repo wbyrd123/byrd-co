@@ -4372,6 +4372,104 @@ async def lender_upload_term_sheet_doc(sid: str, body: DocUploadInput,
     return {"ok": True, "file_id": file_id, "filename": body.filename, "size": len(raw)}
 
 
+class TermSheetParseBody(BaseModel):
+    pdf_file_id: str
+
+
+def _extract_pdf_text(raw_bytes: bytes) -> str:
+    """Best-effort text extraction from a PDF. Returns empty string on failure."""
+    try:
+        from pypdf import PdfReader
+        from io import BytesIO
+        reader = PdfReader(BytesIO(raw_bytes))
+        pages = []
+        for p in reader.pages[:20]:  # cap to first 20 pages to control token cost
+            try:
+                pages.append(p.extract_text() or "")
+            except Exception:
+                pages.append("")
+        return "\n\n".join(pages).strip()
+    except Exception:
+        return ""
+
+
+TERM_SHEET_PARSE_SYSTEM = """\
+You extract structured loan term-sheet data from lender documents. Return ONLY compact JSON with these keys (all optional — omit or set null if not clearly stated):
+rate_type ("fixed"|"floating"|"hybrid"), interest_rate_pct (number, percent), floating_index (string), floating_spread_bps (number), loan_amount (number, USD),
+ltv_pct (number), ltc_pct (number), amortization_years (integer), term_months (integer), io_months (integer), fixed_period_months (integer),
+rate_adjustment_notes (string), recourse ("full"|"partial"|"non-recourse"), prepay (string), origination_fee_pct (number), exit_fee_pct (number),
+expiration_date (YYYY-MM-DD), contingencies (string, semicolon-separated bullets), notes (string).
+
+Rules:
+- Never invent values. If not clearly stated, omit the key.
+- Convert years→months for term_months, months→years for amortization_years.
+- "5/20 ARM" means fixed_period_months=60 and term_months=240.
+- "2/2/5 caps" is rate_adjustment_notes content, not a numeric field.
+- Return raw JSON only, no markdown fences, no commentary."""
+
+
+@api.post("/lender/scenarios/{sid}/term-sheet/parse-doc")
+async def lender_parse_term_sheet_doc(sid: str, body: TermSheetParseBody,
+                                      user=Depends(require_lender)):
+    """Read an uploaded term-sheet document, extract structured fields with Claude,
+    return a plain dict the client can drop into the form. Lender-facing UI calls this
+    "Auto-fill term sheet from document" — no reference to Ada by name."""
+    lender = await _resolve_lender_for_user(user)
+    f = await db.term_sheet_files.find_one(
+        {"id": body.pdf_file_id, "scenario_id": sid, "lender_id": lender["id"]},
+        {"_id": 0},
+    )
+    if not f:
+        raise HTTPException(status_code=404, detail="Uploaded document not found or not owned by you")
+    ct = (f.get("content_type") or "").lower()
+    raw = base64.b64decode(f["data_b64"])
+    text = ""
+    if "pdf" in ct or f.get("filename", "").lower().endswith(".pdf"):
+        text = _extract_pdf_text(raw)
+    else:
+        # Non-PDFs (Word, images) — try naive utf-8 decode; if it fails, fall back to Claude vision (skipped for now)
+        try:
+            text = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            text = ""
+    if not text or len(text.strip()) < 30:
+        raise HTTPException(status_code=422,
+                            detail="Couldn't read enough text from this document to auto-fill. It may be a scanned image — please fill the form manually.")
+    # Cap text sent to LLM (protect token budget)
+    text = text[:18000]
+    session_id = f"ts-parse-{body.pdf_file_id[:8]}"
+    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=TERM_SHEET_PARSE_SYSTEM)
+    chat.with_model("anthropic", "claude-sonnet-4-5-20250929")
+    try:
+        reply = await chat.send_message(UserMessage(text=f"Extract term sheet fields from this document text:\n\n{text}"))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Auto-fill service failed: {e}")
+    # Robustly parse the LLM's JSON reply
+    txt = (reply or "").strip()
+    if txt.startswith("```"):
+        # strip any accidental fences
+        txt = txt.strip("`")
+        if txt.lower().startswith("json"):
+            txt = txt[4:].strip()
+    try:
+        parsed = json.loads(txt)
+        if not isinstance(parsed, dict):
+            raise ValueError("not an object")
+    except Exception:
+        raise HTTPException(status_code=502,
+                            detail="Couldn't parse auto-fill output — please fill the form manually.")
+    # Whitelist keys to avoid injection into unexpected fields
+    allowed = {
+        "rate_type", "interest_rate_pct", "floating_index", "floating_spread_bps",
+        "loan_amount", "ltv_pct", "ltc_pct", "amortization_years", "term_months",
+        "io_months", "fixed_period_months", "rate_adjustment_notes", "recourse",
+        "prepay", "origination_fee_pct", "exit_fee_pct", "expiration_date",
+        "contingencies", "notes",
+    }
+    clean = {k: v for k, v in parsed.items() if k in allowed and v not in (None, "", [], {})}
+    return {"ok": True, "extracted": clean, "field_count": len(clean)}
+
+
 @api.get("/term-sheets/{ts_id}/document")
 async def download_term_sheet_document(ts_id: str, user=Depends(get_current_user)):
     """Download the term-sheet attachment. Allowed for: (a) any admin, (b) the submitting

@@ -223,6 +223,8 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
   const [pdfFilename, setPdfFilename] = useState(existing?.document?.filename || "");
   const [pdfSize, setPdfSize] = useState(existing?.document?.size || 0);
   const [uploading, setUploading] = useState(false);
+  const [autofilling, setAutofilling] = useState(false);
+  const [autofilledFields, setAutofilledFields] = useState([]); // list of keys just auto-filled — for the yellow chip
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const num = (v) => (v === "" || v == null ? null : Number(v));
 
@@ -250,6 +252,34 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
       toast.error(e?.response?.data?.detail || "Upload failed");
     } finally {
       setUploading(false);
+    }
+  };
+
+  const autofillFromDoc = async () => {
+    if (!pdfFileId) return;
+    setAutofilling(true);
+    try {
+      const r = await api.post(`/lender/scenarios/${scenarioId}/term-sheet/parse-doc`, {
+        pdf_file_id: pdfFileId,
+      });
+      const ext = r.data?.extracted || {};
+      const count = r.data?.field_count || 0;
+      if (!count) {
+        toast.error("Couldn't find any fields to auto-fill in that document.");
+        return;
+      }
+      // Merge into form state, coercing all values to strings for the inputs
+      const patch = {};
+      for (const [k, v] of Object.entries(ext)) {
+        patch[k] = v == null ? "" : String(v);
+      }
+      setF((prev) => ({ ...prev, ...patch }));
+      setAutofilledFields(Object.keys(ext));
+      toast.success(`Auto-filled ${count} field${count > 1 ? "s" : ""} — please verify before submitting.`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Auto-fill failed");
+    } finally {
+      setAutofilling(false);
     }
   };
 
@@ -311,6 +341,15 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
                 <span className="text-[#6B6558]">· {fmtSize(pdfSize)}</span>
                 <button
                   type="button"
+                  onClick={autofillFromDoc}
+                  disabled={autofilling}
+                  className="inline-flex items-center gap-1 text-[#23446E] hover:text-[#1A2E4E] underline disabled:opacity-50"
+                  data-testid="ts-autofill-btn"
+                >
+                  {autofilling ? "Reading document…" : "Auto-fill term sheet from document"}
+                </button>
+                <button
+                  type="button"
                   onClick={() => { setPdfFileId(null); setPdfFilename(""); setPdfSize(0); }}
                   className="text-[#8A1F1A] hover:text-[#5A0F0A] inline-flex items-center gap-1"
                   data-testid="ts-doc-remove"
@@ -344,6 +383,23 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
       {hasDoc && (
         <div className="text-xs text-[#6B6558]" data-testid="ts-optional-note">
           Below fields are optional when a document is attached — fill in any that help the broker compare offers at a glance.
+        </div>
+      )}
+
+      {autofilledFields.length > 0 && (
+        <div className="border border-[#C89434] bg-[#FBEFD3]/50 rounded-md p-3 text-xs flex items-center gap-2" data-testid="ts-autofill-banner">
+          <Check size={14} className="text-[#7A5410]" />
+          <div>
+            <b>{autofilledFields.length} field{autofilledFields.length > 1 ? "s" : ""} auto-filled from your document.</b> Please double-check each value before submitting — the extractor is best-effort.
+          </div>
+          <button
+            type="button"
+            onClick={() => setAutofilledFields([])}
+            className="ml-auto text-[#7A5410] hover:text-[#5A3A0A]"
+            data-testid="ts-autofill-dismiss"
+          >
+            <XIcon size={12} />
+          </button>
         </div>
       )}
 
