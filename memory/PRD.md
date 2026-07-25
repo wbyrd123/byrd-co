@@ -11,6 +11,25 @@
 - P3: Refactor `server.py` (~7,700 lines) into modular routes
 
 
+### Financials Tab + Executive Loan Summary — SHIPPED 2026-02
+Phase 1 + Phase 2 built in one push per user request. Owner-occupied support included.
+
+**Backend:**
+- `PropertyInfo.occupancy_type` field: `owner_occupied` | `non_owner_occupied` | null.
+- New schema: `scenario.financials.periods[]` (per-column tax return / P&L / pro forma), `selected_period_id`, `uw_assumptions` (rate/amort/term — broker-forced, independent from borrower target).
+- `compute_scenario_metrics` prefers the selected period for NOI/DSCR/DebtYield; legacy `financials.gross_income` block is fallback.
+- Endpoints: GET/POST/PATCH/DELETE `/admin/scenarios/{sid}/financials/periods{/{pid}}`, POST `/select`, PATCH `/assumptions`, POST `/parse-doc` (Ada reads tax return/P&L PDF via Claude Sonnet 4.5 + pypdf, strips depreciation/interest add-backs, returns structured proposal).
+- Executive Summary section: PDF via ReportLab with map (OSM static, free), Census demographics (U.S. Census ACS 5-year, free), sponsor snapshot, up to 4 photos (`db.summary_photos` collection), broker narrative, occupancy chip, pro-forma badge. Endpoints: GET/PATCH `/summary`, POST/DELETE/GET `/summary/photos{/{pid}}`, POST `/summary/generate`, POST `/summary/save-to-portal` (pins doc with `order=-1000`, `lender_visibility=included`, replaces prior file on regen).
+
+**Frontend:**
+- `AdminFinancialsTab.jsx` (new): multi-column period grid, UW rate inputs, add-period chooser (manual OR Ada upload+parse), inline editing, delete confirm, executive summary section with narrative textarea, photo grid (drag+drop-ready), toggle controls, Preview PDF & Save to Portal buttons.
+- `AdminScenarioDetail.jsx`: new "Financials" tab in the nav, Occupancy Type dropdown added to Package tab (`data-testid=pr-occupancy-type`).
+
+**Test results:** 19/19 backend endpoints pass. Frontend E2E verified (financials tab renders, UW inputs persist, add/select/delete periods, preview PDF opens, save-to-portal pins doc). See `/app/test_reports/iteration_11.json`.
+
+**Deferred hardening (non-blocking):** replace label-based summary doc lookup with a `system_key` field; fix pre-existing `<span>-inside-<option>` warning from visual editor instrumentation; refactor `server.py` (~9k lines).
+
+
 ### Lender View Reframe — Facts vs Preferences — SHIPPED 2026-02
 Removed rate-dependent metrics from the lender review screen so lenders aren't shown a "target rate" that biases their pricing.
 - **Zone 1 (top metrics strip):** 7 objective tiles — Loan Requested, Purchase, Value, LTV, LTC, NOI, Debt Yield. Debt Yield is rate-independent (NOI ÷ loan) so it's the safe deal-quality metric.

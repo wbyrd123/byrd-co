@@ -151,7 +151,14 @@ export default function AdminFinancialsTab({ scenarioId, scen, onScenReload }) {
       const r = await api.post(`/admin/scenarios/${scenarioId}/summary/generate`, {}, { responseType: "blob" });
       const url = URL.createObjectURL(r.data);
       setPreviewUrl(url);
-      window.open(url, "_blank");
+      // Use a hidden anchor click instead of window.open() to avoid popup blockers after an await.
+      const a = document.createElement("a");
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Generate failed");
     } finally {
