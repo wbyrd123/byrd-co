@@ -14,6 +14,7 @@ import {
 import ScenarioAIChat from "@/byrd/ScenarioAIChat";
 import ScenarioAIFab from "@/byrd/ScenarioAIFab";
 import BulkUploadZone from "@/byrd/BulkUploadZone";
+import AdminFinancialsTab from "@/byrd/AdminFinancialsTab";
 
 const useDebouncedSave = (fn, delay = 800) => {
   const [timer, setTimer] = useState(null);
@@ -77,6 +78,7 @@ const TABS = [
   { key: "overview", label: "Overview" },
   { key: "package", label: "Package" },
   { key: "docs", label: "Documents" },
+  { key: "financials", label: "Financials" },
   { key: "lenders", label: "Lenders" },
   { key: "termsheets", label: "Term Sheets" },
   { key: "ai", label: "AI Assist" },
@@ -376,6 +378,10 @@ export default function AdminScenarioDetail() {
           onCopyDocs={copyDocs}
           onReload={load}
         />
+      )}
+
+      {tab === "financials" && (
+        <AdminFinancialsTab scenarioId={id} scen={scen} onScenReload={load} />
       )}
 
       {tab === "lenders" && (
@@ -695,6 +701,13 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
           <Field label="Purchase Price ($)"><Inp type="number" defaultValue={prop.purchase_price ?? ""} onBlur={prSet("purchase_price", num)} data-testid="pr-price" /></Field>
           <Field label="Current Value ($)"><Inp type="number" defaultValue={prop.current_value ?? ""} onBlur={prSet("current_value", num)} /></Field>
           <Field label="Occupancy (%)"><Inp type="number" step="0.1" defaultValue={prop.occupancy_pct ?? ""} onBlur={prSet("occupancy_pct", num)} /></Field>
+          <Field label="Occupancy Type">
+            <Sel value={prop.occupancy_type || ""} onChange={(e) => patchSection("property_info")({ occupancy_type: e.target.value || null })} data-testid="pr-occupancy-type">
+              <option value="">Select…</option>
+              <option value="owner_occupied">Owner-Occupied</option>
+              <option value="non_owner_occupied">Non-Owner-Occupied</option>
+            </Sel>
+          </Field>
         </div>
       </section>
 

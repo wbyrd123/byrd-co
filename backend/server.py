@@ -1401,6 +1401,7 @@ class PropertyInfo(BaseModel):
     purchase_price: Optional[float] = None
     current_value: Optional[float] = None
     occupancy_pct: Optional[float] = None
+    occupancy_type: Optional[Literal["owner_occupied", "non_owner_occupied"]] = None
 
 
 class LoanRequest(BaseModel):
@@ -1418,6 +1419,67 @@ class Financials(BaseModel):
     operating_expenses: Optional[float] = None
     capex_reserves: Optional[float] = None
     override_noi: Optional[float] = None     # if borrower provides NOI directly
+
+
+# --- Financial Periods (multi-year Tax Return / P&L / Pro Forma comparison) ---
+class FinancialPeriodIncome(BaseModel):
+    gross_potential_rent: Optional[float] = None
+    vacancy_loss: Optional[float] = None          # dollar amount, typically negative or shown as positive-then-subtracted
+    other_income: Optional[float] = None
+
+
+class FinancialPeriodExpenses(BaseModel):
+    taxes: Optional[float] = None
+    insurance: Optional[float] = None
+    utilities: Optional[float] = None
+    repairs_maintenance: Optional[float] = None
+    management: Optional[float] = None
+    payroll: Optional[float] = None
+    marketing: Optional[float] = None
+    reserves_capex: Optional[float] = None
+    general_admin: Optional[float] = None
+    other_expense: Optional[float] = None
+
+
+class FinancialPeriod(BaseModel):
+    id: Optional[str] = None
+    label: str = Field(min_length=1)                  # e.g., "2024 Tax Return", "2025 P&L", "Year 1 Pro Forma"
+    doc_type: Literal["tax_return", "p_and_l", "pro_forma", "manual"] = "manual"
+    year: Optional[int] = None
+    is_pro_forma: bool = False
+    include_reserves_in_opex: bool = True             # per-column toggle
+    source_doc_id: Optional[str] = None               # optional link to uploaded doc that seeded this
+    source_filename: Optional[str] = None
+    income: FinancialPeriodIncome = Field(default_factory=FinancialPeriodIncome)
+    expenses: FinancialPeriodExpenses = Field(default_factory=FinancialPeriodExpenses)
+    notes: Optional[str] = ""
+
+
+class UWAssumptions(BaseModel):
+    rate_pct: Optional[float] = None                  # broker-set underwriting rate (not the borrower's target rate)
+    amort_months: Optional[int] = None
+    term_months: Optional[int] = None
+
+
+class FinancialsExpandedPatch(BaseModel):
+    # Partial-update payload for /admin/scenarios/{sid}/financials
+    uw_assumptions: Optional[UWAssumptions] = None
+    selected_period_id: Optional[str] = None
+
+
+class FinancialPeriodCreate(FinancialPeriod):
+    pass
+
+
+class FinancialPeriodUpdate(BaseModel):
+    label: Optional[str] = None
+    doc_type: Optional[Literal["tax_return", "p_and_l", "pro_forma", "manual"]] = None
+    year: Optional[int] = None
+    is_pro_forma: Optional[bool] = None
+    include_reserves_in_opex: Optional[bool] = None
+    income: Optional[FinancialPeriodIncome] = None
+    expenses: Optional[FinancialPeriodExpenses] = None
+    notes: Optional[str] = None
 
 
 class ConstructionBudget(BaseModel):
@@ -1541,6 +1603,43 @@ class LenderDocAccessAction(BaseModel):
 
 
 # ---------- Sizing engine ----------
+def _period_totals(period: dict) -> dict:
+    """Compute EGI, total OpEx, NOI from a single financial period dict."""
+    inc = period.get("income") or {}
+    exp = period.get("expenses") or {}
+    gpr = float(inc.get("gross_potential_rent") or 0)
+    vac = float(inc.get("vacancy_loss") or 0)   # dollars
+    oth = float(inc.get("other_income") or 0)
+    egi = gpr - abs(vac) + oth
+    exp_keys = ("taxes", "insurance", "utilities", "repairs_maintenance", "management",
+                "payroll", "marketing", "general_admin", "other_expense")
+    opex = sum(float(exp.get(k) or 0) for k in exp_keys)
+    if period.get("include_reserves_in_opex", True):
+        opex += float(exp.get("reserves_capex") or 0)
+    noi = egi - opex
+    return {"egi": round(egi, 2), "total_expenses": round(opex, 2), "noi": round(noi, 2)}
+
+
+def _period_computed(period: dict) -> dict:
+    """Return the period doc with its computed totals attached (for API responses)."""
+    p = dict(period)
+    p["_computed"] = _period_totals(p)
+    return p
+
+
+def _selected_period(scen: dict) -> Optional[dict]:
+    """Return the currently-selected period (with _computed attached), or None."""
+    fin = scen.get("financials") or {}
+    periods = fin.get("periods") or []
+    if not periods:
+        return None
+    sel_id = fin.get("selected_period_id")
+    match = next((p for p in periods if p.get("id") == sel_id), None)
+    if not match:
+        match = periods[0]
+    return _period_computed(match)
+
+
 def _calc_noi(fin: dict) -> Optional[float]:
     if not fin:
         return None
@@ -1595,12 +1694,31 @@ def compute_scenario_metrics(scen: dict) -> dict:
     su = scen.get("sources_uses") or []
 
     loan_amount = float(loan.get("loan_amount") or 0) or None
-    rate = float(loan.get("requested_rate_pct") or 0) or None
-    amort = int(loan.get("amort_months") or 0) or None
+
+    # UW rate/amort/term: prefer explicit UW assumptions on financials (broker-set for lender review).
+    # Falls back to the borrower's target on loan_request for backward-compat only.
+    uw = fin.get("uw_assumptions") or {}
+    rate = float(uw.get("rate_pct") or loan.get("requested_rate_pct") or 0) or None
+    amort = int(uw.get("amort_months") or loan.get("amort_months") or 0) or None
+    uw_source = "uw" if uw.get("rate_pct") else ("loan_request" if loan.get("requested_rate_pct") else None)
 
     property_value = _property_value(prop)
     tpc = _total_project_cost(prop, con)
-    noi = _calc_noi(fin)
+
+    # NOI: prefer the selected financial period; fall back to legacy Financials block.
+    sel = _selected_period(scen)
+    if sel:
+        noi = sel["_computed"]["noi"]
+        noi_source = {
+            "period_id": sel.get("id"),
+            "label": sel.get("label"),
+            "is_pro_forma": bool(sel.get("is_pro_forma")),
+            "doc_type": sel.get("doc_type"),
+        }
+    else:
+        noi = _calc_noi(fin)
+        noi_source = {"legacy": True} if noi is not None else None
+
     monthly_pmt = _monthly_payment(loan_amount, rate, amort) if (loan_amount and rate and amort) else None
     annual_ds = round(monthly_pmt * 12, 2) if monthly_pmt else None
 
@@ -1626,8 +1744,12 @@ def compute_scenario_metrics(scen: dict) -> dict:
         "property_value": property_value,
         "total_project_cost": tpc,
         "noi": noi,
+        "noi_source": noi_source,
         "monthly_payment": monthly_pmt,
         "annual_debt_service": annual_ds,
+        "uw_rate_pct": rate,
+        "uw_amort_months": amort,
+        "uw_source": uw_source,
         "ltv_pct": ltv,
         "ltc_pct": ltc,
         "dscr": dscr,
@@ -2547,8 +2669,775 @@ async def scenario_pdf(sid: str, admin=Depends(require_admin)):
     )
 
 
+# ================ Financial Periods (multi-year NOI/DSCR calculator) ================
+# Purpose: brokers build a per-period income/expense table (Tax Return, P&L, Pro Forma columns)
+# that feeds the lender-facing package + Executive Summary PDF. Underwriting rate is broker-set
+# here (independent from the borrower's target rate on the loan_request) so DSCR is defensible.
+
+def _default_financials_expanded() -> dict:
+    return {"periods": [], "selected_period_id": None,
+            "uw_assumptions": {"rate_pct": None, "amort_months": None, "term_months": None}}
+
+
+def _ensure_financials_expanded(scen: dict) -> dict:
+    fin = scen.get("financials") or {}
+    if "periods" not in fin:
+        fin["periods"] = []
+    if "selected_period_id" not in fin:
+        fin["selected_period_id"] = None
+    if "uw_assumptions" not in fin or not isinstance(fin.get("uw_assumptions"), dict):
+        fin["uw_assumptions"] = {"rate_pct": None, "amort_months": None, "term_months": None}
+    scen["financials"] = fin
+    return fin
+
+
+@api.get("/admin/scenarios/{sid}/financials")
+async def admin_get_financials(sid: str, admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    fin = _ensure_financials_expanded(scen)
+    periods_out = [_period_computed(p) for p in fin.get("periods", [])]
+    return {
+        "periods": periods_out,
+        "selected_period_id": fin.get("selected_period_id"),
+        "uw_assumptions": fin.get("uw_assumptions") or {},
+        "metrics": compute_scenario_metrics(scen),
+    }
+
+
+@api.post("/admin/scenarios/{sid}/financials/periods")
+async def admin_add_financial_period(sid: str, body: FinancialPeriodCreate,
+                                     admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    fin = _ensure_financials_expanded(scen)
+    period = body.model_dump()
+    period["id"] = period.get("id") or str(uuid.uuid4())
+    period["created_at"] = now_iso()
+    fin["periods"].append(period)
+    # Auto-select if first period
+    if not fin.get("selected_period_id"):
+        fin["selected_period_id"] = period["id"]
+    await db.scenarios.update_one({"id": sid}, {"$set": {"financials": fin, "updated_at": now_iso()}})
+    return _period_computed(period)
+
+
+@api.patch("/admin/scenarios/{sid}/financials/periods/{pid}")
+async def admin_update_financial_period(sid: str, pid: str, body: FinancialPeriodUpdate,
+                                        admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    fin = _ensure_financials_expanded(scen)
+    period = next((p for p in fin["periods"] if p.get("id") == pid), None)
+    if not period:
+        raise HTTPException(status_code=404, detail="Period not found")
+    updates = body.model_dump(exclude_none=True)
+    # Merge nested income/expenses partially
+    if "income" in updates:
+        period["income"] = {**(period.get("income") or {}), **(updates.pop("income") or {})}
+    if "expenses" in updates:
+        period["expenses"] = {**(period.get("expenses") or {}), **(updates.pop("expenses") or {})}
+    period.update(updates)
+    period["updated_at"] = now_iso()
+    await db.scenarios.update_one({"id": sid}, {"$set": {"financials": fin, "updated_at": now_iso()}})
+    return _period_computed(period)
+
+
+@api.delete("/admin/scenarios/{sid}/financials/periods/{pid}")
+async def admin_delete_financial_period(sid: str, pid: str, admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    fin = _ensure_financials_expanded(scen)
+    before = len(fin["periods"])
+    fin["periods"] = [p for p in fin["periods"] if p.get("id") != pid]
+    if len(fin["periods"]) == before:
+        raise HTTPException(status_code=404, detail="Period not found")
+    if fin.get("selected_period_id") == pid:
+        fin["selected_period_id"] = fin["periods"][0]["id"] if fin["periods"] else None
+    await db.scenarios.update_one({"id": sid}, {"$set": {"financials": fin, "updated_at": now_iso()}})
+    return {"ok": True}
+
+
+@api.post("/admin/scenarios/{sid}/financials/select")
+async def admin_select_financial_period(sid: str, body: dict, admin=Depends(require_admin)):
+    pid = (body or {}).get("period_id")
+    if not pid:
+        raise HTTPException(status_code=400, detail="period_id required")
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    fin = _ensure_financials_expanded(scen)
+    if not any(p.get("id") == pid for p in fin["periods"]):
+        raise HTTPException(status_code=404, detail="Period not found")
+    fin["selected_period_id"] = pid
+    await db.scenarios.update_one({"id": sid}, {"$set": {"financials": fin, "updated_at": now_iso()}})
+    return {"ok": True, "selected_period_id": pid}
+
+
+@api.patch("/admin/scenarios/{sid}/financials/assumptions")
+async def admin_patch_uw_assumptions(sid: str, body: UWAssumptions,
+                                     admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    fin = _ensure_financials_expanded(scen)
+    fin["uw_assumptions"] = {**(fin.get("uw_assumptions") or {}), **body.model_dump(exclude_none=True)}
+    await db.scenarios.update_one({"id": sid}, {"$set": {"financials": fin, "updated_at": now_iso()}})
+    return {"ok": True, "uw_assumptions": fin["uw_assumptions"]}
+
+
+# --- Ada: parse a tax return or P&L into a proposed financial period ---
+class FinancialsParseBody(BaseModel):
+    file_id: str            # id of an existing client_files row (tax return / P&L PDF)
+    doc_type: Literal["tax_return", "p_and_l"] = "tax_return"
+
+
+FINANCIALS_PARSE_SYSTEM = """You extract commercial real estate operating financials from a document (tax return Schedule E, business P&L, or trailing operating statement). Return ONLY compact JSON with these keys (omit or null if unclear):
+
+detected_doc_type ("tax_return"|"p_and_l"|"operating_statement"|"unknown"),
+year (integer, the tax year or the period year, if stated),
+label (short human label like "2024 Tax Return" or "2024 T-12 P&L"),
+income: { gross_potential_rent, vacancy_loss, other_income },
+expenses: { taxes, insurance, utilities, repairs_maintenance, management, payroll, marketing, reserves_capex, general_admin, other_expense },
+adjustments_note (short string describing add-backs applied, e.g., "Added back depreciation $18,400 and mortgage interest $52,100"),
+confidence ("high"|"medium"|"low")
+
+CRITICAL RULES:
+- ALWAYS add back these tax-return-only items (do NOT include them as operating expenses):
+  * Depreciation
+  * Amortization
+  * Mortgage interest / any interest expense
+- If the document shows total rents received (Schedule E line 3) without a separate GPR/vacancy breakdown, treat that number as gross_potential_rent and leave vacancy_loss null.
+- Property Management, Legal & Professional, and similar go into "management" (or "general_admin" if clearly office overhead not property mgmt).
+- All expense values are POSITIVE numbers (dollars of expense).
+- vacancy_loss is a POSITIVE number (dollars of loss); the app subtracts it from GPR.
+- If a line is not present or is $0, omit the key.
+- Never invent numbers. If it's not clearly readable from the document, omit.
+- Return raw JSON only, no markdown fences."""
+
+
+@api.post("/admin/scenarios/{sid}/financials/parse-doc")
+async def admin_parse_financials_doc(sid: str, body: FinancialsParseBody,
+                                     admin=Depends(require_admin)):
+    """Ada reads a tax return or P&L and proposes a financial period. Broker reviews before saving."""
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    f = await db.client_files.find_one({"id": body.file_id}, {"_id": 0})
+    if not f:
+        raise HTTPException(status_code=404, detail="Uploaded file not found")
+    ct = (f.get("content_type") or "").lower()
+    raw = base64.b64decode(f["data_b64"])
+    text = ""
+    if "pdf" in ct or f.get("filename", "").lower().endswith(".pdf"):
+        text = _extract_pdf_text(raw)
+    else:
+        try:
+            text = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            text = ""
+    if not text or len(text.strip()) < 30:
+        raise HTTPException(status_code=422,
+                            detail="Couldn't read enough text from this document. It may be a scanned image — please enter the numbers manually.")
+    text = text[:22000]
+    session_id = f"fin-parse-{body.file_id[:8]}"
+    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=FINANCIALS_PARSE_SYSTEM)
+    chat.with_model("anthropic", "claude-sonnet-4-5-20250929")
+    try:
+        reply = await chat.send_message(UserMessage(
+            text=f"Document type hint: {body.doc_type}\n\nExtract fields from this document:\n\n{text}"
+        ))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ada parse failed: {e}")
+    txt = (reply or "").strip()
+    if txt.startswith("```"):
+        txt = txt.strip("`")
+        if txt.lower().startswith("json"):
+            txt = txt[4:].strip()
+    try:
+        parsed = json.loads(txt)
+        if not isinstance(parsed, dict):
+            raise ValueError("not object")
+    except Exception:
+        raise HTTPException(status_code=502, detail="Couldn't parse Ada's output — please enter manually.")
+    # Return the raw parsed output as a proposed period (broker reviews before saving via POST /periods)
+    proposal = {
+        "label": parsed.get("label") or (f"{parsed.get('year') or ''} {body.doc_type.replace('_', ' ').title()}".strip() or "New Period"),
+        "doc_type": body.doc_type,
+        "year": parsed.get("year"),
+        "is_pro_forma": False,
+        "include_reserves_in_opex": True,
+        "source_doc_id": body.file_id,
+        "source_filename": f.get("filename"),
+        "income": (parsed.get("income") or {}),
+        "expenses": (parsed.get("expenses") or {}),
+        "notes": (parsed.get("adjustments_note") or ""),
+        "confidence": parsed.get("confidence") or "medium",
+    }
+    return {"ok": True, "proposal": proposal, "raw": parsed}
+
+
+# ================ Executive Summary (Loan Summary PDF) ================
+# Broker-generated 1-2 page branded PDF pulling selected-period financials, sponsor snapshot,
+# property photos, an OpenStreetMap image, U.S. Census demographics, and a broker narrative.
+
+import urllib.parse as _urlparse
+import urllib.request as _urlreq
+
+class SummaryPhotoUpload(BaseModel):
+    filename: str = Field(min_length=1, max_length=200)
+    content_type: str = Field(min_length=1, max_length=100)
+    data_b64: str = Field(min_length=1)
+
+
+class ExecutiveSummaryPatch(BaseModel):
+    narrative: Optional[str] = None
+    include_map: Optional[bool] = None
+    include_census: Optional[bool] = None
+    include_photos: Optional[bool] = None
+    include_sponsor_snapshot: Optional[bool] = None
+
+
+class SaveSummaryToPortalBody(BaseModel):
+    label: Optional[str] = "Loan Executive Summary"
+
+
+def _ensure_summary_cfg(scen: dict) -> dict:
+    cfg = scen.get("executive_summary") or {}
+    cfg.setdefault("narrative", "")
+    cfg.setdefault("include_map", True)
+    cfg.setdefault("include_census", True)
+    cfg.setdefault("include_photos", True)
+    cfg.setdefault("include_sponsor_snapshot", True)
+    cfg.setdefault("photo_file_ids", [])
+    scen["executive_summary"] = cfg
+    return cfg
+
+
+def _http_get_json(url: str, timeout: float = 6.0) -> Optional[dict]:
+    try:
+        req = _urlreq.Request(url, headers={"User-Agent": "Byrd-CO-Loan-Summary/1.0"})
+        with _urlreq.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _http_get_bytes(url: str, timeout: float = 8.0) -> Optional[bytes]:
+    try:
+        req = _urlreq.Request(url, headers={"User-Agent": "Byrd-CO-Loan-Summary/1.0"})
+        with _urlreq.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except Exception:
+        return None
+
+
+def _geocode_address(prop: dict) -> Optional[dict]:
+    """Nominatim geocoding (free, no key). Returns {lat, lon, display} or None."""
+    parts = [prop.get("address"), prop.get("city"), prop.get("state"), prop.get("zip")]
+    q = ", ".join([p for p in parts if p])
+    if not q:
+        return None
+    url = "https://nominatim.openstreetmap.org/search?" + _urlparse.urlencode(
+        {"format": "json", "q": q, "limit": 1, "addressdetails": 1}
+    )
+    data = _http_get_json(url)
+    if not data or not isinstance(data, list):
+        return None
+    hit = data[0]
+    return {"lat": float(hit["lat"]), "lon": float(hit["lon"]), "display": hit.get("display_name") or q}
+
+
+def _static_map_bytes(lat: float, lon: float, zoom: int = 15) -> Optional[bytes]:
+    """OSM static map (free, no key). Returns PNG bytes or None."""
+    url = ("https://staticmap.openstreetmap.de/staticmap.php?"
+           + _urlparse.urlencode({
+               "center": f"{lat},{lon}", "zoom": zoom, "size": "600x360",
+               "maptype": "mapnik", "markers": f"{lat},{lon},red-pushpin",
+           }))
+    return _http_get_bytes(url)
+
+
+def _census_demographics(lat: float, lon: float) -> Optional[dict]:
+    """Fetch ACS 5-year demographics at the census tract for (lat, lon). No key required."""
+    # Step 1: reverse-geocode to state/county/tract via Census Geocoder
+    url1 = ("https://geocoding.geo.census.gov/geocoder/geographies/coordinates?"
+            + _urlparse.urlencode({"x": lon, "y": lat, "benchmark": "Public_AR_Current",
+                                    "vintage": "Current_Current", "format": "json"}))
+    g = _http_get_json(url1)
+    try:
+        tract = g["result"]["geographies"]["Census Tracts"][0]
+        state, county, tr = tract["STATE"], tract["COUNTY"], tract["TRACT"]
+        tract_name = tract.get("NAME") or f"Tract {tr}"
+    except Exception:
+        return None
+    # Step 2: pull ACS 5-year vars for tract:
+    #   B01003_001E = Total population
+    #   B19013_001E = Median household income
+    #   B25077_001E = Median home value
+    #   B25064_001E = Median gross rent
+    #   B25010_001E = Avg household size
+    fields = "NAME,B01003_001E,B19013_001E,B25077_001E,B25064_001E,B25010_001E"
+    url2 = ("https://api.census.gov/data/2022/acs/acs5?"
+            + _urlparse.urlencode({"get": fields, "for": f"tract:{tr}",
+                                    "in": f"state:{state} county:{county}"}))
+    d = _http_get_json(url2)
+    if not d or not isinstance(d, list) or len(d) < 2:
+        return None
+    headers, values = d[0], d[1]
+    row = dict(zip(headers, values))
+    def _n(v):
+        try:
+            n = float(v)
+            return n if n >= 0 else None
+        except (TypeError, ValueError):
+            return None
+    return {
+        "tract_name": tract_name,
+        "population": _n(row.get("B01003_001E")),
+        "median_household_income": _n(row.get("B19013_001E")),
+        "median_home_value": _n(row.get("B25077_001E")),
+        "median_gross_rent": _n(row.get("B25064_001E")),
+        "avg_household_size": _n(row.get("B25010_001E")),
+    }
+
+
+def render_executive_summary_pdf(scen: dict, metrics: dict, cfg: dict,
+                                 photos: list, geo: Optional[dict],
+                                 map_png: Optional[bytes], census: Optional[dict],
+                                 selected_period: Optional[dict]) -> bytes:
+    """Byrd-branded 1-2 page Executive Loan Summary PDF."""
+    from reportlab.platypus import Image as RImage
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter,
+                            leftMargin=0.6 * inch, rightMargin=0.6 * inch,
+                            topMargin=0.5 * inch, bottomMargin=0.5 * inch,
+                            title=f"Byrd & CO — Loan Summary — {scen.get('name', '')}")
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="Helvetica-Bold",
+                        fontSize=20, leading=24, textColor=BYRD_INK, spaceAfter=2)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="Helvetica-Bold",
+                        fontSize=11, leading=14, textColor=BYRD_INK, spaceBefore=10, spaceAfter=3)
+    body = ParagraphStyle("body", parent=styles["BodyText"], fontName="Helvetica",
+                          fontSize=9, leading=12, textColor=BYRD_INK)
+    small = ParagraphStyle("small", parent=styles["BodyText"], fontName="Helvetica",
+                           fontSize=8, leading=10, textColor=BYRD_MUTED)
+    elements = []
+
+    prop = scen.get("property_info") or {}
+    loan = scen.get("loan_request") or {}
+    addr = ", ".join([b for b in [prop.get("address"), prop.get("city"),
+                                    prop.get("state"), prop.get("zip")] if b])
+
+    # Header
+    elements.append(Paragraph("BYRD &amp; CO", ParagraphStyle(
+        "brand", fontName="Helvetica-Bold", fontSize=10, textColor=BYRD_GOLD, spaceAfter=1)))
+    elements.append(Paragraph("Commercial Real Estate Lending &nbsp;&middot;&nbsp; Loan Executive Summary", small))
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph(scen.get("name") or "Loan Package", h1))
+    if addr:
+        elements.append(Paragraph(addr, body))
+    tags = []
+    ot = prop.get("occupancy_type")
+    if ot:
+        tags.append(f"<b>{'Owner-Occupied' if ot == 'owner_occupied' else 'Non-Owner-Occupied'}</b>")
+    if loan.get("loan_type"):
+        tags.append(loan['loan_type'])
+    if selected_period and selected_period.get("is_pro_forma"):
+        tags.append("<b>Pro Forma Underwriting</b>")
+    if tags:
+        elements.append(Paragraph(" &nbsp;·&nbsp; ".join(tags), small))
+    elements.append(Spacer(1, 6))
+
+    # Photos row (up to 4 thumbs)
+    if cfg.get("include_photos") and photos:
+        thumbs = []
+        for p in photos[:4]:
+            try:
+                img = RImage(BytesIO(p["bytes"]), width=1.7 * inch, height=1.15 * inch)
+                thumbs.append(img)
+            except Exception:
+                continue
+        if thumbs:
+            row = [thumbs + [""] * (4 - len(thumbs))]
+            t = Table(row, colWidths=[1.75 * inch] * 4)
+            t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+            elements.append(t)
+            elements.append(Spacer(1, 6))
+
+    # Key Metrics grid — facts only (rate-independent where possible; DSCR labeled with UW rate)
+    def _fmt_money_local(v):
+        return _fmt_money(v)
+    def _fmt_pct_local(v, d=1):
+        return _fmt_pct(v, d)
+    grid = [
+        [Paragraph("<b>Loan Requested</b>", body), _fmt_money_local(loan.get("loan_amount")),
+         Paragraph("<b>Purchase</b>", body), _fmt_money_local(prop.get("purchase_price"))],
+        [Paragraph("<b>Property Value</b>", body), _fmt_money_local(metrics.get("property_value")),
+         Paragraph("<b>LTV / LTC</b>", body),
+         f"{_fmt_pct_local(metrics.get('ltv_pct'))}  /  {_fmt_pct_local(metrics.get('ltc_pct'))}"],
+        [Paragraph("<b>NOI</b>", body), _fmt_money_local(metrics.get("noi")),
+         Paragraph("<b>Debt Yield</b>", body), _fmt_pct_local(metrics.get("debt_yield_pct"), 2)],
+        [Paragraph("<b>DSCR</b>", body), _fmt_num(metrics.get("dscr")) + "x" if metrics.get("dscr") else "—",
+         Paragraph("<b>UW Rate / Amort</b>", body),
+         (f"{metrics.get('uw_rate_pct'):.2f}% / {metrics.get('uw_amort_months') or '—'} mo"
+          if metrics.get("uw_rate_pct") else "—")],
+    ]
+    t = Table(grid, colWidths=[1.3 * inch, 1.55 * inch, 1.3 * inch, 1.85 * inch])
+    t.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+        ("BACKGROUND", (0, 0), (0, -1), BYRD_IVORY),
+        ("BACKGROUND", (2, 0), (2, -1), BYRD_IVORY),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    elements.append(t)
+    # DSCR/NOI source note
+    src_bits = []
+    if selected_period:
+        tag = selected_period.get("label") or "Selected period"
+        if selected_period.get("is_pro_forma"):
+            src_bits.append(f"NOI/Debt Yield based on <b>{tag}</b> (projected)")
+        else:
+            src_bits.append(f"NOI/Debt Yield based on <b>{tag}</b>")
+    if metrics.get("uw_rate_pct"):
+        src_bits.append(f"DSCR assumes {metrics['uw_rate_pct']:.2f}% underwriting rate")
+    if src_bits:
+        elements.append(Paragraph(" · ".join(src_bits), small))
+
+    # Property Details + Map side by side
+    prop_rows = [
+        ["Type", prop.get("property_type") or "—", "Units", _fmt_num(prop.get("units"))],
+        ["Sq Ft", _fmt_num(prop.get("sqft")), "Year Built", _fmt_num(prop.get("year_built"))],
+        ["Occupancy", _fmt_pct_local(prop.get("occupancy_pct")), "Current Value", _fmt_money_local(prop.get("current_value"))],
+    ]
+    pt = Table(prop_rows, colWidths=[0.9 * inch, 1.3 * inch, 0.9 * inch, 1.3 * inch])
+    pt.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), BYRD_IVORY),
+        ("BACKGROUND", (2, 0), (2, -1), BYRD_IVORY),
+        ("GRID", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+
+    map_flow = None
+    if cfg.get("include_map") and map_png:
+        try:
+            map_flow = RImage(BytesIO(map_png), width=3.4 * inch, height=2.0 * inch)
+        except Exception:
+            map_flow = None
+
+    elements.append(Paragraph("Property Details &amp; Location", h2))
+    if map_flow:
+        two_col = Table([[pt, map_flow]], colWidths=[4.5 * inch, 3.6 * inch])
+        two_col.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+        elements.append(two_col)
+    else:
+        elements.append(pt)
+
+    # Census / demographics
+    if cfg.get("include_census") and census:
+        elements.append(Paragraph("Neighborhood Demographics", h2))
+        c = census
+        c_rows = [
+            ["Census Tract", c.get("tract_name") or "—",
+             "Population", _fmt_num(c.get("population"))],
+            ["Median HH Income", _fmt_money_local(c.get("median_household_income")),
+             "Median Home Value", _fmt_money_local(c.get("median_home_value"))],
+            ["Median Gross Rent", _fmt_money_local(c.get("median_gross_rent")),
+             "Avg HH Size", _fmt_num(c.get("avg_household_size"))],
+        ]
+        ct = Table(c_rows, colWidths=[1.4 * inch, 1.4 * inch, 1.4 * inch, 1.4 * inch])
+        ct.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), BYRD_IVORY),
+            ("BACKGROUND", (2, 0), (2, -1), BYRD_IVORY),
+            ("GRID", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(ct)
+        elements.append(Paragraph("<i>Source: U.S. Census Bureau, ACS 5-Year 2022</i>", small))
+
+    # Sponsor snapshot
+    sponsors = scen.get("sponsors") or []
+    if cfg.get("include_sponsor_snapshot") and sponsors:
+        elements.append(Paragraph("Sponsor Snapshot", h2))
+        sp_rows = [["Sponsor", "Role", "Ownership", "FICO", "Liquidity", "Net Worth"]]
+        for sp in sponsors:
+            role_bits = [sp.get("role") or ""]
+            if sp.get("is_guarantor") and (sp.get("role") or "") != "managing":
+                role_bits.append("Guarantor")
+            sp_rows.append([
+                sp.get("name") or "—",
+                " · ".join([r for r in role_bits if r]) or "—",
+                f"{sp.get('ownership_pct')}%" if sp.get("ownership_pct") is not None else "—",
+                str(sp.get("credit_score") or "—"),
+                _fmt_money_local(sp.get("liquidity")),
+                _fmt_money_local(sp.get("net_worth")),
+            ])
+        spt = Table(sp_rows, colWidths=[1.6 * inch, 1.3 * inch, 0.8 * inch, 0.7 * inch, 1.1 * inch, 1.1 * inch])
+        spt.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), BYRD_IVORY),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(spt)
+
+    # Narrative
+    if (cfg.get("narrative") or "").strip():
+        elements.append(Paragraph("Deal Narrative", h2))
+        # Preserve line breaks — replace \n with <br/>
+        narrative_html = (cfg["narrative"] or "").replace("\n", "<br/>")
+        elements.append(Paragraph(narrative_html, body))
+
+    # Contact + disclaimer
+    elements.append(Spacer(1, 10))
+    contact = Table([[
+        Paragraph("<b>Wayne Byrd</b><br/>832-813-9802<br/>wayne@byrd-co.com", body),
+        Paragraph("<b>Caleb Byrd</b><br/>832-661-4390<br/>caleb@byrd-co.com", body),
+    ]], colWidths=[3.7 * inch, 3.7 * inch])
+    contact.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), BYRD_IVORY),
+        ("BOX", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    elements.append(contact)
+    elements.append(Paragraph(
+        "<i>This Loan Executive Summary is provided by Byrd &amp; Co. for informational purposes only. "
+        "Financials shown reflect the currently-selected underwriting period"
+        + (" — projected numbers where noted." if selected_period and selected_period.get("is_pro_forma") else ".")
+        + " Final terms are subject to lender approval, appraisal, and due diligence.</i>",
+        small,
+    ))
+
+    doc.build(elements)
+    return buf.getvalue()
+
+
+# --- Photo storage (separate collection to keep marketing images out of client_docs) ---
+MAX_SUMMARY_PHOTOS = 4
+
+
+@api.get("/admin/scenarios/{sid}/summary")
+async def admin_get_summary_config(sid: str, admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    cfg = _ensure_summary_cfg(scen)
+    photos = await db.summary_photos.find(
+        {"scenario_id": sid}, {"_id": 0, "data_b64": 0},
+    ).sort("uploaded_at", 1).to_list(20)
+    return {"config": {k: cfg[k] for k in cfg if k != "photo_file_ids"},
+            "photos": photos}
+
+
+@api.patch("/admin/scenarios/{sid}/summary")
+async def admin_patch_summary_config(sid: str, body: ExecutiveSummaryPatch,
+                                     admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    cfg = _ensure_summary_cfg(scen)
+    for k, v in body.model_dump(exclude_none=True).items():
+        cfg[k] = v
+    await db.scenarios.update_one({"id": sid},
+                                  {"$set": {"executive_summary": cfg, "updated_at": now_iso()}})
+    return {"ok": True, "config": {k: cfg[k] for k in cfg if k != "photo_file_ids"}}
+
+
+@api.post("/admin/scenarios/{sid}/summary/photos")
+async def admin_upload_summary_photo(sid: str, body: SummaryPhotoUpload,
+                                     admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    count = await db.summary_photos.count_documents({"scenario_id": sid})
+    if count >= MAX_SUMMARY_PHOTOS:
+        raise HTTPException(status_code=400,
+                            detail=f"Max {MAX_SUMMARY_PHOTOS} photos per summary. Delete one first.")
+    try:
+        raw = base64.b64decode(body.data_b64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64")
+    if len(raw) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail=f"Photo exceeds {MAX_FILE_MB}MB")
+    pid = str(uuid.uuid4())
+    now = now_iso()
+    await db.summary_photos.insert_one({
+        "id": pid, "scenario_id": sid, "filename": body.filename,
+        "content_type": body.content_type, "size": len(raw), "data_b64": body.data_b64,
+        "uploaded_at": now, "uploaded_by": admin["id"],
+    })
+    return {"id": pid, "filename": body.filename, "size": len(raw), "uploaded_at": now}
+
+
+@api.delete("/admin/scenarios/{sid}/summary/photos/{pid}")
+async def admin_delete_summary_photo(sid: str, pid: str, admin=Depends(require_admin)):
+    res = await db.summary_photos.delete_one({"id": pid, "scenario_id": sid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    return {"ok": True}
+
+
+@api.get("/admin/scenarios/{sid}/summary/photos/{pid}")
+async def admin_get_summary_photo(sid: str, pid: str, admin=Depends(require_admin)):
+    ph = await db.summary_photos.find_one({"id": pid, "scenario_id": sid})
+    if not ph:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    return Response(content=base64.b64decode(ph["data_b64"]),
+                    media_type=ph.get("content_type") or "image/jpeg")
+
+
+async def _load_photos_for_summary(sid: str) -> list:
+    """Return list of {bytes, filename} for the scenario's summary photos, ordered by uploaded_at."""
+    docs = await db.summary_photos.find({"scenario_id": sid}).sort("uploaded_at", 1).to_list(MAX_SUMMARY_PHOTOS)
+    out = []
+    for d in docs:
+        try:
+            out.append({"bytes": base64.b64decode(d["data_b64"]), "filename": d.get("filename")})
+        except Exception:
+            continue
+    return out
+
+
+@api.post("/admin/scenarios/{sid}/summary/generate")
+async def admin_generate_summary(sid: str, admin=Depends(require_admin)):
+    """Generates the Executive Summary PDF on-demand. Also caches map+census on the scenario for reuse."""
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    _ensure_financials_expanded(scen)
+    cfg = _ensure_summary_cfg(scen)
+    metrics = compute_scenario_metrics(scen)
+    sel = _selected_period(scen)
+    photos = await _load_photos_for_summary(sid) if cfg.get("include_photos") else []
+    geo = None
+    map_png = None
+    census = None
+    prop = scen.get("property_info") or {}
+    if (cfg.get("include_map") or cfg.get("include_census")) and prop.get("address"):
+        geo = _geocode_address(prop)
+        if geo:
+            if cfg.get("include_map"):
+                map_png = _static_map_bytes(geo["lat"], geo["lon"])
+            if cfg.get("include_census"):
+                census = _census_demographics(geo["lat"], geo["lon"])
+    pdf_bytes = render_executive_summary_pdf(scen, metrics, cfg, photos, geo, map_png, census, sel)
+    fname = f"byrd-loan-summary-{sid[:8]}.pdf"
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{fname}"'},
+    )
+
+
+LOAN_SUMMARY_DOC_LABEL = "Loan Executive Summary"
+
+
+@api.post("/admin/scenarios/{sid}/summary/save-to-portal")
+async def admin_save_summary_to_portal(sid: str, body: SaveSummaryToPortalBody,
+                                       admin=Depends(require_admin)):
+    """Regenerates the PDF and pins it as the top document in the portal (visible to borrower,
+    lender, and admin). If a row already exists it replaces its file; otherwise creates a new row
+    with order=-1000 so it always sorts first."""
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    _ensure_financials_expanded(scen)
+    cfg = _ensure_summary_cfg(scen)
+    metrics = compute_scenario_metrics(scen)
+    sel = _selected_period(scen)
+    photos = await _load_photos_for_summary(sid) if cfg.get("include_photos") else []
+    geo = None
+    map_png = None
+    census = None
+    prop = scen.get("property_info") or {}
+    if (cfg.get("include_map") or cfg.get("include_census")) and prop.get("address"):
+        geo = _geocode_address(prop)
+        if geo:
+            if cfg.get("include_map"):
+                map_png = _static_map_bytes(geo["lat"], geo["lon"])
+            if cfg.get("include_census"):
+                census = _census_demographics(geo["lat"], geo["lon"])
+    pdf_bytes = render_executive_summary_pdf(scen, metrics, cfg, photos, geo, map_png, census, sel)
+    data_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+
+    # Locate an existing summary doc row (unique per scenario by label match)
+    label = (body.label or LOAN_SUMMARY_DOC_LABEL).strip() or LOAN_SUMMARY_DOC_LABEL
+    existing = await db.client_docs.find_one({"scenario_id": sid, "label": LOAN_SUMMARY_DOC_LABEL}, {"_id": 0})
+    now = now_iso()
+    filename = f"loan-summary-{sid[:8]}-{now[:10]}.pdf"
+    file_id = str(uuid.uuid4())
+    # Insert the file blob
+    await db.client_files.insert_one({
+        "id": file_id, "doc_id": existing["id"] if existing else None,
+        "client_id": scen.get("client_id"), "scenario_id": sid,
+        "filename": filename, "content_type": "application/pdf",
+        "size": len(pdf_bytes), "data_b64": data_b64, "uploaded_at": now,
+        "uploaded_by": "system",
+    })
+    file_meta = {
+        "file_id": file_id, "filename": filename, "content_type": "application/pdf",
+        "size": len(pdf_bytes), "uploaded_at": now, "uploaded_by": "system",
+    }
+    if existing:
+        # Replace files with a single-item history of the newest
+        # Cleanup: delete previous blobs for this doc row (keep single latest)
+        prev_ids = [f.get("file_id") for f in (existing.get("files") or []) if f.get("file_id")]
+        if existing.get("file_id"):
+            prev_ids.append(existing["file_id"])
+        prev_ids = [pid for pid in prev_ids if pid and pid != file_id]
+        if prev_ids:
+            await db.client_files.delete_many({"id": {"$in": prev_ids}})
+        await db.client_docs.update_one(
+            {"id": existing["id"]},
+            {"$set": {"file_id": file_id, "files": [file_meta],
+                      "label": label, "status": "uploaded",
+                      "order": -1000, "updated_at": now}},
+        )
+        doc_id = existing["id"]
+    else:
+        doc_id = str(uuid.uuid4())
+        # Also update the file blob's doc_id
+        await db.client_files.update_one({"id": file_id}, {"$set": {"doc_id": doc_id}})
+        await db.client_docs.insert_one({
+            "id": doc_id, "scenario_id": sid, "client_id": scen.get("client_id"),
+            "label": label, "category": "Loan Summary",
+            "required": False, "status": "uploaded",
+            "notes": "Auto-generated by Byrd & Co. — updates each time the broker regenerates it.",
+            "file_id": file_id, "files": [file_meta],
+            "sponsor_id": None,   # shared across all sponsors + lenders
+            "order": -1000,        # pins to top (default doc orders are >= 0)
+            "lender_visibility": "included",
+            "created_at": now, "updated_at": now,
+        })
+    return {"ok": True, "doc_id": doc_id, "file_id": file_id, "filename": filename}
+
+
 # ================ Fee Agreement (e-signature) ================
 FEE_AGREEMENT_DOC_LABEL = "Signed Fee Agreement"
+
+
+
 
 
 def render_fee_agreement_pdf(

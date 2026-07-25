@@ -1,0 +1,37 @@
+{
+  "summary": "Full backend + frontend verification of the new Financials tab (multi-period NOI/DSCR calculator) + Executive Loan Summary PDF feature. Backend: 19/19 tests PASSED (1 parse-doc 422 skipped — no client_files upload helper in this env; 404 branch covered). Frontend: verified end-to-end on scenario c4d98f0b — Financials tab renders, UW rate/amort/term inputs persist and cascade into the top metrics strip (DSCR 1.29, Debt Yield 10.05%), Add Period Manual flow creates a column, radio select updates NOI in header, delete confirms and removes the column, Executive Summary preview PDF opens (blob URL popup) and Save-to-Portal toast fires with the doc appearing in Documents tab. Package tab Occupancy dropdown has correct 'Owner-Occupied' / 'Non-Owner-Occupied' options and persists on reload.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Admin scenario detail — Package / Documents tabs",
+        "issues": [
+          "Carry-over from iter 9 & 10: React hydration warning '<span> cannot be a child of <option>' fires from the ve-instrumented <option> children in Sel dropdowns (client dropdown line 547 and sponsor filter line 1102 in AdminScenarioDetail.jsx). Non-blocking — same defect flagged twice already."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_financials_summary.py",
+    "/app/test_reports/pytest/financials_summary.xml"
+  ],
+  "action_items": [
+    "Consider addressing the persistent <span>-inside-<option> hydration warning (recurring for 3 iterations). Likely from a build-time visual-editor instrumentation wrapping option text in <span> — either whitelist <option> or unwrap the ve span for option children."
+  ],
+  "critical_code_review_comments": [
+    "server.py:3386 — save-to-portal locates existing summary doc by label 'Loan Executive Summary' string. If a broker manually renames the doc or a future migration changes the label, a NEW row will be created on next save (orphan). Consider tagging with a stable field like `system_key='loan_exec_summary'` for lookup.",
+    "server.py:3392 — When inserting the new client_files row for the summary, `doc_id` is set to existing['id'] (if replacing) but for the fresh-create branch (line 3419-3421) an initial insert has doc_id=None then patched to doc_id afterwards. Fine, but the tiny window between insert and update leaves an orphan file_id if the subsequent db.client_docs.insert_one fails. Wrap in a transaction or reorder (create doc_id first, then insert file).",
+    "AdminFinancialsTab.jsx:154 — window.open(url, '_blank') for the preview PDF: some browsers block popups if not directly inside the click handler; the try/catch wraps an await before window.open, which can trigger popup blockers on the second click. Consider using a hidden <a target=_blank> click instead.",
+    "server.py exceeds 9000 lines — modular split remains overdue (flagged in iter 10)."
+  ],
+  "updated_files": ["/app/backend/tests/test_financials_summary.py (new — 20 pytest cases)"],
+  "success_rate": {"backend": "100% (19/19 pass, 1 skipped)", "frontend": "100% (all specified E2E flows verified)"},
+  "seed_data_creation": "Test periods created and cleaned up via teardown_class. Persistent side-effect: uw_assumptions on scenario c4d98f0b now set to rate=6.75/amort=360/term=60 (was intended per test), and property_info.occupancy_type ends as 'owner_occupied' after the frontend test. Loan Executive Summary doc pinned to top of that scenario (idempotent replace-on-rerun). No orphan data.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "wayne@byrd-co.com / byrdco2026 (admin). Test scenario: c4d98f0b-f8d6-4399-abde-ccad9312c953.",
+  "context_for_next_testing_agent": "Run: `cd /app/backend && python -m pytest tests/test_financials_summary.py -v`. Test file is self-cleaning. Uses /api/auth/login (not /api/portal/login as initially guessed). Preview-PDF popup validation in Playwright: blob: URLs may cause wait_for_load_state('domcontentloaded') to time out even when the popup opens — verify popup existence via expect_popup() event alone. Ada parse-doc 422 (no-text file) branch was not exercised — would need an admin doc upload endpoint call chain; consider adding a helper in server.py or using an existing scenario doc upload API to complete coverage.",
+  "rca_of_the_issue": "N/A — all specified functionality works. The one 'skipped' test (parse-doc 422 for text-less file) requires uploading a real client_files row which isn't trivially exposed via a JSON-only endpoint; the 404 branch on non-existent file_id covers the auth+lookup path."
+}
