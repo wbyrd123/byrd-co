@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import {
   Building2, LogOut, Sliders, Inbox, FileText, Check, X as XIcon,
-  Send, Edit3, ExternalLink,
+  Send, Edit3, ExternalLink, Upload, Paperclip, Download,
 } from "lucide-react";
 
 const PROPERTY_TYPES = [
@@ -219,8 +219,39 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
     notes: existing?.notes || "",
   });
   const [busy, setBusy] = useState(false);
+  const [pdfFileId, setPdfFileId] = useState(existing?.pdf_file_id || null);
+  const [pdfFilename, setPdfFilename] = useState(existing?.document?.filename || "");
+  const [pdfSize, setPdfSize] = useState(existing?.document?.size || 0);
+  const [uploading, setUploading] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const num = (v) => (v === "" || v == null ? null : Number(v));
+
+  const uploadDoc = async (file) => {
+    if (!file) return;
+    if (file.size > 15 * 1024 * 1024) { toast.error("File exceeds 15 MB limit"); return; }
+    setUploading(true);
+    try {
+      const reader = new FileReader();
+      const b64 = await new Promise((resolve, reject) => {
+        reader.onload = () => resolve(reader.result.substring(reader.result.indexOf(",") + 1));
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const r = await api.post(`/lender/scenarios/${scenarioId}/term-sheet/upload`, {
+        filename: file.name,
+        content_type: file.type || "application/octet-stream",
+        data_b64: b64,
+      });
+      setPdfFileId(r.data.file_id);
+      setPdfFilename(r.data.filename);
+      setPdfSize(r.data.size);
+      toast.success("Document uploaded — you can submit as-is or fill out any fields below.");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -246,6 +277,7 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
         expiration_date: f.expiration_date || null,
         contingencies: f.contingencies || null,
         notes: f.notes || null,
+        pdf_file_id: pdfFileId,
       };
       await api.post(`/lender/scenarios/${scenarioId}/term-sheet`, payload);
       toast.success("Term sheet submitted");
@@ -257,8 +289,64 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
     }
   };
 
+  const hasDoc = !!pdfFileId;
+  const fmtSize = (b) => !b ? "" : b < 1024 ? `${b} B` : b < 1024 * 1024 ? `${(b / 1024).toFixed(1)} kB` : `${(b / 1024 / 1024).toFixed(2)} MB`;
+
   return (
     <form onSubmit={submit} className="mt-5 pt-5 border-t border-[#E4DFD1] space-y-4" data-testid="ts-form">
+      {/* Upload block — prominent, comes first */}
+      <div className={`border-2 ${hasDoc ? "border-[#245C25] bg-[#E5F0E5]/30" : "border-dashed border-[#C89434] bg-[#FBEFD3]/20"} rounded-md p-4`} data-testid="ts-upload-block">
+        <div className="flex items-start gap-3">
+          <div className={`w-9 h-9 shrink-0 rounded-md grid place-items-center border ${hasDoc ? "border-[#245C25] bg-white text-[#245C25]" : "border-[#C89434] bg-white text-[#C89434]"}`}>
+            {hasDoc ? <Check size={16} /> : <Upload size={16} />}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-serif text-base font-bold">
+              {hasDoc ? "Term sheet document attached" : "Upload your term sheet document (optional)"}
+            </div>
+            {hasDoc ? (
+              <div className="text-xs text-[#2A2A2A] mt-1 flex items-center gap-2 flex-wrap" data-testid="ts-doc-info">
+                <Paperclip size={12} />
+                <span className="font-semibold truncate max-w-[300px]" title={pdfFilename}>{pdfFilename}</span>
+                <span className="text-[#6B6558]">· {fmtSize(pdfSize)}</span>
+                <button
+                  type="button"
+                  onClick={() => { setPdfFileId(null); setPdfFilename(""); setPdfSize(0); }}
+                  className="text-[#8A1F1A] hover:text-[#5A0F0A] inline-flex items-center gap-1"
+                  data-testid="ts-doc-remove"
+                >
+                  <XIcon size={12} /> Remove
+                </button>
+              </div>
+            ) : (
+              <div className="text-xs text-[#6B6558] mt-1">
+                Many lenders send term sheets as a PDF or Word doc. Attach yours here and you can leave the structured fields below blank (or fill in the fields you want to highlight — both work). Max 15&nbsp;MB.
+              </div>
+            )}
+          </div>
+          {!hasDoc && (
+            <label className="byrd-btn byrd-btn-outline cursor-pointer text-xs h-9 px-3" data-testid="ts-doc-upload-btn">
+              <Upload size={12} />
+              {uploading ? "Uploading…" : "Choose file"}
+              <input
+                type="file"
+                className="hidden"
+                accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
+                onChange={(e) => { const file = e.target.files?.[0]; if (file) uploadDoc(file); e.target.value = ""; }}
+                disabled={uploading}
+                data-testid="ts-doc-file-input"
+              />
+            </label>
+          )}
+        </div>
+      </div>
+
+      {hasDoc && (
+        <div className="text-xs text-[#6B6558]" data-testid="ts-optional-note">
+          Below fields are optional when a document is attached — fill in any that help the broker compare offers at a glance.
+        </div>
+      )}
+
       <div className="grid sm:grid-cols-3 gap-3">
         <Field label="Rate Type">
           <Sel value={f.rate_type} onChange={set("rate_type")} data-testid="ts-rate-type">
@@ -375,6 +463,24 @@ function TermSheetsTab({ termSheets, onReload }) {
                 <KV label="Term">{t.term_months ? `${t.term_months} mo` : "—"}</KV>
                 <KV label="Recourse">{t.recourse || "—"}</KV>
               </div>
+              {t.document && (
+                <div className="mt-3 text-xs">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const r = await api.get(`/term-sheets/${t.id}/document`, { responseType: "blob" });
+                        const url = URL.createObjectURL(r.data);
+                        window.open(url, "_blank");
+                      } catch (e) { toast.error(e?.response?.data?.detail || "Download failed"); }
+                    }}
+                    className="inline-flex items-center gap-1.5 text-[#23446E] hover:text-[#1A2E4E] underline"
+                    data-testid={`ts-${t.id}-doc-download`}
+                  >
+                    <Download size={12} /> {t.document.filename}
+                  </button>
+                </div>
+              )}
               {t.broker_note && (
                 <div className="mt-3 text-xs bg-[#F3EEE0] border-l-2 border-[#C89434] p-2">
                   <b className="font-mono uppercase tracking-widest text-[10px] text-[#6B6558] block mb-1">// Broker Note</b>

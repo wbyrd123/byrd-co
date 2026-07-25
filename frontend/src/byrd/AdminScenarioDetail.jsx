@@ -2017,6 +2017,24 @@ function TermSheetsTab({ scenarioId, termSheets, onReload }) {
                   <div className="text-[#2A2A2A]">{t.rate_adjustment_notes}</div>
                 </div>
               )}
+              {t.document && (
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const r = await api.get(`/term-sheets/${t.id}/document`, { responseType: "blob" });
+                        const url = URL.createObjectURL(r.data);
+                        window.open(url, "_blank");
+                      } catch (e) { toast.error(e?.response?.data?.detail || "Download failed"); }
+                    }}
+                    className="byrd-btn byrd-btn-outline h-8 px-3 text-xs"
+                    data-testid={`admin-ts-${t.id}-doc-download`}
+                  >
+                    <Download size={12} /> {t.document.filename}
+                  </button>
+                </div>
+              )}
               {t.contingencies && (
                 <div className="mt-3 text-xs">
                   <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] mb-0.5">Contingencies</div>

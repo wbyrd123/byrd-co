@@ -458,6 +458,24 @@ function ScenarioTermSheetsSection({ scenarioId }) {
                 <b>Adjusts:</b> {t.rate_adjustment_notes}
               </div>
             )}
+            {t.document && (
+              <div className="mt-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const r = await api.get(`/term-sheets/${t.id}/document`, { responseType: "blob" });
+                      const url = URL.createObjectURL(r.data);
+                      window.open(url, "_blank");
+                    } catch (e) { toast.error(e?.response?.data?.detail || "Download failed"); }
+                  }}
+                  className="inline-flex items-center gap-1.5 text-xs text-[#23446E] hover:text-[#1A2E4E] underline"
+                  data-testid={`client-ts-${t.id}-doc-download`}
+                >
+                  <Download size={12} /> {t.document.filename}
+                </button>
+              </div>
+            )}
             {t.broker_note && t.status !== "submitted" && (
               <div className="mt-2 text-xs bg-[#F3EEE0] border-l-2 border-[#245C25] p-2">
                 <b className="font-mono uppercase tracking-widest text-[10px] text-[#6B6558] block mb-0.5">// Broker Note</b>

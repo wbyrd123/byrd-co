@@ -4336,7 +4336,88 @@ async def lender_list_term_sheets(user=Depends(require_lender)):
         scen = await db.scenarios.find_one({"id": s.get("scenario_id")},
                                           {"_id": 0, "name": 1, "id": 1})
         s["scenario_name"] = scen.get("name") if scen else "(deleted deal)"
+    await _hydrate_ts_docs(sheets)
     return sheets
+
+
+@api.post("/lender/scenarios/{sid}/term-sheet/upload")
+async def lender_upload_term_sheet_doc(sid: str, body: DocUploadInput,
+                                       user=Depends(require_lender)):
+    """Lender uploads their own term-sheet document (PDF / Word / etc.) in lieu of or
+    alongside the structured form. Returns a file_id to pass to POST /term-sheet as pdf_file_id."""
+    lender = await _resolve_lender_for_user(user)
+    share = await db.scenario_shares.find_one({"scenario_id": sid, "lender_id": lender["id"]})
+    if not share:
+        raise HTTPException(status_code=403, detail="You have not been invited to this deal")
+    # Reuse the standard base64 validation & size cap from _append_file_to_doc semantics
+    try:
+        raw = base64.b64decode(body.data_b64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64")
+    if len(raw) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_MB}MB limit")
+    file_id = str(uuid.uuid4())
+    now = now_iso()
+    await db.term_sheet_files.insert_one({
+        "id": file_id,
+        "scenario_id": sid,
+        "lender_id": lender["id"],
+        "uploaded_by_user_id": user["id"],
+        "filename": body.filename,
+        "content_type": body.content_type,
+        "size": len(raw),
+        "data_b64": body.data_b64,
+        "uploaded_at": now,
+    })
+    return {"ok": True, "file_id": file_id, "filename": body.filename, "size": len(raw)}
+
+
+@api.get("/term-sheets/{ts_id}/document")
+async def download_term_sheet_document(ts_id: str, user=Depends(get_current_user)):
+    """Download the term-sheet attachment. Allowed for: (a) any admin, (b) the submitting
+    lender / same-institution lender, (c) the borrower client(s) for the scenario."""
+    ts = await db.term_sheets.find_one({"id": ts_id}, {"_id": 0})
+    if not ts:
+        raise HTTPException(status_code=404, detail="Term sheet not found")
+    file_id = ts.get("pdf_file_id")
+    if not file_id:
+        raise HTTPException(status_code=404, detail="No document attached to this term sheet")
+    # Auth check
+    ok = False
+    if user.get("role") == "admin":
+        ok = True
+    elif user.get("role") == "lender":
+        # Same-institution lender
+        try:
+            lender = await _resolve_lender_for_user(user)
+            if lender and lender["id"] == ts.get("lender_id"):
+                ok = True
+        except Exception:
+            pass
+    elif user.get("role") == "client":
+        # Client must be linked to the scenario (primary or as a sponsor)
+        scen = await db.scenarios.find_one(
+            {"id": ts.get("scenario_id")}, {"_id": 0, "client_id": 1, "sponsors": 1},
+        )
+        if scen:
+            if scen.get("client_id") == user["id"]:
+                ok = True
+            else:
+                for sp in (scen.get("sponsors") or []):
+                    if sp.get("client_user_id") == user["id"]:
+                        ok = True
+                        break
+    if not ok:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    f = await db.term_sheet_files.find_one({"id": file_id})
+    if not f:
+        raise HTTPException(status_code=404, detail="File missing")
+    raw = base64.b64decode(f["data_b64"])
+    return Response(
+        content=raw,
+        media_type=f.get("content_type") or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{f["filename"]}"'},
+    )
 
 
 @api.post("/lender/scenarios/{sid}/term-sheet")
@@ -4350,6 +4431,22 @@ async def lender_submit_term_sheet(sid: str, body: TermSheetBody, background: Ba
     scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
     if not scen:
         raise HTTPException(status_code=404, detail="Scenario not found")
+    # If a pdf_file_id was provided, verify it belongs to this lender + scenario
+    if body.pdf_file_id:
+        f = await db.term_sheet_files.find_one(
+            {"id": body.pdf_file_id, "scenario_id": sid, "lender_id": lender["id"]},
+            {"_id": 0, "id": 1},
+        )
+        if not f:
+            raise HTTPException(status_code=400, detail="Uploaded document not found or not owned by you")
+    # A submission is only valid if EITHER the structured form has enough info OR a document is attached
+    has_form = any(getattr(body, k, None) is not None for k in
+                   ("interest_rate_pct", "loan_amount", "term_months", "amortization_years"))
+    if not body.pdf_file_id and not has_form:
+        raise HTTPException(
+            status_code=400,
+            detail="Please either upload a term-sheet document or fill in at least one of: rate, loan amount, term, or amortization.",
+        )
     # One active term sheet per (scenario, lender) — if one exists in state 'submitted', update it
     existing = await db.term_sheets.find_one({"scenario_id": sid, "lender_id": lender["id"],
                                              "status": {"$in": ["submitted", "countered"]}})
@@ -4406,6 +4503,11 @@ async def lender_submit_term_sheet(sid: str, body: TermSheetBody, background: Ba
     return {"ok": True, "id": ts_id}
 
 
+def _has_summary_pdf(ts: dict) -> bool:
+    """True when a term sheet has a downloadable lender-uploaded document."""
+    return bool(ts.get("pdf_file_id"))
+
+
 @api.delete("/lender/term-sheets/{tid}")
 async def lender_withdraw_term_sheet(tid: str, user=Depends(require_lender)):
     lender = await _resolve_lender_for_user(user)
@@ -4419,6 +4521,24 @@ async def lender_withdraw_term_sheet(tid: str, user=Depends(require_lender)):
     return {"ok": True}
 
 
+async def _hydrate_ts_docs(sheets: list[dict]) -> list[dict]:
+    """For each term sheet with pdf_file_id, attach a shallow {document: {filename, size}}
+    lookup so the UI can show 'Download NameOfDoc.pdf (52kB)'. No file bytes returned."""
+    ids = [s["pdf_file_id"] for s in sheets if s.get("pdf_file_id")]
+    if not ids:
+        return sheets
+    by_id: dict[str, dict] = {}
+    async for f in db.term_sheet_files.find(
+        {"id": {"$in": ids}}, {"_id": 0, "id": 1, "filename": 1, "size": 1, "content_type": 1},
+    ):
+        by_id[f["id"]] = f
+    for s in sheets:
+        fid = s.get("pdf_file_id")
+        if fid and fid in by_id:
+            s["document"] = by_id[fid]
+    return sheets
+
+
 # --- 6. ADMIN: view term sheets on a scenario + change status ---
 
 @api.get("/admin/scenarios/{sid}/term-sheets")
@@ -4426,6 +4546,7 @@ async def admin_list_term_sheets(sid: str, admin=Depends(require_admin)):
     sheets = await db.term_sheets.find(
         {"scenario_id": sid}, {"_id": 0}
     ).sort("submitted_at", -1).to_list(200)
+    await _hydrate_ts_docs(sheets)
     return sheets
 
 
@@ -4542,9 +4663,11 @@ async def client_list_term_sheets(sid: str, user=Depends(require_client)):
                                        {"_id": 0, "id": 1})
     if not scen:
         raise HTTPException(status_code=403, detail="Not your scenario")
-    return await db.term_sheets.find(
+    sheets = await db.term_sheets.find(
         {"scenario_id": sid, "status": {"$ne": "withdrawn"}}, {"_id": 0}
     ).sort("submitted_at", -1).to_list(200)
+    await _hydrate_ts_docs(sheets)
+    return sheets
 
 
 
