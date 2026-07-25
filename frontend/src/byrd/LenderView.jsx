@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
-import { API_BASE } from "@/lib/api";
+import { useParams, Link } from "react-router-dom";
+import { API_BASE, api } from "@/lib/api";
 import { LOGO_URL } from "@/byrd/data";
 import { fmtMoney, fmtPct, fmtNum } from "@/byrd/dealData";
 import { toast } from "sonner";
+import { useAuth } from "@/context/AuthContext";
 import {
-  ShieldCheck, ArrowRight, FileText, Download, Lock, Mail, Building2, Send, Check,
+  ShieldCheck, ArrowRight, FileText, Download, Lock, Mail, Building2, Send, Check, ArrowLeft, Layers,
 } from "lucide-react";
 
 // Simple fetch wrapper (public endpoints)
@@ -25,6 +26,8 @@ const SESSION_KEY = (token) => `lender_session_${token}`;
 
 export default function LenderView() {
   const { token } = useParams();
+  const { user } = useAuth();
+  const isLoggedInLender = user && user.role === "lender";
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState(null);
   const [session, setSession] = useState(localStorage.getItem(SESSION_KEY(token)) || null);
@@ -33,6 +36,7 @@ export default function LenderView() {
   const [gate, setGate] = useState({ viewer_name: "", viewer_email: "", viewer_institution: "" });
   const [acknowledged, setAcknowledged] = useState(false);
   const [terms, setTerms] = useState(null);
+  const [myInvites, setMyInvites] = useState([]);  // For scenario switcher — logged-in lenders only
   const [requestedNow, setRequestedNow] = useState(false);
 
   useEffect(() => {
@@ -42,6 +46,14 @@ export default function LenderView() {
     // Load the confidentiality acknowledgement text so we show current version
     publicFetch(`/public/lender/terms`).then(setTerms).catch(() => {});
   }, [token]);
+
+  // Logged-in lenders: fetch all deals shared with them so we can offer a switcher
+  useEffect(() => {
+    if (!isLoggedInLender) return;
+    api.get("/lender/invites")
+      .then((r) => setMyInvites(r.data || []))
+      .catch(() => {});
+  }, [isLoggedInLender]);
 
   const loadPackage = async (sess) => {
     try {
@@ -61,28 +73,38 @@ export default function LenderView() {
 
   const submitGate = async (e) => {
     e.preventDefault();
-    if (!gate.viewer_name || !gate.viewer_email || !gate.viewer_institution) {
-      toast.error("All three fields are required");
-      return;
-    }
     if (!acknowledged) {
       toast.error("Please acknowledge the confidentiality notice");
       return;
     }
     setBusy(true);
     try {
-      const res = await publicFetch(`/lender-view/${token}/gate`, {
-        method: "POST",
-        body: JSON.stringify({
-          ...gate,
+      let res;
+      if (isLoggedInLender) {
+        // Skip the identity form — use the lender's auth to derive it
+        const r = await api.post(`/lender-view/${token}/gate-authenticated`, {
           acknowledged: true,
           acknowledged_version: terms?.version || "1.0",
-        }),
-      });
+        });
+        res = r.data;
+      } else {
+        if (!gate.viewer_name || !gate.viewer_email || !gate.viewer_institution) {
+          toast.error("All three fields are required");
+          return;
+        }
+        res = await publicFetch(`/lender-view/${token}/gate`, {
+          method: "POST",
+          body: JSON.stringify({
+            ...gate,
+            acknowledged: true,
+            acknowledged_version: terms?.version || "1.0",
+          }),
+        });
+      }
       localStorage.setItem(SESSION_KEY(token), res.session_token);
       setSession(res.session_token);
     } catch (e) {
-      toast.error(e.message);
+      toast.error(e?.response?.data?.detail || e.message);
     } finally {
       setBusy(false);
     }
@@ -195,30 +217,42 @@ export default function LenderView() {
         <div className="max-w-lg mx-auto byrd-card p-8 md:p-10" data-testid="lender-gate">
           <div className="byrd-chip byrd-chip-gold"><ShieldCheck size={12} /> Confidential Loan Package</div>
           <h1 className="font-serif text-3xl font-bold mt-4">{preflight.scenario_name}</h1>
-          <p className="text-sm text-[#6B6558] mt-3">
-            You&apos;ve been sent a private loan package by Byrd &amp; CO. Please confirm your identity
-            before viewing — this creates the audit trail your broker uses to track lender interest.
-          </p>
+          {isLoggedInLender ? (
+            <p className="text-sm text-[#6B6558] mt-3" data-testid="gate-authed-hint">
+              Signed in as <b>{user.name || user.email}</b>. Just acknowledge the confidentiality
+              notice below and you&apos;re in.
+            </p>
+          ) : (
+            <p className="text-sm text-[#6B6558] mt-3">
+              You&apos;ve been sent a private loan package by Byrd &amp; CO. Please confirm your identity
+              before viewing — this creates the audit trail your broker uses to track lender interest.
+            </p>
+          )}
 
           <form onSubmit={submitGate} className="mt-6 space-y-4">
-            <div>
-              <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Your Name *</label>
-              <input required value={gate.viewer_name} onChange={(e) => setGate({ ...gate, viewer_name: e.target.value })}
-                data-testid="gate-name"
-                className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]" />
-            </div>
-            <div>
-              <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Work Email *</label>
-              <input required type="email" value={gate.viewer_email} onChange={(e) => setGate({ ...gate, viewer_email: e.target.value })}
-                data-testid="gate-email"
-                className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]" />
-            </div>
-            <div>
-              <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Institution *</label>
-              <input required value={gate.viewer_institution} onChange={(e) => setGate({ ...gate, viewer_institution: e.target.value })}
-                data-testid="gate-institution" placeholder="e.g. Frost Bank"
-                className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]" />
-            </div>
+            {/* Identity fields — only shown for anonymous prospects */}
+            {!isLoggedInLender && (
+              <>
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Your Name *</label>
+                  <input required value={gate.viewer_name} onChange={(e) => setGate({ ...gate, viewer_name: e.target.value })}
+                    data-testid="gate-name"
+                    className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Work Email *</label>
+                  <input required type="email" value={gate.viewer_email} onChange={(e) => setGate({ ...gate, viewer_email: e.target.value })}
+                    data-testid="gate-email"
+                    className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Institution *</label>
+                  <input required value={gate.viewer_institution} onChange={(e) => setGate({ ...gate, viewer_institution: e.target.value })}
+                    data-testid="gate-institution" placeholder="e.g. Frost Bank"
+                    className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]" />
+                </div>
+              </>
+            )}
 
             {/* Confidentiality acknowledgement — lightweight, per-session */}
             <div className="border border-[#E4DFD1] bg-[#FBF8F1] rounded-md p-3" data-testid="gate-ack-block">
@@ -270,6 +304,47 @@ export default function LenderView() {
   return (
     <Shell watermark={pkg.watermark}>
       <div className="max-w-5xl mx-auto space-y-6">
+        {/* Logged-in lender: portal breadcrumb + scenario switcher */}
+        {isLoggedInLender && (
+          <div className="flex items-center justify-between gap-3 flex-wrap" data-testid="lender-portal-bar">
+            <Link
+              to="/lender/portal"
+              className="inline-flex items-center gap-1.5 text-xs font-mono uppercase tracking-widest text-[#6B6558] hover:text-[#C89434]"
+              data-testid="back-to-portal"
+            >
+              <ArrowLeft size={12} /> Back to Portal
+            </Link>
+            {myInvites.length > 1 && (
+              <div className="inline-flex items-center gap-2">
+                <Layers size={13} className="text-[#6B6558]" />
+                <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">
+                  Switch deal
+                </label>
+                <select
+                  value={token}
+                  onChange={(e) => {
+                    const nextTok = e.target.value;
+                    if (nextTok && nextTok !== token) {
+                      // Clear any stale session for the destination so acknowledgement re-runs
+                      window.location.href = `/lender/scenario/${nextTok}`;
+                    }
+                  }}
+                  className="h-8 px-2 border border-[#E4DFD1] bg-white rounded-md text-xs min-w-[240px]"
+                  data-testid="scenario-switcher"
+                >
+                  {myInvites.map((inv) => (
+                    <option key={inv.share_id} value={inv.token}>
+                      {inv.scenario.name}
+                      {inv.scenario.loan_type ? ` · ${inv.scenario.loan_type}` : ""}
+                      {inv.term_sheet ? ` · TS: ${inv.term_sheet.status}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Header */}
         <div className="byrd-card p-6 md:p-8">
           <div className="flex items-start justify-between flex-wrap gap-3">

@@ -166,10 +166,10 @@ function InvitesTab({ invites, termSheets, onReload }) {
                 )}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
-                <a href={`/lender/scenario/${inv.token}`} target="_blank" rel="noreferrer"
+                <Link to={`/lender/scenario/${inv.token}`}
                   className="byrd-btn byrd-btn-outline h-9 px-3 text-xs" data-testid={`invite-${inv.share_id}-view`}>
                   <ExternalLink size={12} /> View Deal Package
-                </a>
+                </Link>
                 <button
                   onClick={() => setOpenId(openId === inv.share_id ? null : inv.share_id)}
                   className="byrd-btn byrd-btn-dark h-9 px-3 text-xs"

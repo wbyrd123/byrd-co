@@ -3109,10 +3109,30 @@ async def scenario_fee_agreement_cancel(sid: str, admin=Depends(require_admin)):
     fa = await db.fee_agreements.find_one({"scenario_id": sid, "status": "sent"}, {"_id": 0})
     if not fa:
         raise HTTPException(status_code=404, detail="No pending fee agreement to cancel")
+    now = now_iso()
     await db.fee_agreements.update_one(
         {"id": fa["id"]},
-        {"$set": {"status": "canceled", "canceled_at": now_iso(), "canceled_by_admin_id": admin["id"]}},
+        {"$set": {"status": "canceled", "canceled_at": now, "canceled_by_admin_id": admin["id"]}},
     )
+    # Cascade to the client_docs row so the client portal reflects reality.
+    # If the pinned Fee Agreement doc line is unsigned (no file, status != 'reviewed'),
+    # delete it entirely — cleanest UX for the borrower (they no longer see a stale line).
+    # If it's already signed (has files or reviewed), just annotate the note; don't blow away audit.
+    doc_id = fa.get("doc_id")
+    if doc_id:
+        dl = await db.client_docs.find_one({"id": doc_id}, {"_id": 0})
+        if dl:
+            has_files = bool(_ensure_doc_files_meta(dl)) or bool(dl.get("file_id"))
+            if not has_files and dl.get("status") != "reviewed":
+                await db.client_docs.delete_one({"id": doc_id})
+            else:
+                await db.client_docs.update_one(
+                    {"id": doc_id},
+                    {"$set": {
+                        "notes": f"Broker canceled this fee agreement on {now.split('T')[0]}.",
+                        "updated_at": now,
+                    }},
+                )
     return {"ok": True}
 
 
@@ -3588,6 +3608,49 @@ async def lender_gate(token: str, body: LenderGate, request: Request):
     payload["acknowledged_user_agent"] = request.headers.get("user-agent") if request else None
     session_token = _make_view_session(share["id"], payload)
     await _log_view(share["scenario_id"], share["id"], payload, "gate")
+    return {"session_token": session_token, "share_id": share["id"]}
+
+
+class LenderAckGate(BaseModel):
+    """Authenticated lenders only need to acknowledge the confidentiality notice.
+    Identity is pulled from their user + lender profile — no re-typing."""
+    acknowledged: bool = False
+    acknowledged_version: Optional[str] = None
+
+
+@api.post("/lender-view/{token}/gate-authenticated")
+async def lender_gate_authenticated(token: str, body: LenderAckGate,
+                                    request: Request, user=Depends(require_lender)):
+    """Skip the name/email/institution form for logged-in lenders. Requires the
+    lender to own the share (share.lender_id matches their lender record)."""
+    share = await db.scenario_shares.find_one({"token": token})
+    if not share:
+        raise HTTPException(status_code=404, detail="Link not found or revoked")
+    if not body.acknowledged:
+        raise HTTPException(
+            status_code=400,
+            detail="Please acknowledge the confidentiality notice to view this deal package.",
+        )
+    # Verify this lender owns this share (or their institution does)
+    lender = await _resolve_lender_for_user(user)
+    if share.get("lender_id") != lender["id"]:
+        raise HTTPException(status_code=403, detail="This deal package isn't shared with your institution.")
+    payload = {
+        "viewer_name": user.get("name") or lender.get("name") or user.get("email"),
+        "viewer_email": user.get("email"),
+        "viewer_institution": lender.get("name") or "",
+        "viewer_title": user.get("title") or "",
+        "viewer_phone": user.get("phone") or "",
+        "acknowledged": True,
+        "acknowledged_version": (body.acknowledged_version or LENDER_TERMS_VERSION),
+        "acknowledged_at": now_iso(),
+        "acknowledged_ip": request.client.host if request and request.client else None,
+        "acknowledged_user_agent": request.headers.get("user-agent") if request else None,
+        "authenticated_user_id": user["id"],
+        "authenticated_lender_id": lender["id"],
+    }
+    session_token = _make_view_session(share["id"], payload)
+    await _log_view(share["scenario_id"], share["id"], payload, "gate_authenticated")
     return {"session_token": session_token, "share_id": share["id"]}
 
 
