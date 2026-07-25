@@ -5938,6 +5938,25 @@ async def assistant_chat(body: AssistantChatRequest, admin=Depends(require_admin
     session_id = f"assistant::{admin['id']}"
     chat = _make_scenario_ai_chat(session_id, ASSISTANT_SYSTEM_PROMPT)
     turn_context = _assistant_turn_context(admin, open_tasks, clients, teammates, crm, stalled)
+    # Load recent conversation history so the assistant keeps memory across process restarts
+    # and worker cycles (LlmChat's internal store is ephemeral). Cap at 24 messages.
+    recent_msgs = await db.assistant_messages.find(
+        {"admin_id": admin["id"]}, {"_id": 0, "role": 1, "content": 1, "created_at": 1},
+    ).sort("created_at", -1).to_list(24)
+    recent_msgs.reverse()
+    transcript_lines = []
+    for m in recent_msgs:
+        role_lbl = "Broker" if m.get("role") == "user" else "Assistant"
+        c = (m.get("content") or "").strip()
+        if c:
+            transcript_lines.append(f"{role_lbl}: {c}")
+    transcript = "\n\n".join(transcript_lines)
+    if transcript:
+        turn_context = (
+            f"{turn_context}\n\n"
+            "## Recent conversation (use this to maintain continuity):\n\n"
+            f"{transcript}"
+        )
     user_text = f"{turn_context}\n\nBroker message:\n{body.message}"
 
     async def event_gen():
@@ -7628,6 +7647,25 @@ async def _ada_turn_context(user: dict) -> str:
         {"client_id": user["id"], "status": "in_progress"},
         {"_id": 0, "id": 1, "doc_type": 1, "scenario_id": 1, "updated_at": 1},
     ).to_list(20)
+    # Load recent conversation history so Ada retains memory across process restarts,
+    # worker cycles, and any in-memory-session eviction inside LlmChat. Cap the tail so
+    # very long chats don't blow the token budget — 24 messages ≈ 12 back-and-forth turns.
+    recent = await db.borrower_ada_messages.find(
+        {"client_id": user["id"]}, {"_id": 0, "role": 1, "content": 1, "created_at": 1},
+    ).sort("created_at", -1).to_list(24)
+    # We queried DESC to grab the tail; flip to chronological for the transcript.
+    recent.reverse()
+    # Exclude the *current* user turn we just inserted (last one) so it's not duplicated —
+    # the current message is appended to the prompt separately by the caller.
+    if recent and recent[-1].get("role") == "user":
+        recent = recent[:-1]
+    transcript_lines = []
+    for m in recent:
+        role = "Borrower" if m.get("role") == "user" else "Ada"
+        content = (m.get("content") or "").strip()
+        if content:
+            transcript_lines.append(f"{role}: {content}")
+    transcript = "\n\n".join(transcript_lines)
     payload = {
         "borrower": {
             "first_name": (user.get("name") or user.get("email", "").split("@")[0]).split(" ")[0],
@@ -7646,9 +7684,21 @@ async def _ada_turn_context(user: dict) -> str:
         } for s in scenarios],
         "in_progress_drafts": drafts,
     }
-    return ("Here is the current state (READ ONLY):\n\n"
-            f"```json\n{json.dumps(payload, indent=2, default=str)}\n```\n\n"
-            "Respond to the borrower.")
+    parts = [
+        "Here is the current state (READ ONLY):",
+        "",
+        f"```json\n{json.dumps(payload, indent=2, default=str)}\n```",
+    ]
+    if transcript:
+        parts.append("")
+        parts.append("## Recent conversation (chronological — use this to maintain continuity, "
+                     "remember what was discussed, and avoid greeting the borrower again if you've "
+                     "already been talking):")
+        parts.append("")
+        parts.append(transcript)
+    parts.append("")
+    parts.append("Respond to the borrower's new message below.")
+    return "\n".join(parts)
 
 
 def _ada_grab(full_text: str, marker: str) -> Optional[str]:
