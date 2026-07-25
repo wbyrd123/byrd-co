@@ -31,12 +31,16 @@ export default function LenderView() {
   const [pkg, setPkg] = useState(null);
   const [busy, setBusy] = useState(false);
   const [gate, setGate] = useState({ viewer_name: "", viewer_email: "", viewer_institution: "" });
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [terms, setTerms] = useState(null);
   const [requestedNow, setRequestedNow] = useState(false);
 
   useEffect(() => {
     publicFetch(`/lender-view/${token}/preflight`)
       .then(setPreflight)
       .catch((e) => setPreflightError(e.message));
+    // Load the confidentiality acknowledgement text so we show current version
+    publicFetch(`/public/lender/terms`).then(setTerms).catch(() => {});
   }, [token]);
 
   const loadPackage = async (sess) => {
@@ -61,11 +65,19 @@ export default function LenderView() {
       toast.error("All three fields are required");
       return;
     }
+    if (!acknowledged) {
+      toast.error("Please acknowledge the confidentiality notice");
+      return;
+    }
     setBusy(true);
     try {
       const res = await publicFetch(`/lender-view/${token}/gate`, {
         method: "POST",
-        body: JSON.stringify(gate),
+        body: JSON.stringify({
+          ...gate,
+          acknowledged: true,
+          acknowledged_version: terms?.version || "1.0",
+        }),
       });
       localStorage.setItem(SESSION_KEY(token), res.session_token);
       setSession(res.session_token);
@@ -207,11 +219,35 @@ export default function LenderView() {
                 data-testid="gate-institution" placeholder="e.g. Frost Bank"
                 className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]" />
             </div>
-            <button type="submit" disabled={busy} className="byrd-btn byrd-btn-dark w-full" data-testid="gate-submit">
+
+            {/* Confidentiality acknowledgement — lightweight, per-session */}
+            <div className="border border-[#E4DFD1] bg-[#FBF8F1] rounded-md p-3" data-testid="gate-ack-block">
+              <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] mb-1.5">
+                Confidentiality
+              </div>
+              <div
+                className="text-[11px] text-[#1A1A1A] whitespace-pre-line leading-relaxed max-h-40 overflow-y-auto"
+                data-testid="gate-ack-text"
+              >
+                {terms?.text || "By opening this deal package, I acknowledge the borrower information provided is confidential, provided by Byrd & CO solely to evaluate this financing request, and will not be shared with third parties outside my institution's underwriting team."}
+              </div>
+              <label className="mt-2 flex items-start gap-2 cursor-pointer" data-testid="gate-ack-checkbox-wrap">
+                <input
+                  type="checkbox"
+                  checked={acknowledged}
+                  onChange={(e) => setAcknowledged(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-[#C89434]"
+                  data-testid="gate-ack-checkbox"
+                />
+                <span className="text-xs">I acknowledge the confidentiality notice above.</span>
+              </label>
+            </div>
+
+            <button type="submit" disabled={busy || !acknowledged} className="byrd-btn byrd-btn-dark w-full disabled:opacity-40 disabled:cursor-not-allowed" data-testid="gate-submit">
               {busy ? "Verifying…" : "View Package"} <ArrowRight size={14} />
             </button>
             <p className="text-[11px] text-[#6B6558]">
-              By continuing you acknowledge this material is confidential, watermarked, and prepared for your use only.
+              This material is confidential, watermarked, and prepared for your use only.
             </p>
           </form>
         </div>

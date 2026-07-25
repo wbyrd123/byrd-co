@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { Building2, Check, ShieldCheck } from "lucide-react";
+import { Building2, Check } from "lucide-react";
 
 const INSTITUTION_TYPES = [
   { value: "bank", label: "Bank" },
@@ -42,9 +42,6 @@ const Textarea = (p) => (
 export default function LendersApplyPage() {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
-  const [terms, setTerms] = useState(null);
-  const [accepted, setAccepted] = useState(false);
-  const [sigName, setSigName] = useState("");
   const [f, setF] = useState({
     lender_name: "", institution_type: "bank",
     contact_name: "", contact_title: "", contact_email: "", contact_phone: "",
@@ -56,11 +53,6 @@ export default function LendersApplyPage() {
     decision_speed_days: "", typical_fees: "", notes: "",
   });
 
-  useEffect(() => {
-    // Load the current terms so the exact signed text is displayed & captured
-    api.get("/public/lender/terms").then((r) => setTerms(r.data)).catch(() => {});
-  }, []);
-
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const toggle = (arr, val) => (arr.includes(val) ? arr.filter((x) => x !== val) : [...arr, val]);
 
@@ -68,14 +60,6 @@ export default function LendersApplyPage() {
     e.preventDefault();
     if (!f.lender_name || !f.contact_name || !f.contact_email) {
       toast.error("Lender name, contact name, and contact email are required");
-      return;
-    }
-    if (!accepted) {
-      toast.error("Please accept the Non-Circumvention Agreement to continue");
-      return;
-    }
-    if (sigName.trim().length < 3) {
-      toast.error("Please type your full legal name to sign");
       return;
     }
     setBusy(true);
@@ -101,9 +85,6 @@ export default function LendersApplyPage() {
         recourse_preference: f.recourse_preference,
         decision_speed_days: num(f.decision_speed_days),
         typical_fees: f.typical_fees, notes: f.notes,
-        terms_accepted: true,
-        terms_signature_name: sigName.trim(),
-        terms_version: terms?.version || "1.0",
       };
       await api.post("/public/lender/apply", payload);
       setDone(true);
@@ -255,66 +236,8 @@ export default function LendersApplyPage() {
             </div>
           </section>
 
-          {/* Non-Circumvention Agreement */}
-          <section className="bg-white border border-[#C89434] rounded-md p-5 md:p-6" data-testid="lender-terms-section">
-            <div className="flex items-center gap-2 mb-2">
-              <ShieldCheck size={18} className="text-[#C89434]" />
-              <h2 className="font-serif text-lg font-bold">
-                {terms?.title || "Byrd & CO Lender Non-Circumvention Agreement"}
-              </h2>
-              {terms?.version && (
-                <span className="text-[10px] font-mono uppercase text-[#6B6558] tracking-widest">v{terms.version}</span>
-              )}
-            </div>
-            <p className="text-xs text-[#6B6558] mb-3">
-              Every Byrd & CO lending partner agrees to a standard non-circumvention clause before we send you deals. This is the same protection we ask of every partner — please read carefully.
-            </p>
-            <div
-              className="max-h-64 overflow-y-auto border border-[#E4DFD1] bg-[#FBF8F1] rounded-md p-3 text-xs text-[#1A1A1A] whitespace-pre-line leading-relaxed"
-              data-testid="lender-terms-text"
-            >
-              {terms?.text || "Loading agreement…"}
-            </div>
-            <div className="text-[11px] text-[#6B6558] mt-2">
-              A permanent copy is at{" "}
-              <Link to="/lenders/terms" target="_blank" className="underline hover:text-[#C89434]">
-                /lenders/terms
-              </Link>.
-            </div>
-            <div className="mt-4 space-y-3">
-              <label className="flex items-start gap-2 cursor-pointer" data-testid="lender-terms-checkbox-wrap">
-                <input
-                  type="checkbox"
-                  checked={accepted}
-                  onChange={(e) => setAccepted(e.target.checked)}
-                  className="mt-1 h-4 w-4 accent-[#C89434]"
-                  data-testid="lender-terms-checkbox"
-                />
-                <span className="text-sm">
-                  I have read the <strong>{terms?.title || "Non-Circumvention Agreement"}</strong>{terms?.version ? ` (v${terms.version})` : ""} and, on behalf of my institution and myself, I agree to be bound by its terms.
-                </span>
-              </label>
-              <Field label="Type your full legal name to sign" testId="lender-terms-sig-field">
-                <Input
-                  value={sigName}
-                  onChange={(e) => setSigName(e.target.value)}
-                  placeholder="e.g. Jane Q. Smith"
-                  autoComplete="off"
-                  data-testid="lender-terms-signature"
-                />
-              </Field>
-              <p className="text-[11px] text-[#6B6558]">
-                Typing your name and checking the box constitutes an electronic signature under the federal ESIGN Act, with the same effect as a handwritten one.
-              </p>
-            </div>
-          </section>
           <div className="flex justify-end pt-2">
-            <button
-              type="submit"
-              disabled={busy || !accepted || sigName.trim().length < 3}
-              className="byrd-btn byrd-btn-dark disabled:opacity-40 disabled:cursor-not-allowed"
-              data-testid="apply-submit-btn"
-            >
+            <button type="submit" disabled={busy} className="byrd-btn byrd-btn-dark" data-testid="apply-submit-btn">
               {busy ? "Submitting…" : "Submit application"}
             </button>
           </div>

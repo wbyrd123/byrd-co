@@ -53,27 +53,23 @@ JWT_EXPIRY_HOURS = 24 * 14
 MAX_FILE_MB = 15
 MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024
 
-# Current active version of the Lender Non-Circumvention Agreement.
-# Bump when text changes so audits can trace exactly which text was signed.
+# Current active version of the Lender Confidentiality Acknowledgement — shown at the
+# lender-view gate the first time a lender opens a specific borrower's deal package.
+# Kept intentionally lightweight (no non-circumvention clause, no signature) so it doesn't
+# force bank employees to escalate to legal before they can view a deal.
 LENDER_TERMS_VERSION = "1.0"
 LENDER_TERMS_EFFECTIVE_DATE = "2026-02-01"
-LENDER_TERMS_TITLE = "Byrd & CO Lender Non-Circumvention Agreement"
+LENDER_TERMS_TITLE = "Byrd & CO Deal Package Confidentiality Acknowledgement"
 LENDER_TERMS_TEXT = """\
-By registering as a Byrd & CO lending partner, I acknowledge and agree to the following on behalf of my institution and myself:
+By opening this deal package, I acknowledge:
 
-1. Proprietary Borrower Relationships. All borrowers, sponsors, principals, guarantors, and their affiliates that Byrd & CO introduces to me — through deal packages, term-sheet requests, marketplace referrals, direct emails, phone calls, or any other channel — are proprietary business relationships of Byrd & CO ("Byrd Borrowers"). This applies to every borrower Byrd & CO introduces to me, whether or not I ultimately fund the specific deal presented, and whether or not that deal ever closes.
+1. Confidential Information. The borrower information provided in this package — including financial statements, tax returns, entity documents, personal identifiers, and property information — is confidential and provided by Byrd & CO for the sole purpose of evaluating financing for the specific transaction presented in this package.
 
-2. Non-Circumvention Period — Twenty-Four (24) Months. For a period of twenty-four (24) months from the later of (a) the date I first receive any information about a Byrd Borrower, or (b) the date of my last communication or transaction related to any Byrd Borrower, I will not, directly or indirectly, solicit, contact, transact with, negotiate with, or provide financing to any Byrd Borrower for any real estate financing — including mortgages, bridge loans, mezzanine debt, construction loans, refinancings, or restructurings — except through deals brokered by Byrd & CO.
+2. Purpose Limitation. I will use this information only to underwrite and price the financing being requested. I will not use it for any other purpose or share it with any third party outside my own institution's underwriting team without Byrd & CO's written consent.
 
-3. Broker Fee Preservation. If I fund any loan to a Byrd Borrower during the Non-Circumvention Period other than through Byrd & CO, Byrd & CO shall be entitled to the same broker fee that would have applied had the transaction been brokered by Byrd & CO on the deal originally presented. If no fee was previously set, the fee shall equal one percent (1.00%) of the funded loan amount, due at closing.
+3. Byrd & CO Introduction. This borrower is a Byrd & CO client. Any future financing conversations with the borrower — including this transaction — should be conducted through Byrd & CO.
 
-4. Confidentiality. Borrower information provided by Byrd & CO (financials, PFS, tax returns, entity docs, resumes, personal identifiers, property information) is confidential and may be used only for evaluating financing of the deal presented. I will not share it with any third party without Byrd & CO's written consent.
-
-5. Enforcement. A violation of this agreement entitles Byrd & CO to (a) the full broker fee owed under Section 3, (b) injunctive relief, and (c) reasonable attorneys' fees and costs of enforcement.
-
-6. Governing Law. This agreement is governed by the laws of the State of Texas. Any disputes shall be resolved exclusively in the state or federal courts located in Fort Bend County, Texas.
-
-7. Authority. By checking the acceptance box and typing my full legal name below, I certify that I have authority to bind my institution to this agreement and that I intend the electronic signature to have the same force and effect as a handwritten signature under the federal ESIGN Act and applicable state law.
+4. Contact. Questions about this deal or the borrower go through Byrd & CO first, not directly to the borrower.
 """
 
 app = FastAPI(title="Byrd & CO API")
@@ -1526,6 +1522,10 @@ class LenderGate(BaseModel):
     viewer_name: str = Field(min_length=1)
     viewer_email: EmailStr
     viewer_institution: str = Field(min_length=1)
+    # Lightweight confidentiality acknowledgement — required. Captured on every session
+    # (a lender opening the same deal in a new browser must acknowledge again).
+    acknowledged: bool = False
+    acknowledged_version: Optional[str] = None
 
 
 class LenderDocAccessAction(BaseModel):
@@ -3571,12 +3571,23 @@ async def lender_preflight(token: str):
 
 
 @api.post("/lender-view/{token}/gate")
-async def lender_gate(token: str, body: LenderGate):
+async def lender_gate(token: str, body: LenderGate, request: Request):
     share = await db.scenario_shares.find_one({"token": token})
     if not share:
         raise HTTPException(status_code=404, detail="Link not found or revoked")
-    session_token = _make_view_session(share["id"], body.model_dump())
-    await _log_view(share["scenario_id"], share["id"], body.model_dump(), "gate")
+    if not body.acknowledged:
+        raise HTTPException(
+            status_code=400,
+            detail="Please acknowledge the confidentiality notice to view this deal package.",
+        )
+    payload = body.model_dump()
+    # Record which acknowledgement version + when + from where — lightweight audit trail
+    payload["acknowledged_version"] = payload.get("acknowledged_version") or LENDER_TERMS_VERSION
+    payload["acknowledged_at"] = now_iso()
+    payload["acknowledged_ip"] = request.client.host if request and request.client else None
+    payload["acknowledged_user_agent"] = request.headers.get("user-agent") if request else None
+    session_token = _make_view_session(share["id"], payload)
+    await _log_view(share["scenario_id"], share["id"], payload, "gate")
     return {"session_token": session_token, "share_id": share["id"]}
 
 
@@ -3912,10 +3923,11 @@ class LenderApplyBody(BaseModel):
     decision_speed_days: Optional[int] = None
     typical_fees: str = ""
     notes: str = ""
-    # Non-circumvention terms acceptance (required)
-    terms_accepted: bool = False
-    terms_signature_name: str = Field(default="", max_length=200)
-    terms_version: str = Field(default="", max_length=20)
+    # Kept for optional forward-compatibility if we ever bring the full agreement back.
+    # No longer required or enforced at registration time.
+    terms_accepted: Optional[bool] = None
+    terms_signature_name: Optional[str] = Field(default=None, max_length=200)
+    terms_version: Optional[str] = Field(default=None, max_length=20)
 
 
 class LenderApproveBody(BaseModel):
@@ -4026,15 +4038,6 @@ async def lender_terms_public():
 @api.post("/public/lender/apply")
 async def lender_apply(body: LenderApplyBody, background: BackgroundTasks, request: Request):
     email = body.contact_email.lower()
-    # Non-circumvention terms are mandatory
-    if not body.terms_accepted:
-        raise HTTPException(status_code=400,
-                            detail="You must accept the Byrd & CO Lender Non-Circumvention Agreement to register.")
-    sig = (body.terms_signature_name or "").strip()
-    if len(sig) < 3:
-        raise HTTPException(status_code=400,
-                            detail="Please type your full legal name to sign the Non-Circumvention Agreement.")
-    ver = (body.terms_version or LENDER_TERMS_VERSION).strip()
     # Reject if any user with this email already exists in ANY role
     existing_user = await db.users.find_one({"email": email})
     if existing_user:
@@ -4077,12 +4080,6 @@ async def lender_apply(body: LenderApplyBody, background: BackgroundTasks, reque
         "self_registered": True,
         "apply_email": email,
         "owner_user_id": None,           # set on approval
-        # Non-circumvention terms audit trail
-        "terms_accepted_at": now,
-        "terms_signature_name": sig,
-        "terms_version": ver,
-        "terms_ip": (request.client.host if request and request.client else None),
-        "terms_user_agent": (request.headers.get("user-agent") if request else None),
         "created_at": now,
         "updated_at": now,
     }
