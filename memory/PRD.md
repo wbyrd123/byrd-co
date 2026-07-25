@@ -11,6 +11,14 @@
 - P3: Refactor `server.py` (~7,700 lines) into modular routes
 
 
+### Lender View Reframe — Facts vs Preferences — SHIPPED 2026-02
+Removed rate-dependent metrics from the lender review screen so lenders aren't shown a "target rate" that biases their pricing.
+- **Zone 1 (top metrics strip):** 7 objective tiles — Loan Requested, Purchase, Value, LTV, LTC, NOI, Debt Yield. Debt Yield is rate-independent (NOI ÷ loan) so it's the safe deal-quality metric.
+- **Zone 2 (below):** "Borrower's Preferred Structure" card — Loan Type, Amount, Amortization, Term, Recourse. Subheading clarifies these are preferences, not commitments.
+- **Removed from lender view:** Requested Rate, Monthly P&I, DSCR (all rate-dependent), Annual DS. These stay in admin/internal screens and PDFs.
+- **File:** `LenderView.jsx` only. Server-side PDF (`render_scenario_pdf`) is unchanged — it's shared between admin's internal working copy and the lender's downloadable PDF; future work if desired.
+
+
 ### Admin Delete Term Sheet — SHIPPED 2026-02
 Broker can now delete individual quote submissions from the admin scenario's Term Sheets tab.
 - **Backend**: `DELETE /admin/term-sheets/{tid}` — hard-deletes the term_sheet doc + any attached `term_sheet_files` blob. Removes it from both admin and borrower views. Lender is NOT notified.

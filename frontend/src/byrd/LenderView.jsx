@@ -410,21 +410,16 @@ export default function LenderView() {
           )}
         </div>
 
-        {/* Metrics */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+        {/* Metrics — objective facts only (no rate-dependent values) */}
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
           {[
-            ["Loan", fmtMoney(loan.loan_amount)],
+            ["Loan Requested", fmtMoney(loan.loan_amount)],
+            ["Purchase", fmtMoney(prop.purchase_price)],
             ["Value", fmtMoney(m.property_value)],
             ["LTV", fmtPct(m.ltv_pct, 1)],
             ["LTC", fmtPct(m.ltc_pct, 1)],
-            ["DSCR", m.dscr ?? "—"],
-            ["Debt Yield", fmtPct(m.debt_yield_pct, 2)],
             ["NOI", fmtMoney(m.noi)],
-            ["Monthly P&I", fmtMoney(m.monthly_payment)],
-            ["Rate", fmtPct(loan.requested_rate_pct, 3)],
-            ["Amort", fmtNum(loan.amort_months)],
-            ["Term", fmtNum(loan.term_months)],
-            ["Recourse", loan.recourse || "—"],
+            ["Debt Yield", fmtPct(m.debt_yield_pct, 2)],
           ].map(([label, val]) => (
             <div key={label} className="byrd-card p-3">
               <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">{label}</div>
@@ -448,15 +443,14 @@ export default function LenderView() {
             </dl>
           </div>
           <div className="byrd-card p-6">
-            <h3 className="font-serif text-xl font-bold mb-3">Loan Request</h3>
+            <h3 className="font-serif text-xl font-bold mb-1">Borrower&apos;s Preferred Structure</h3>
+            <p className="text-[11px] text-[#6B6558] mb-3">Preferences — open to your structure and pricing.</p>
             <dl className="grid grid-cols-2 gap-y-2 text-sm">
-              <dt className="text-[#6B6558]">Type</dt><dd>{loan.loan_type || "—"}</dd>
+              <dt className="text-[#6B6558]">Loan Type</dt><dd>{loan.loan_type || "—"}</dd>
               <dt className="text-[#6B6558]">Amount</dt><dd>{fmtMoney(loan.loan_amount)}</dd>
-              <dt className="text-[#6B6558]">Rate</dt><dd>{fmtPct(loan.requested_rate_pct, 3)}</dd>
-              <dt className="text-[#6B6558]">Amortization</dt><dd>{fmtNum(loan.amort_months)} mo</dd>
-              <dt className="text-[#6B6558]">Term</dt><dd>{fmtNum(loan.term_months)} mo</dd>
+              <dt className="text-[#6B6558]">Amortization</dt><dd>{loan.amort_months ? `${fmtNum(loan.amort_months)} mo` : "—"}</dd>
+              <dt className="text-[#6B6558]">Term</dt><dd>{loan.term_months ? `${fmtNum(loan.term_months)} mo` : "—"}</dd>
               <dt className="text-[#6B6558]">Recourse</dt><dd>{loan.recourse || "—"}</dd>
-              <dt className="text-[#6B6558]">Annual DS</dt><dd>{fmtMoney(m.annual_debt_service)}</dd>
             </dl>
           </div>
         </div>
