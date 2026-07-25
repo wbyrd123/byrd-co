@@ -2002,12 +2002,21 @@ function TermSheetsTab({ scenarioId, termSheets, onReload }) {
                 <KV2 label="Amort">{t.amortization_years ? `${t.amortization_years} yr` : "—"}</KV2>
                 <KV2 label="Term">{t.term_months ? `${t.term_months} mo` : "—"}</KV2>
                 <KV2 label="IO">{t.io_months ? `${t.io_months} mo` : "—"}</KV2>
+                {t.fixed_period_months != null && (
+                  <KV2 label="Fixed period">{`${t.fixed_period_months} mo`}</KV2>
+                )}
                 <KV2 label="Recourse">{t.recourse || "—"}</KV2>
                 <KV2 label="Orig fee">{fmtP(t.origination_fee_pct)}</KV2>
                 <KV2 label="Exit fee">{fmtP(t.exit_fee_pct)}</KV2>
                 <KV2 label="Prepay">{t.prepay || "—"}</KV2>
                 <KV2 label="Expires">{t.expiration_date || "—"}</KV2>
               </div>
+              {t.rate_adjustment_notes && (
+                <div className="mt-3 text-xs">
+                  <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] mb-0.5">Rate Adjustment</div>
+                  <div className="text-[#2A2A2A]">{t.rate_adjustment_notes}</div>
+                </div>
+              )}
               {t.contingencies && (
                 <div className="mt-3 text-xs">
                   <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] mb-0.5">Contingencies</div>

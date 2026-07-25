@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, Link } from "react-router-dom";
 import axios from "axios";
 import { API_BASE } from "@/lib/api";
 import { LOGO_URL } from "@/byrd/data";
-import { CheckCircle2, FileText, ShieldCheck, AlertCircle, PenLine } from "lucide-react";
+import { CheckCircle2, FileText, ShieldCheck, AlertCircle, PenLine, ArrowLeft } from "lucide-react";
 
 // Public (no-auth) fee agreement signing page. Loaded via /fee-agreement/:token
 export default function FeeAgreementSign() {
@@ -14,6 +14,8 @@ export default function FeeAgreementSign() {
   const [agree, setAgree] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  // If the visitor has a client portal session (came from the portal), offer a Back link.
+  const hasPortalSession = typeof window !== "undefined" && !!localStorage.getItem("ac_token");
 
   useEffect(() => {
     axios.get(`${API_BASE}/fee-agreement/${token}`)
@@ -42,7 +44,7 @@ export default function FeeAgreementSign() {
 
   if (error) {
     return (
-      <ShellHeaderContainer>
+      <ShellHeaderContainer backLink={hasPortalSession ? "/portal" : null}>
         <div className="byrd-card p-8 md:p-10 text-center" data-testid="fee-agreement-error">
           <AlertCircle size={40} className="text-[#8A1F1A] mx-auto" />
           <h2 className="font-serif text-2xl font-bold mt-3">We couldn&apos;t open this agreement.</h2>
@@ -56,7 +58,7 @@ export default function FeeAgreementSign() {
   }
   if (!data) {
     return (
-      <ShellHeaderContainer>
+      <ShellHeaderContainer backLink={hasPortalSession ? "/portal" : null}>
         <div className="byrd-card p-8 text-center text-[#6B6558]">Loading your agreement…</div>
       </ShellHeaderContainer>
     );
@@ -67,7 +69,7 @@ export default function FeeAgreementSign() {
   const pdfUrl = `${API_BASE}/fee-agreement/${token}/preview.pdf`;
 
   return (
-    <ShellHeaderContainer>
+    <ShellHeaderContainer backLink={hasPortalSession ? "/portal" : null}>
       {/* Steps banner — makes the sign flow crystal clear */}
       {!alreadySigned && !canceled && (
         <div className="byrd-card p-4 md:p-5 mb-4 bg-[#FBEFD3]/40 border-[#C89434]" data-testid="fee-steps-banner">
@@ -242,7 +244,7 @@ function SumRow({ label, value, highlight }) {
   );
 }
 
-function ShellHeaderContainer({ children }) {
+function ShellHeaderContainer({ children, backLink }) {
   return (
     <div className="min-h-screen bg-[#FBF8F1]">
       <header className="border-b border-[#E4DFD1] bg-white/80 backdrop-blur">
@@ -254,6 +256,15 @@ function ShellHeaderContainer({ children }) {
               Broker Fee Agreement
             </div>
           </div>
+          {backLink && (
+            <Link
+              to={backLink}
+              className="ml-auto inline-flex items-center gap-1.5 text-xs font-mono uppercase tracking-widest text-[#6B6558] hover:text-[#C89434]"
+              data-testid="fee-back-to-portal"
+            >
+              <ArrowLeft size={12} /> Back to Portal
+            </Link>
+          )}
         </div>
       </header>
       <main className="max-w-6xl mx-auto px-5 sm:px-8 py-8 md:py-10">{children}</main>

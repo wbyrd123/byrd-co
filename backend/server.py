@@ -4033,6 +4033,9 @@ class TermSheetBody(BaseModel):
     amortization_years: Optional[int] = None
     term_months: Optional[int] = None
     io_months: Optional[int] = None            # interest-only period
+    # Hybrid ARM fields (e.g., a 5/20 ARM at 20-yr amort has fixed_period_months=60, term_months=240, amortization_years=20)
+    fixed_period_months: Optional[int] = None   # length of the initial fixed-rate period
+    rate_adjustment_notes: Optional[str] = None # freeform for reset frequency + caps (e.g., "Annual reset after fixed period, 2/2/5 caps")
     recourse: Optional[Literal["full", "partial", "non-recourse"]] = None
     prepay: Optional[str] = None               # freeform, e.g. "3-2-1"
     origination_fee_pct: Optional[float] = None

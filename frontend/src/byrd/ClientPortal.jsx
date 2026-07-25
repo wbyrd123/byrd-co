@@ -279,7 +279,6 @@ export default function ClientPortal() {
                                           {isFeeAgreement && pendingSignToken && (
                                             <a
                                               href={`/fee-agreement/${pendingSignToken}`}
-                                              target="_blank" rel="noopener noreferrer"
                                               className="byrd-btn byrd-btn-primary h-9 px-3 text-xs"
                                               data-testid={`sign-now-${d.id}`}
                                             >
@@ -450,7 +449,15 @@ function ScenarioTermSheetsSection({ scenarioId }) {
               <div><span className="text-[#6B6558]">Term:</span> {t.term_months ? `${t.term_months} mo` : "—"}</div>
               <div><span className="text-[#6B6558]">Amort:</span> {t.amortization_years ? `${t.amortization_years} yr` : "—"}</div>
               <div><span className="text-[#6B6558]">Recourse:</span> {t.recourse || "—"}</div>
+              {t.fixed_period_months != null && (
+                <div><span className="text-[#6B6558]">Fixed:</span> <b>{t.fixed_period_months} mo</b></div>
+              )}
             </div>
+            {t.rate_adjustment_notes && (
+              <div className="mt-2 text-[11px] text-[#6B6558]">
+                <b>Adjusts:</b> {t.rate_adjustment_notes}
+              </div>
+            )}
             {t.broker_note && t.status !== "submitted" && (
               <div className="mt-2 text-xs bg-[#F3EEE0] border-l-2 border-[#245C25] p-2">
                 <b className="font-mono uppercase tracking-widest text-[10px] text-[#6B6558] block mb-0.5">// Broker Note</b>

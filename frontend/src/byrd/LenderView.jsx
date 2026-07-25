@@ -22,7 +22,32 @@ const publicFetch = async (path, options = {}) => {
   return res.json();
 };
 
+// Anonymous prospects: persist session in localStorage (one gate, then don't re-ask).
+// Logged-in lenders: use sessionStorage keyed by user id — the confidentiality ack is
+// audit-critical, so a fresh browser session should require a fresh acknowledgement.
 const SESSION_KEY = (token) => `lender_session_${token}`;
+const AUTHED_SESSION_KEY = (token, userId) => `lender_session_${userId || "anon"}_${token}`;
+
+function readStoredSession(token, user) {
+  if (user && user.role === "lender") {
+    return sessionStorage.getItem(AUTHED_SESSION_KEY(token, user.id));
+  }
+  return localStorage.getItem(SESSION_KEY(token));
+}
+function writeStoredSession(token, user, val) {
+  if (user && user.role === "lender") {
+    sessionStorage.setItem(AUTHED_SESSION_KEY(token, user.id), val);
+  } else {
+    localStorage.setItem(SESSION_KEY(token), val);
+  }
+}
+function clearStoredSession(token, user) {
+  if (user && user.role === "lender") {
+    sessionStorage.removeItem(AUTHED_SESSION_KEY(token, user.id));
+  } else {
+    localStorage.removeItem(SESSION_KEY(token));
+  }
+}
 
 export default function LenderView() {
   const { token } = useParams();
@@ -30,7 +55,14 @@ export default function LenderView() {
   const isLoggedInLender = user && user.role === "lender";
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState(null);
-  const [session, setSession] = useState(localStorage.getItem(SESSION_KEY(token)) || null);
+  const [session, setSession] = useState(null);
+
+  // Load the correct stored session for the current auth state (per-user for lenders,
+  // global for anonymous). This must happen after user is known — otherwise a logged-in
+  // lender could inherit an anonymous session and skip the acknowledgement.
+  useEffect(() => {
+    setSession(readStoredSession(token, user));
+  }, [token, user]);
   const [pkg, setPkg] = useState(null);
   const [busy, setBusy] = useState(false);
   const [gate, setGate] = useState({ viewer_name: "", viewer_email: "", viewer_institution: "" });
@@ -61,7 +93,7 @@ export default function LenderView() {
       setPkg(data);
     } catch (e) {
       // session expired
-      localStorage.removeItem(SESSION_KEY(token));
+      clearStoredSession(token, user);
       setSession(null);
       toast.error("Session expired — please re-enter your details.");
     }
@@ -101,7 +133,7 @@ export default function LenderView() {
           }),
         });
       }
-      localStorage.setItem(SESSION_KEY(token), res.session_token);
+      writeStoredSession(token, user, res.session_token);
       setSession(res.session_token);
     } catch (e) {
       toast.error(e?.response?.data?.detail || e.message);
@@ -307,13 +339,25 @@ export default function LenderView() {
         {/* Logged-in lender: portal breadcrumb + scenario switcher */}
         {isLoggedInLender && (
           <div className="flex items-center justify-between gap-3 flex-wrap" data-testid="lender-portal-bar">
-            <Link
-              to="/lender/portal"
-              className="inline-flex items-center gap-1.5 text-xs font-mono uppercase tracking-widest text-[#6B6558] hover:text-[#C89434]"
-              data-testid="back-to-portal"
-            >
-              <ArrowLeft size={12} /> Back to Portal
-            </Link>
+            <div className="flex items-center gap-3 flex-wrap">
+              <Link
+                to="/lender/portal"
+                className="inline-flex items-center gap-1.5 text-xs font-mono uppercase tracking-widest text-[#6B6558] hover:text-[#C89434]"
+                data-testid="back-to-portal"
+              >
+                <ArrowLeft size={12} /> Back to Portal
+              </Link>
+              {(() => {
+                if (!myInvites.length) return null;
+                const idx = myInvites.findIndex((inv) => inv.token === token);
+                if (idx < 0 || myInvites.length <= 1) return null;
+                return (
+                  <span className="byrd-chip byrd-chip-gold text-[10px]" data-testid="deal-position-chip">
+                    Deal {idx + 1} of {myInvites.length}
+                  </span>
+                );
+              })()}
+            </div>
             {myInvites.length > 1 && (
               <div className="inline-flex items-center gap-2">
                 <Layers size={13} className="text-[#6B6558]" />

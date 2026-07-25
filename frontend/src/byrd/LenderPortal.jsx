@@ -208,6 +208,8 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
     amortization_years: existing?.amortization_years ?? "",
     term_months: existing?.term_months ?? "",
     io_months: existing?.io_months ?? "",
+    fixed_period_months: existing?.fixed_period_months ?? "",
+    rate_adjustment_notes: existing?.rate_adjustment_notes || "",
     recourse: existing?.recourse || "",
     prepay: existing?.prepay || "",
     origination_fee_pct: existing?.origination_fee_pct ?? "",
@@ -235,6 +237,8 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
         amortization_years: num(f.amortization_years),
         term_months: num(f.term_months),
         io_months: num(f.io_months),
+        fixed_period_months: f.rate_type === "hybrid" ? num(f.fixed_period_months) : null,
+        rate_adjustment_notes: (f.rate_type === "hybrid" || f.rate_type === "floating") ? (f.rate_adjustment_notes || null) : null,
         recourse: f.recourse || null,
         prepay: f.prepay || null,
         origination_fee_pct: num(f.origination_fee_pct),
@@ -281,6 +285,12 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
         <Field label="Amortization (years)"><Input type="number" value={f.amortization_years} onChange={set("amortization_years")} /></Field>
         <Field label="Term (months)"><Input type="number" value={f.term_months} onChange={set("term_months")} /></Field>
         <Field label="IO Period (months)"><Input type="number" value={f.io_months} onChange={set("io_months")} /></Field>
+        {f.rate_type === "hybrid" && (
+          <Field label="Fixed Period (months)" testId="ts-fixed-period-field">
+            <Input type="number" value={f.fixed_period_months} onChange={set("fixed_period_months")}
+              placeholder="e.g. 60 for 5-year fixed" data-testid="ts-fixed-period" />
+          </Field>
+        )}
         <Field label="Recourse">
           <Sel value={f.recourse} onChange={set("recourse")}>
             <option value="">—</option>
@@ -294,6 +304,23 @@ function TermSheetForm({ scenarioId, existing, onClose, onSaved }) {
         <Field label="Prepay"><Input value={f.prepay} onChange={set("prepay")} placeholder="e.g. 3-2-1 stepdown" /></Field>
         <Field label="Expiration Date"><Input type="date" value={f.expiration_date} onChange={set("expiration_date")} /></Field>
       </div>
+      {f.rate_type === "hybrid" && (
+        <div className="bg-[#FBEFD3]/40 border border-[#C89434]/40 rounded-md p-3 text-[11px] text-[#7A5410]" data-testid="ts-hybrid-hint">
+          <b>Hybrid ARM example:</b> a 5/20 with 20-yr amortization → <i>Fixed Period</i> = 60 months, <i>Term</i> = 240 months, <i>Amortization</i> = 20 years. Put the initial fixed rate in <i>Interest Rate</i> and describe the reset in <i>Rate Adjustment Notes</i> below.
+        </div>
+      )}
+      {(f.rate_type === "hybrid" || f.rate_type === "floating") && (
+        <Field label={f.rate_type === "hybrid" ? "Rate Adjustment Notes (after fixed period)" : "Rate Adjustment Notes"}>
+          <Textarea
+            value={f.rate_adjustment_notes}
+            onChange={set("rate_adjustment_notes")}
+            placeholder={f.rate_type === "hybrid"
+              ? "e.g. Annual reset to SOFR + 250 bps after fixed period. Caps 2/2/5 (initial / annual / lifetime)."
+              : "e.g. Monthly reset, no caps, floor at 3.00%"}
+            data-testid="ts-adjustment-notes"
+          />
+        </Field>
+      )}
       <Field label="Contingencies">
         <Textarea value={f.contingencies} onChange={set("contingencies")} placeholder="e.g. Third-party appraisal, environmental Phase I, executed leases" />
       </Field>
