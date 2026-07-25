@@ -1411,6 +1411,7 @@ class LoanRequest(BaseModel):
     amort_months: Optional[int] = None
     requested_rate_pct: Optional[float] = None
     recourse: Optional[str] = ""             # recourse / non-recourse / partial
+    estimated_closing_date: Optional[str] = None   # ISO date "YYYY-MM-DD"
 
 
 class Financials(BaseModel):
@@ -3049,6 +3050,8 @@ def render_executive_summary_pdf(scen: dict, metrics: dict, cfg: dict,
         tags.append(loan['loan_type'])
     if selected_period and selected_period.get("is_pro_forma"):
         tags.append("<b>Pro Forma Underwriting</b>")
+    if loan.get("estimated_closing_date"):
+        tags.append(f"Est. Close: {loan['estimated_closing_date']}")
     if tags:
         elements.append(Paragraph(" &nbsp;·&nbsp; ".join(tags), small))
     elements.append(Spacer(1, 6))

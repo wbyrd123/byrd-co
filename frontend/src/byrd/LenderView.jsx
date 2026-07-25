@@ -451,6 +451,7 @@ export default function LenderView() {
               <dt className="text-[#6B6558]">Amortization</dt><dd>{loan.amort_months ? `${fmtNum(loan.amort_months)} mo` : "—"}</dd>
               <dt className="text-[#6B6558]">Term</dt><dd>{loan.term_months ? `${fmtNum(loan.term_months)} mo` : "—"}</dd>
               <dt className="text-[#6B6558]">Recourse</dt><dd>{loan.recourse || "—"}</dd>
+              <dt className="text-[#6B6558]">Est. Closing</dt><dd>{loan.estimated_closing_date ? new Date(loan.estimated_closing_date + "T00:00:00").toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—"}</dd>
             </dl>
           </div>
         </div>

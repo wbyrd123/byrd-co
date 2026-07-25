@@ -730,6 +730,9 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
               {RECOURSE_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
             </Sel>
           </Field>
+          <Field label="Estimated Closing Date">
+            <Inp type="date" defaultValue={loan.estimated_closing_date || ""} onBlur={(e) => patchSection("loan_request")({ estimated_closing_date: e.target.value || null })} data-testid="ln-closing-date" />
+          </Field>
         </div>
       </section>
 
