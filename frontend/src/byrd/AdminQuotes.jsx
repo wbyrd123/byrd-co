@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { Mail, Phone, Inbox } from "lucide-react";
+import { Mail, Phone, Inbox, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 const fmtDate = (iso) => {
   try {
@@ -12,6 +13,7 @@ const fmtDate = (iso) => {
 export default function AdminQuotes() {
   const [quotes, setQuotes] = useState([]);
   const [active, setActive] = useState(null);
+  const [deleting, setDeleting] = useState(null);
 
   const load = () => api.get("/admin/quotes").then((r) => {
     setQuotes(r.data);
@@ -23,6 +25,20 @@ export default function AdminQuotes() {
     if (q.read) return;
     await api.patch(`/admin/quotes/${q.id}`, { read: true });
     setQuotes((prev) => prev.map((x) => (x.id === q.id ? { ...x, read: true } : x)));
+  };
+
+  const confirmDelete = async () => {
+    if (!deleting) return;
+    try {
+      await api.delete(`/admin/quotes/${deleting.id}`);
+      toast.success("Quote deleted");
+      const remaining = quotes.filter((x) => x.id !== deleting.id);
+      setQuotes(remaining);
+      if (active?.id === deleting.id) setActive(remaining[0] || null);
+      setDeleting(null);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Delete failed");
+    }
   };
 
   return (
@@ -122,9 +138,39 @@ export default function AdminQuotes() {
                     <Phone size={14} /> Call
                   </a>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setDeleting(active)}
+                  className="byrd-btn byrd-btn-outline text-[#8A1F1A] border-[#E38380] hover:bg-[#FBECEB] ml-auto"
+                  data-testid={`quote-delete-${active.id}`}
+                >
+                  <Trash2 size={14} /> Delete
+                </button>
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {deleting && (
+        <div className="fixed inset-0 bg-black/40 z-50 grid place-items-center p-4" data-testid="quote-delete-modal">
+          <div className="bg-white rounded-md border border-[#E4DFD1] w-full max-w-md p-6">
+            <div className="font-serif text-xl font-bold">Delete quote request?</div>
+            <p className="text-sm text-[#2A2A2A] mt-2">
+              This permanently removes the quote request from <b>{deleting.name}</b> ({deleting.email}). The sender is not notified.
+            </p>
+            <p className="text-xs text-[#8A1F1A] mt-2">This action cannot be undone.</p>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button onClick={() => setDeleting(null)} className="byrd-btn byrd-btn-outline" data-testid="quote-delete-cancel">Cancel</button>
+              <button
+                onClick={confirmDelete}
+                className="byrd-btn byrd-btn-dark bg-[#8A1F1A] border-[#8A1F1A] hover:bg-[#5A0F0A]"
+                data-testid="quote-delete-confirm"
+              >
+                <Trash2 size={14} /> Delete
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

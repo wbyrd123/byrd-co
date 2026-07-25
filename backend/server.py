@@ -1337,6 +1337,14 @@ async def admin_update_quote(qid: str, body: dict, admin=Depends(require_admin))
     return {"ok": True}
 
 
+@api.delete("/admin/quotes/{qid}")
+async def admin_delete_quote(qid: str, admin=Depends(require_admin)):
+    res = await db.quotes.delete_one({"id": qid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    return {"ok": True}
+
+
 # ================================================================
 # Deal Engine — Scenarios, Lenders, Lender Shares (Phase 1 + 2)
 # ================================================================
