@@ -3353,6 +3353,119 @@ async def admin_generate_summary(sid: str, admin=Depends(require_admin)):
 LOAN_SUMMARY_DOC_LABEL = "Loan Executive Summary"
 
 
+# --- Ada: draft a Business Plan narrative from deal facts ---
+NARRATIVE_DRAFT_SYSTEM = """You are a senior commercial real estate broker at Byrd & Co writing a Business Plan for a lender's Executive Loan Summary. Your output must be:
+
+- 4 short paragraphs (or bullet-block style if that fits better)
+- Lender-facing tone: confident, factual, punchy — NOT marketing fluff
+- ~140-220 words total (this goes on a 1-page PDF)
+- Structured as: (1) Deal one-liner, (2) Strategy / value creation, (3) Sponsor snapshot, (4) Financials + exit
+- Use the FACTS provided. Never invent numbers, tenant names, comp rents, or sponsor track record you weren't given.
+- If a fact is unknown, write in generalities (e.g., "experienced sponsor" instead of naming prior deals).
+- Never mention specific interest rates or DSCR/LTV that you weren't given.
+- End with a one-line exit strategy.
+
+Return ONLY the narrative text. No preamble, no headings, no markdown fences."""
+
+
+class AdaDraftNarrativeBody(BaseModel):
+    replace_existing: bool = True
+
+
+@api.post("/admin/scenarios/{sid}/summary/ada-draft-narrative")
+async def admin_ada_draft_narrative(sid: str, body: AdaDraftNarrativeBody = AdaDraftNarrativeBody(),
+                                    admin=Depends(require_admin)):
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    prop = scen.get("property_info") or {}
+    loan = scen.get("loan_request") or {}
+    con = scen.get("construction") or {}
+    sponsors = scen.get("sponsors") or []
+    _ensure_financials_expanded(scen)
+    sel = _selected_period(scen)
+    metrics = compute_scenario_metrics(scen)
+
+    def _yn(v):
+        return "yes" if v else "no"
+
+    # Assemble a compact FACT SHEET for Ada — she only gets what we know.
+    facts = ["FACT SHEET (use these; do not invent):"]
+    if scen.get("name"):
+        facts.append(f"- Deal name: {scen['name']}")
+    if prop.get("property_type"):
+        facts.append(f"- Property type: {prop['property_type']}")
+    if prop.get("units"):
+        facts.append(f"- Units: {prop['units']}")
+    if prop.get("sqft"):
+        facts.append(f"- Sq ft: {prop['sqft']:,}")
+    if prop.get("year_built"):
+        facts.append(f"- Year built: {prop['year_built']}")
+    addr = ", ".join(x for x in [prop.get("address"), prop.get("city"), prop.get("state"), prop.get("zip")] if x)
+    if addr:
+        facts.append(f"- Address: {addr}")
+    if prop.get("occupancy_type"):
+        facts.append(f"- Occupancy type: {'Owner-Occupied' if prop['occupancy_type'] == 'owner_occupied' else 'Non-Owner-Occupied'}")
+    if prop.get("occupancy_pct") is not None:
+        facts.append(f"- Current occupancy: {prop['occupancy_pct']}%")
+    if prop.get("purchase_price"):
+        facts.append(f"- Purchase price: ${prop['purchase_price']:,.0f}")
+    if prop.get("current_value"):
+        facts.append(f"- Property value: ${prop['current_value']:,.0f}")
+    if loan.get("loan_type"):
+        facts.append(f"- Loan type: {loan['loan_type']}")
+    if loan.get("loan_amount"):
+        facts.append(f"- Loan amount requested: ${loan['loan_amount']:,.0f}")
+    if loan.get("term_months"):
+        facts.append(f"- Term (months): {loan['term_months']}")
+    if loan.get("amort_months"):
+        facts.append(f"- Amortization (months): {loan['amort_months']}")
+    if loan.get("recourse"):
+        facts.append(f"- Recourse: {loan['recourse']}")
+    if loan.get("estimated_closing_date"):
+        facts.append(f"- Estimated closing: {loan['estimated_closing_date']}")
+    if metrics.get("ltv_pct") is not None:
+        facts.append(f"- LTV: {metrics['ltv_pct']:.1f}%")
+    if metrics.get("ltc_pct") is not None:
+        facts.append(f"- LTC: {metrics['ltc_pct']:.1f}%")
+    if metrics.get("noi") is not None:
+        facts.append(f"- NOI: ${metrics['noi']:,.0f}")
+    if metrics.get("dscr") is not None:
+        facts.append(f"- DSCR (at broker underwriting rate): {metrics['dscr']}")
+    if metrics.get("debt_yield_pct") is not None:
+        facts.append(f"- Debt Yield: {metrics['debt_yield_pct']}%")
+    if sel:
+        facts.append(f"- Financials basis: {sel.get('label')}"
+                     + (" (Pro Forma / projected)" if sel.get("is_pro_forma") else " (historical)"))
+    if con and (con.get("total_hard_cost") or con.get("total_soft_cost")):
+        facts.append(f"- Renovation/CapEx budget: hard ${con.get('total_hard_cost', 0):,.0f}, soft ${con.get('total_soft_cost', 0):,.0f}")
+    if sponsors:
+        sp_lines = []
+        for s in sponsors:
+            bits = [s.get("name") or ""]
+            if s.get("ownership_pct") is not None:
+                bits.append(f"{s['ownership_pct']}%")
+            if s.get("role"):
+                bits.append(s["role"])
+            if s.get("is_guarantor"):
+                bits.append("guarantor")
+            sp_lines.append(" / ".join(b for b in bits if b))
+        facts.append("- Sponsors: " + "; ".join(sp_lines))
+
+    fact_sheet = "\n".join(facts)
+    session_id = f"narrative-{sid[:8]}"
+    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=NARRATIVE_DRAFT_SYSTEM)
+    chat.with_model("anthropic", "claude-sonnet-4-5-20250929")
+    try:
+        reply = await chat.send_message(UserMessage(
+            text=f"{fact_sheet}\n\nWrite the Business Plan narrative now."
+        ))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ada draft failed: {e}")
+    text = (reply or "").strip()
+    return {"ok": True, "narrative": text}
+
+
 @api.post("/admin/scenarios/{sid}/summary/save-to-portal")
 async def admin_save_summary_to_portal(sid: str, body: SaveSummaryToPortalBody,
                                        admin=Depends(require_admin)):

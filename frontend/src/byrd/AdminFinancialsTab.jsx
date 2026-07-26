@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { Plus, Trash2, Upload, Sparkles, FileText, Download, Image as ImageIcon, X, Save } from "lucide-react";
+import { Plus, Trash2, Upload, Sparkles, FileText, Download, Image as ImageIcon, X, Save, Wand2 } from "lucide-react";
 
 const fmtMoney = (v) => (v == null || v === "" ? "—" : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`);
 const fmtNum = (v) => (v == null || v === "" ? "—" : Number(v).toLocaleString());
@@ -731,6 +731,8 @@ function SummarySection({ scen, scenarioId, summary, onPatch, onUploadPhoto, onD
           <NarrativeBox
             value={cfg.narrative || ""}
             businessPlan={scen?.business_plan || ""}
+            scenarioId={scenarioId}
+            scen={scen}
             onSave={(v) => onPatch({ narrative: v })}
           />
           <div className="mt-3 space-y-1 text-sm">
@@ -785,17 +787,78 @@ function SummarySection({ scen, scenarioId, summary, onPatch, onUploadPhoto, onD
   );
 }
 
-function NarrativeBox({ value, businessPlan, onSave }) {
+function NarrativeBox({ value, businessPlan, onSave, scenarioId, scen }) {
   const [v, setV] = useState(value);
+  const [showTpl, setShowTpl] = useState(false);
+  const [drafting, setDrafting] = useState(false);
   useEffect(() => { setV(value); }, [value]);
   const isEmpty = !v || !v.trim();
   const bpTrimmed = (businessPlan || "").trim();
+
   const copyFromBP = () => {
     setV(bpTrimmed);
     onSave(bpTrimmed);
   };
+
+  const applyText = (next) => {
+    if (v && v.trim() && !window.confirm("Replace the current narrative with this new draft?")) return;
+    setV(next);
+    onSave(next);
+    setShowTpl(false);
+  };
+
+  const insertBlankTemplate = () => {
+    const prop = scen?.property_info || {};
+    const loan = scen?.loan_request || {};
+    const sponsors = scen?.sponsors || [];
+    const addr = [prop.address, prop.city, prop.state].filter(Boolean).join(", ");
+    const propBits = [
+      prop.units ? `${prop.units}-unit` : null,
+      prop.property_type || null,
+    ].filter(Boolean).join(" ");
+    const price = prop.purchase_price ? `$${Number(prop.purchase_price).toLocaleString()}` : "[purchase price]";
+    const spNames = sponsors.map((s) => s.name).filter(Boolean).join(", ") || "[sponsor name(s)]";
+    const occupancy = prop.occupancy_type === "owner_occupied"
+      ? "Owner-occupied"
+      : prop.occupancy_type === "non_owner_occupied"
+        ? "Non-owner-occupied (investment)"
+        : "[Owner-occupied / Non-owner-occupied]";
+    const tpl = `Deal: ${occupancy} ${propBits || "[property type]"} located at ${addr || "[address]"}. Purchase price ${price}.
+
+Strategy: [Describe the value creation plan — core cash flow, value-add with renovation, opportunistic reposition, ground-up development, or owner-user operations. Include timeline and target outcome.]
+
+Sponsor: ${spNames}. [Brief track record — prior similar deals, years of experience, in-house or third-party management.]
+
+Financials: [Reference the selected period — in-place or projected NOI, DSCR at underwriting rate, LTV, debt yield.]
+
+Exit: [Refinance at stabilization / sale to institutional / long-term hold with cash flow.]`;
+    applyText(tpl);
+  };
+
+  const adaDraft = async () => {
+    setDrafting(true);
+    try {
+      const r = await api.post(`/admin/scenarios/${scenarioId}/summary/ada-draft-narrative`, {});
+      applyText(r.data.narrative || "");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Ada draft failed");
+    } finally {
+      setDrafting(false);
+    }
+  };
+
   return (
     <div>
+      <div className="flex items-center justify-end mb-1">
+        <button
+          type="button"
+          onClick={() => setShowTpl(true)}
+          className="text-[11px] font-mono uppercase tracking-widest text-[#C89434] hover:text-[#8A6821] flex items-center gap-1"
+          data-testid="narrative-template-btn"
+        >
+          <Wand2 size={12} /> Template
+        </button>
+      </div>
       <textarea
         value={v}
         onChange={(e) => setV(e.target.value)}
@@ -805,7 +868,7 @@ function NarrativeBox({ value, businessPlan, onSave }) {
             ? `Leave blank to use the Business Plan from the Package tab, or type a shorter version here for the 1-pager.`
             : `Value-add multifamily acquisition in the Third Ward submarket. In-place cash flowing at 92% occupancy with room to push rents post-renovation...`
         }
-        className="mt-1 w-full h-40 px-3 py-2 border border-[#E4DFD1] rounded-md text-sm focus:outline-none focus:border-[#C89434] resize-y"
+        className="w-full h-40 px-3 py-2 border border-[#E4DFD1] rounded-md text-sm focus:outline-none focus:border-[#C89434] resize-y"
         data-testid="summary-narrative"
       />
       {isEmpty && bpTrimmed && (
@@ -821,6 +884,41 @@ function NarrativeBox({ value, businessPlan, onSave }) {
       )}
       {isEmpty && !bpTrimmed && (
         <div className="mt-1 text-[11px] text-[#6B6558]">Empty. The Deal Narrative section will be omitted from the PDF.</div>
+      )}
+
+      {showTpl && (
+        <Modal onClose={() => setShowTpl(false)} testId="narrative-template-modal">
+          <div className="font-serif text-2xl font-bold mb-1">Start your narrative</div>
+          <p className="text-sm text-[#6B6558] mb-4">Pick a starting point. You&apos;ll always be able to edit before saving.</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <button
+              onClick={insertBlankTemplate}
+              className="border border-[#E4DFD1] rounded-md p-5 text-left hover:border-[#C89434] hover:bg-[#FBF8F1] transition"
+              data-testid="tpl-blank"
+            >
+              <div className="flex items-center gap-2 mb-2 text-[#6B6558]">
+                <FileText size={16} /> <span className="font-mono text-[10px] uppercase tracking-widest">// Skeleton</span>
+              </div>
+              <div className="font-serif text-lg font-bold">Blank template</div>
+              <div className="text-sm text-[#6B6558] mt-1">Pre-filled with your property + sponsor data. Bracketed sections wait for you to type the strategy, market, and exit.</div>
+            </button>
+            <button
+              onClick={adaDraft}
+              disabled={drafting}
+              className="border border-[#E4DFD1] rounded-md p-5 text-left hover:border-[#C89434] hover:bg-[#FBF8F1] transition disabled:opacity-60"
+              data-testid="tpl-ada"
+            >
+              <div className="flex items-center gap-2 mb-2 text-[#C89434]">
+                <Sparkles size={16} /> <span className="font-mono text-[10px] uppercase tracking-widest">// Ada</span>
+              </div>
+              <div className="font-serif text-lg font-bold">{drafting ? "Ada is writing…" : "Ada draft"}</div>
+              <div className="text-sm text-[#6B6558] mt-1">Ada writes a 4-paragraph lender-facing Business Plan using the property, financials, and sponsor data. Facts only — no invented numbers.</div>
+            </button>
+          </div>
+          <div className="mt-4 text-[11px] text-[#6B6558]">
+            Tip: For best Ada output, populate the Financials tab first (select a period + set the underwriting rate) so DSCR &amp; NOI facts are available.
+          </div>
+        </Modal>
       )}
     </div>
   );
