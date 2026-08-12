@@ -30,6 +30,27 @@ const errMsg = (e, fallback = "Something went wrong") => {
   return e?.message || fallback;
 };
 
+// Fetch a PDF with the auth header and open it in a new tab via blob URL.
+// Direct <a href> links to protected endpoints break in Safari because it can't send the token.
+async function openAuthedPdf(url, filename = "document.pdf") {
+  try {
+    const r = await api.get(url, { responseType: "blob" });
+    const blobUrl = URL.createObjectURL(r.data);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoke after a delay so the new tab has time to render
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+  } catch (e) {
+    toast.error(errMsg(e, "Couldn't open PDF"));
+  }
+}
+
 export default function AdminLoanQuoteStudio() {
   const [state, setState] = useState(emptyState());
   const [sessionId, setSessionId] = useState(null);
@@ -66,8 +87,9 @@ export default function AdminLoanQuoteStudio() {
         role: "ada", text: r.data.reply,
         ready_for_rates: r.data.ready_for_rates, has_agent: r.data.has_agent,
       }]);
-      if (r.data.ready_for_rates) {
-        // Auto-scroll a hint suggestion
+      if (r.data.ready_for_rates && !state.options.length && !proposing) {
+        // Ada just confirmed she's ready — kick off rate research automatically
+        proposeOptions();
       }
     } catch (e) {
       toast.error(errMsg(e, "Ada couldn't reply"));
@@ -126,8 +148,8 @@ export default function AdminLoanQuoteStudio() {
       });
       toast.success(`Quote saved${r.data.contact_id ? " · Listing agent added to CRM" : ""}`);
       loadLibrary();
-      // Open the freshly-saved PDF
-      window.open(`${api.defaults.baseURL}/admin/marketing/quotes/${r.data.id}/pdf`, "_blank", "noopener");
+      // Open the freshly-saved PDF (authenticated fetch so Safari can render it)
+      await openAuthedPdf(`/admin/marketing/quotes/${r.data.id}/pdf`, r.data.filename || "loan-quote.pdf");
     } catch (e) {
       toast.error(errMsg(e, "Save failed"));
     } finally {
@@ -332,11 +354,11 @@ export default function AdminLoanQuoteStudio() {
                       <td className="p-2">{fmtMoney(q.property_info?.estimated_value)}</td>
                       <td className="p-2 text-[11px] text-[#6B6558]">{new Date(q.created_at).toLocaleString()}</td>
                       <td className="p-2 text-right">
-                        <a href={`${api.defaults.baseURL}/admin/marketing/quotes/${q.id}/pdf`}
-                          target="_blank" rel="noopener noreferrer"
+                        <button
+                          onClick={() => openAuthedPdf(`/admin/marketing/quotes/${q.id}/pdf`, q.filename || "loan-quote.pdf")}
                           className="byrd-btn byrd-btn-outline text-xs" data-testid={`lq-dl-${q.id}`}>
                           <Download size={12} /> PDF
-                        </a>
+                        </button>
                         <button onClick={async () => {
                           if (!window.confirm("Delete this saved quote?")) return;
                           await api.delete(`/admin/marketing/quotes/${q.id}`);
