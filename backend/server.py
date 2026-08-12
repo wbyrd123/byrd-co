@@ -7602,7 +7602,7 @@ class LoanQuoteProperty(BaseModel):
 
 class LoanQuoteListingAgent(BaseModel):
     name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None                  # validated when we actually email (future feature)
     phone: Optional[str] = None
     brokerage: Optional[str] = None
 

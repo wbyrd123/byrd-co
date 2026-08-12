@@ -22,6 +22,14 @@ const emptyState = () => ({
 const fmtMoney = (v) => (v == null || v === "" ? "—" : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`);
 const fmtPct = (v, d = 2) => (v == null || v === "" ? "—" : `${Number(v).toFixed(d)}%`);
 
+// Safe error message extractor — FastAPI validation returns an array of objects that would crash toast otherwise.
+const errMsg = (e, fallback = "Something went wrong") => {
+  const d = e?.response?.data?.detail;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d) && d.length && typeof d[0]?.msg === "string") return d.map((x) => x.msg).join("; ");
+  return e?.message || fallback;
+};
+
 export default function AdminLoanQuoteStudio() {
   const [state, setState] = useState(emptyState());
   const [sessionId, setSessionId] = useState(null);
@@ -62,7 +70,7 @@ export default function AdminLoanQuoteStudio() {
         // Auto-scroll a hint suggestion
       }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Ada couldn't reply");
+      toast.error(errMsg(e, "Ada couldn't reply"));
     } finally {
       setSending(false);
     }
@@ -86,7 +94,7 @@ export default function AdminLoanQuoteStudio() {
           : `Drafted 3 options using industry-typical ranges. Rates are estimates — edit any cell as needed.`,
       }]);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Rate research failed");
+      toast.error(errMsg(e, "Rate research failed"));
     } finally {
       setProposing(false);
     }
@@ -121,7 +129,7 @@ export default function AdminLoanQuoteStudio() {
       // Open the freshly-saved PDF
       window.open(`${api.defaults.baseURL}/admin/marketing/quotes/${r.data.id}/pdf`, "_blank", "noopener");
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Save failed");
+      toast.error(errMsg(e, "Save failed"));
     } finally {
       setGenerating(false);
     }
