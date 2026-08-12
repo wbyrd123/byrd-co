@@ -21,6 +21,7 @@ import random
 import uuid
 import json
 import bcrypt
+import httpx
 import jwt as pyjwt
 import re
 import time
@@ -7577,6 +7578,510 @@ async def assistant_send_email(body: AssistantEmailSend, admin=Depends(require_a
         # Use 400 (not 502) so Cloudflare passes the JSON body through unchanged
         raise HTTPException(status_code=400, detail=detail)
     return {"ok": True, "id": log_id, "status": status}
+
+
+# ================ Marketing — Loan Quote Studio (listing agent) ================
+# Ada-driven builder for a 1-page Loan Quote PDF that brokers give to commercial listing
+# agents. Uses Perplexity Sonar for LIVE web research on current market rates, then Claude
+# to synthesize three financing option columns (Bank / Agency / Credit Union).
+
+PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY", "").strip()
+
+
+class LoanQuoteProperty(BaseModel):
+    name: Optional[str] = None
+    property_type: Optional[str] = None       # Multifamily, Office, Retail, Industrial, Hotel, Mixed-Use, ...
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    estimated_value: Optional[float] = None
+    noi: Optional[float] = None
+    cap_rate_pct: Optional[float] = None      # NOI/value * 100
+    occupancy_type: Optional[Literal["owner_occupied", "non_owner_occupied"]] = None
+
+
+class LoanQuoteListingAgent(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    brokerage: Optional[str] = None
+
+
+class LoanQuoteOption(BaseModel):
+    label: str = "Bank"                       # Bank / Agency / Credit Union
+    ltv_pct: Optional[float] = None
+    loan_amount: Optional[float] = None
+    loan_program: Optional[str] = None        # "7yr fixed / 30yr amort"
+    interest_rate_pct: Optional[float] = None
+    monthly_payment: Optional[float] = None
+    recourse: Optional[Literal["Yes", "No", "Partial"]] = None
+    notes: Optional[str] = None
+
+
+class LoanQuoteState(BaseModel):
+    property_info: LoanQuoteProperty = Field(default_factory=LoanQuoteProperty)
+    listing_agent: LoanQuoteListingAgent = Field(default_factory=LoanQuoteListingAgent)
+    options: List[LoanQuoteOption] = Field(default_factory=list)
+    research_note: Optional[str] = None       # Perplexity synthesis text (informational)
+    research_citations: List[str] = Field(default_factory=list)
+
+
+class LoanQuoteChatBody(BaseModel):
+    session_id: Optional[str] = None
+    message: str = Field(min_length=1)
+    state: LoanQuoteState = Field(default_factory=LoanQuoteState)
+
+
+class LoanQuoteResearchBody(BaseModel):
+    state: LoanQuoteState
+
+
+class LoanQuoteGenerateBody(BaseModel):
+    state: LoanQuoteState
+    add_listing_agent_to_crm: bool = True
+
+
+def _cap_rate_math(prop: dict) -> dict:
+    """Fill in cap_rate_pct from NOI+value, or NOI from value+cap_rate, if any is missing."""
+    v = prop.get("estimated_value")
+    noi = prop.get("noi")
+    cr = prop.get("cap_rate_pct")
+    if v and noi and not cr:
+        prop["cap_rate_pct"] = round(float(noi) / float(v) * 100, 2)
+    elif v and cr and not noi:
+        prop["noi"] = round(float(v) * float(cr) / 100.0, 2)
+    return prop
+
+
+LOAN_QUOTE_CHAT_SYSTEM = """You are Ada, a warm and efficient senior commercial real estate broker assistant at Byrd & Co. You help brokers build a 1-page Loan Quote for a commercial listing agent to share with a prospective buyer.
+
+You gather:
+1) Property info: name, property_type (Multifamily / Office / Retail / Industrial / Hotel / Mixed-Use / Self-Storage / Medical Office / Special Purpose), address, city, state, estimated_value, noi OR cap_rate_pct (either — the app auto-calculates the other), occupancy_type ("owner_occupied" | "non_owner_occupied")
+2) Listing agent: name, email, phone, brokerage
+
+Behavior:
+- Ask ONE or TWO fields at a time in a friendly conversation. Never bulk-request 8 fields.
+- Confirm as you go ("Got it — $3M value.")
+- If broker gives NOI or cap rate but not both, don't ask for the other.
+- When property info is complete enough (name, property_type, address, city, state, estimated_value, noi OR cap_rate), prompt: "Ready for me to research current market rates and propose 3 financing options?"
+- If broker agrees, set ready_for_rates=true in your response.
+
+Return ONLY valid JSON in this exact schema:
+{
+  "reply": "your chat message to the broker (natural language, warm, short)",
+  "updates": {
+    "property_info": { ...only the fields you extracted from THIS broker message, omit others... },
+    "listing_agent": { ...only fields extracted this turn... }
+  },
+  "ready_for_rates": false
+}
+
+CRITICAL:
+- "updates" contains ONLY fields you learned this turn. Never repeat known fields.
+- For property_type, use exact case: "Multifamily", "Office", "Retail", etc.
+- For occupancy_type, use exact strings: "owner_occupied" or "non_owner_occupied".
+- Numbers as raw numbers (not strings, no dollar signs or commas).
+- Never invent info the broker didn't provide.
+- Return raw JSON. No markdown fences. No text before or after."""
+
+
+LOAN_QUOTE_PROPOSAL_SYSTEM = """You are Ada synthesizing 3 loan option columns for a Loan Quote PDF Byrd & Co gives a commercial listing agent.
+
+You will receive:
+- The property facts (type, value, NOI, cap rate, occupancy)
+- Live web research from Perplexity about CURRENT commercial real estate loan rates and typical structures
+
+Produce EXACTLY 3 columns: Bank, Agency, Credit Union.
+
+For each column, decide values that fit the property type + occupancy:
+- Multifamily → Agency (Fannie/Freddie DUS/Optigo) fits well, Bank + CU also
+- Office / Retail / Industrial → Bank + CU; use "SBA 504" instead of "Agency" ONLY if occupancy is owner_occupied
+- Hotel → Bank + CU + Bridge (label the third column "Bank" if bridge doesn't fit)
+- Owner-occupied deals of any commercial type → include SBA 7(a) or 504 as one column (label it "SBA" instead of "Agency")
+
+Fill for each column:
+- label: "Bank" | "Agency" | "Credit Union" | "SBA" | "Bridge"
+- ltv_pct: percent (65, 70, 75, 80, etc)
+- loan_amount: round to nearest $1,000 (value × LTV)
+- loan_program: e.g., "7yr fixed / 30yr amort", "10yr fixed / 30yr amort", "5yr fixed / 25yr amort", "SBA 504 25yr", etc.
+- interest_rate_pct: your best estimate from the research (label with a chip in the app)
+- monthly_payment: standard amortization payment
+- recourse: "Yes" | "No" | "Partial"
+
+CRITICAL: return VALID JSON in this exact schema and NOTHING ELSE (no markdown fences, no prose):
+{
+  "options": [
+    {"label": "Bank", "ltv_pct": 65, "loan_amount": 1950000, "loan_program": "7yr fixed / 30yr amort", "interest_rate_pct": 6.75, "monthly_payment": 12648, "recourse": "Yes"},
+    {"label": "Agency", "ltv_pct": 75, "loan_amount": 2250000, "loan_program": "10yr fixed / 30yr amort", "interest_rate_pct": 5.95, "monthly_payment": 13400, "recourse": "No"},
+    {"label": "Credit Union", "ltv_pct": 65, "loan_amount": 1950000, "loan_program": "5yr fixed / 25yr amort", "interest_rate_pct": 6.50, "monthly_payment": 13100, "recourse": "Yes"}
+  ],
+  "note": "Short one-line qualifier, e.g., 'Rates indicative Jan 2026 — verify with lender.'"
+}"""
+
+
+async def _perplexity_rate_search(prop: dict) -> Optional[dict]:
+    """Query Perplexity Sonar for current CRE loan rates + typical structures for this property."""
+    if not PERPLEXITY_API_KEY:
+        return None
+    ptype = (prop.get("property_type") or "commercial real estate").lower()
+    occ = prop.get("occupancy_type")
+    occ_hint = "owner-occupied" if occ == "owner_occupied" else ("investment" if occ == "non_owner_occupied" else "")
+    today = datetime.now(timezone.utc).strftime("%B %Y")
+    query = (
+        f"Current commercial real estate loan interest rates {today} for {occ_hint} {ptype} property in the United States. "
+        f"Include typical Bank rates, Agency (Fannie Mae Freddie Mac) rates for multifamily, SBA 504 and 7(a) for owner-occupied, "
+        f"and Credit Union rates. For each: rate range, typical LTV, typical amortization, typical fixed period, recourse. "
+        f"Cite lender or industry sources with recent publication dates. Do not invent numbers."
+    )
+    payload = {
+        "model": "sonar-pro",
+        "messages": [{"role": "user", "content": query}],
+        "temperature": 0.1,
+        "max_tokens": 900,
+        "return_citations": True,
+    }
+    headers = {"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            r = await client.post("https://api.perplexity.ai/chat/completions",
+                                  json=payload, headers=headers)
+            if r.status_code >= 400:
+                logger.warning("Perplexity %s: %s", r.status_code, r.text[:300])
+                return None
+            data = r.json()
+    except Exception as e:
+        logger.warning("Perplexity request failed: %s", e)
+        return None
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError):
+        return None
+    citations = data.get("citations") or data.get("search_results") or []
+    if isinstance(citations, list) and citations and isinstance(citations[0], dict):
+        citations = [c.get("url") or c.get("link") for c in citations if c.get("url") or c.get("link")]
+    return {"content": content, "citations": [c for c in citations if c][:6]}
+
+
+def _clean_json_output(txt: str) -> str:
+    """Strip markdown fences and extract the first {...} block."""
+    t = (txt or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"):
+            t = t[4:].strip()
+    lb = t.find("{")
+    rb = t.rfind("}")
+    if lb >= 0 and rb > lb:
+        return t[lb:rb + 1]
+    return t
+
+
+@api.post("/admin/marketing/quote/chat")
+async def admin_loanquote_chat(body: LoanQuoteChatBody, admin=Depends(require_admin)):
+    """Turn-by-turn Ada conversation. Broker asks; Ada fills in the state via natural dialogue."""
+    # Auto-fill cap_rate <-> NOI when possible (idempotent)
+    prop = _cap_rate_math(body.state.property_info.model_dump())
+    sid = body.session_id or f"lq-{uuid.uuid4().hex[:10]}"
+    # Assemble a compact CURRENT_STATE block so Ada knows what she already has
+    state_dict = body.state.model_dump()
+    state_dict["property_info"] = prop
+    context = ("CURRENT_STATE (what we already know — do NOT re-ask filled fields):\n"
+               f"{json.dumps(state_dict, indent=2)}\n")
+    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=sid,
+                   system_message=LOAN_QUOTE_CHAT_SYSTEM)
+    chat.with_model("anthropic", "claude-sonnet-4-5-20250929")
+    try:
+        reply = await chat.send_message(UserMessage(text=f"{context}\nBroker just said: {body.message}"))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ada chat failed: {e}")
+    raw = (reply or "").strip()
+    try:
+        parsed = json.loads(_clean_json_output(raw))
+    except Exception:
+        # Fallback — treat entire response as chat reply, no state updates
+        parsed = {"reply": raw, "updates": {}, "ready_for_rates": False}
+    reply_text = (parsed.get("reply") or "").strip()
+    updates = parsed.get("updates") or {}
+    # Merge updates into state (only non-empty values)
+    new_state = body.state.model_dump()
+    new_state["property_info"] = prop  # start from cap-rate-normalized
+    for section in ("property_info", "listing_agent"):
+        sec_updates = updates.get(section) or {}
+        for k, v in sec_updates.items():
+            if v in (None, "", []):
+                continue
+            new_state[section][k] = v
+    # Re-run cap-rate math after updates in case value/NOI/cap arrived this turn
+    new_state["property_info"] = _cap_rate_math(new_state["property_info"])
+    return {"session_id": sid, "reply": reply_text,
+            "ready_for_rates": bool(parsed.get("ready_for_rates")),
+            "state": new_state}
+
+
+@api.post("/admin/marketing/quote/propose-options")
+async def admin_loanquote_propose(body: LoanQuoteResearchBody, admin=Depends(require_admin)):
+    """Perplexity → Claude synthesis → 3 financing option columns. Admin-only."""
+    prop = _cap_rate_math(body.state.property_info.model_dump())
+    if not prop.get("estimated_value"):
+        raise HTTPException(status_code=400, detail="Estimated value required before proposing options")
+    if not (prop.get("noi") or prop.get("cap_rate_pct")):
+        raise HTTPException(status_code=400, detail="NOI or cap rate required")
+
+    research = await _perplexity_rate_search(prop)
+    research_content = (research or {}).get("content") or ""
+    citations = (research or {}).get("citations") or []
+
+    # Feed research + property to Claude
+    facts = ["PROPERTY FACTS:"]
+    for k, v in prop.items():
+        if v is not None and v != "":
+            facts.append(f"- {k}: {v}")
+    facts_block = "\n".join(facts)
+    research_block = ("LIVE MARKET RESEARCH (from Perplexity Sonar; treat as dated market context, not a lender commitment):\n"
+                      + research_content) if research_content else "LIVE MARKET RESEARCH: (none available — use industry-typical ranges)"
+    sid = f"lq-propose-{uuid.uuid4().hex[:10]}"
+    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=sid,
+                   system_message=LOAN_QUOTE_PROPOSAL_SYSTEM)
+    chat.with_model("anthropic", "claude-sonnet-4-5-20250929")
+    try:
+        reply = await chat.send_message(UserMessage(text=f"{facts_block}\n\n{research_block}\n\nProduce the JSON now."))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ada proposal failed: {e}")
+    try:
+        parsed = json.loads(_clean_json_output(reply or ""))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Ada returned invalid JSON — click Propose again.")
+    options = parsed.get("options") or []
+    # Ensure exactly 3, coerce & clean
+    normalized = []
+    for opt in options[:3]:
+        try:
+            normalized.append(LoanQuoteOption(**opt).model_dump())
+        except Exception:
+            continue
+    while len(normalized) < 3:
+        normalized.append(LoanQuoteOption(label=["Bank", "Agency", "Credit Union"][len(normalized)]).model_dump())
+    return {
+        "options": normalized,
+        "note": parsed.get("note") or "",
+        "research_note": research_content,
+        "research_citations": citations,
+    }
+
+
+def render_loan_quote_pdf(state: dict) -> bytes:
+    """Byrd-branded 1-page Loan Quote PDF for a commercial listing agent."""
+    from reportlab.platypus import Image as RImage
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter,
+                            leftMargin=0.55 * inch, rightMargin=0.55 * inch,
+                            topMargin=0.5 * inch, bottomMargin=0.5 * inch,
+                            title="Byrd & Co Loan Quote")
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], fontName="Helvetica-Bold",
+                        fontSize=22, leading=26, textColor=BYRD_INK, spaceAfter=2)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontName="Helvetica-Bold",
+                        fontSize=10, leading=12, textColor=BYRD_INK, spaceBefore=8, spaceAfter=4)
+    body = ParagraphStyle("body", parent=styles["BodyText"], fontName="Helvetica",
+                          fontSize=9, leading=12, textColor=BYRD_INK)
+    small = ParagraphStyle("small", parent=styles["BodyText"], fontName="Helvetica",
+                           fontSize=8, leading=10, textColor=BYRD_MUTED)
+    money = lambda v: _fmt_money(v)
+    pct = lambda v, d=2: _fmt_pct(v, d)
+
+    prop = state.get("property_info") or {}
+    options = state.get("options") or []
+
+    els = []
+    els.append(Paragraph("BYRD &amp; CO", ParagraphStyle(
+        "brand", fontName="Helvetica-Bold", fontSize=10, textColor=BYRD_GOLD, spaceAfter=1)))
+    els.append(Paragraph("Commercial Real Estate Lending", small))
+    els.append(Spacer(1, 4))
+    els.append(Paragraph("Loan Quote", h1))
+    els.append(Spacer(1, 4))
+
+    # Property Details — 2 column key/value block
+    addr = ", ".join(x for x in [prop.get("address"), prop.get("city"), prop.get("state")] if x)
+    left_rows = [
+        [Paragraph("<b>Property Name</b>", body), prop.get("name") or "—"],
+        [Paragraph("<b>Property Type</b>", body), prop.get("property_type") or "—"],
+        [Paragraph("<b>Address</b>", body), addr or "—"],
+    ]
+    if prop.get("occupancy_type"):
+        left_rows.append([Paragraph("<b>Occupancy</b>", body),
+                          "Owner-Occupied" if prop["occupancy_type"] == "owner_occupied" else "Non-Owner-Occupied"])
+    right_rows = [
+        [Paragraph("<b>Estimated Value</b>", body), money(prop.get("estimated_value"))],
+        [Paragraph("<b>NOI</b>", body), money(prop.get("noi"))],
+        [Paragraph("<b>Cap Rate</b>", body), pct(prop.get("cap_rate_pct"))],
+    ]
+    # pad shorter side so both tables have the same # rows
+    while len(right_rows) < len(left_rows):
+        right_rows.append(["", ""])
+    while len(left_rows) < len(right_rows):
+        left_rows.append(["", ""])
+    lt = Table(left_rows, colWidths=[1.15 * inch, 2.3 * inch])
+    rt = Table(right_rows, colWidths=[1.1 * inch, 1.6 * inch])
+    for tbl in (lt, rt):
+        tbl.setStyle(TableStyle([
+            ("FONTSIZE", (0, 0), (-1, -1), 9), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3), ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ]))
+    els.append(Paragraph("PROPERTY DETAILS", h2))
+    els.append(Table([[lt, rt]], colWidths=[3.5 * inch, 2.8 * inch]))
+    els.append(Spacer(1, 8))
+
+    # Financing options — 3 column comparison
+    els.append(Paragraph("FINANCING OPTIONS", h2))
+    hdr = [Paragraph(f"<b>{o.get('label', '—')}</b>", ParagraphStyle(
+        "col_hdr", fontName="Helvetica-Bold", fontSize=11, textColor=BYRD_GOLD, alignment=1)) for o in options[:3]]
+    while len(hdr) < 3:
+        hdr.append(Paragraph("—", body))
+    rows = [hdr]
+
+    def _pay(v):
+        return money(v)
+
+    fields = [
+        ("Estimated Value", lambda o: money(prop.get("estimated_value"))),
+        ("Loan To Value", lambda o: pct(o.get("ltv_pct"), 0) if o.get("ltv_pct") is not None else "—"),
+        ("Loan Amount", lambda o: money(o.get("loan_amount"))),
+        ("Loan Program", lambda o: o.get("loan_program") or "—"),
+        ("Interest Rate", lambda o: pct(o.get("interest_rate_pct"), 2) if o.get("interest_rate_pct") is not None else "—"),
+        ("Monthly Payment", lambda o: _pay(o.get("monthly_payment"))),
+        ("Recourse", lambda o: o.get("recourse") or "—"),
+    ]
+    for label, fn in fields:
+        row = [Paragraph(f"<b>{label}</b>", small)]
+        for o in options[:3]:
+            row.append(Paragraph(str(fn(o)), body))
+        while len(row) < 4:
+            row.append("—")
+        rows.append(row)
+
+    ot = Table(rows, colWidths=[1.35 * inch, 2.0 * inch, 2.0 * inch, 2.0 * inch])
+    ot.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), BYRD_IVORY),
+        ("GRID", (0, 0), (-1, -1), 0.4, BYRD_LINE),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+        ("ALIGN", (0, 0), (0, -1), "LEFT"),
+        ("BACKGROUND", (0, 1), (0, -1), BYRD_IVORY),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    els.append(ot)
+
+    # Disclaimer
+    els.append(Spacer(1, 8))
+    els.append(Paragraph(
+        "<i>Byrd &amp; Co is providing this quote for informational purposes only. "
+        "Rates and terms are indicative market estimates as of the quote date, "
+        "subject to lender approval, appraisal, and full underwriting.</i>", small))
+
+    # Contact block
+    els.append(Spacer(1, 12))
+    contact = Table([[
+        Paragraph("<b>Wayne Byrd</b><br/>832-813-9802<br/>wayne@byrd-co.com", body),
+        Paragraph("<b>Caleb Byrd</b><br/>832-661-4390<br/>caleb@byrd-co.com", body),
+    ]], colWidths=[3.65 * inch, 3.65 * inch])
+    contact.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), BYRD_IVORY),
+        ("BOX", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12), ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    els.append(contact)
+
+    doc.build(els)
+    return buf.getvalue()
+
+
+@api.post("/admin/marketing/quote/generate")
+async def admin_loanquote_generate(body: LoanQuoteGenerateBody, admin=Depends(require_admin)):
+    """Render PDF, persist quote + PDF, optionally add listing agent to CRM."""
+    state = body.state.model_dump()
+    state["property_info"] = _cap_rate_math(state.get("property_info") or {})
+    if not (state.get("options") and len(state["options"]) >= 1):
+        raise HTTPException(status_code=400, detail="Propose financing options before generating the PDF")
+    pdf_bytes = render_loan_quote_pdf(state)
+    qid = str(uuid.uuid4())
+    now = now_iso()
+    fname = f"byrd-loan-quote-{(state.get('property_info', {}).get('name') or 'quote').replace(' ', '-').lower()[:40]}.pdf"
+    contact_id = None
+    la = state.get("listing_agent") or {}
+    if body.add_listing_agent_to_crm and la.get("name") and la.get("email"):
+        # Upsert into db.contacts by email; tag as "Listing Agent"
+        existing = await db.contacts.find_one({"email": la["email"].lower()}, {"_id": 0})
+        if existing:
+            contact_id = existing["id"]
+            tags = list({*(existing.get("tags") or []), "Listing Agent"})
+            await db.contacts.update_one(
+                {"id": contact_id},
+                {"$set": {"tags": tags, "updated_at": now,
+                          "phone": existing.get("phone") or la.get("phone"),
+                          "company": existing.get("company") or la.get("brokerage")}},
+            )
+        else:
+            contact_id = str(uuid.uuid4())
+            await db.contacts.insert_one({
+                "id": contact_id, "name": la["name"], "email": la["email"].lower(),
+                "phone": la.get("phone") or "", "company": la.get("brokerage") or "",
+                "tags": ["Listing Agent"], "notes": f"Auto-added from Loan Quote for {state.get('property_info', {}).get('name') or 'property'}.",
+                "created_at": now, "updated_at": now, "created_by": admin["id"],
+            })
+    await db.loan_quotes.insert_one({
+        "id": qid, "created_at": now, "created_by": admin["id"],
+        "property_info": state.get("property_info"),
+        "listing_agent": la,
+        "options": state.get("options"),
+        "research_note": state.get("research_note"),
+        "research_citations": state.get("research_citations", []),
+        "filename": fname, "size": len(pdf_bytes),
+        "pdf_b64": base64.b64encode(pdf_bytes).decode("ascii"),
+        "contact_id": contact_id,
+    })
+    return {"ok": True, "id": qid, "filename": fname, "contact_id": contact_id}
+
+
+@api.get("/admin/marketing/quotes")
+async def admin_list_loanquotes(admin=Depends(require_admin)):
+    docs = await db.loan_quotes.find({}, {"_id": 0, "pdf_b64": 0}).sort("created_at", -1).to_list(200)
+    return docs
+
+
+@api.get("/admin/marketing/quotes/{qid}/pdf")
+async def admin_download_loanquote(qid: str, admin=Depends(require_admin)):
+    q = await db.loan_quotes.find_one({"id": qid})
+    if not q:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    return Response(
+        content=base64.b64decode(q["pdf_b64"]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{q.get("filename") or "loan-quote.pdf"}"'},
+    )
+
+
+@api.delete("/admin/marketing/quotes/{qid}")
+async def admin_delete_loanquote(qid: str, admin=Depends(require_admin)):
+    res = await db.loan_quotes.delete_one({"id": qid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    return {"ok": True}
+
+
+@api.post("/admin/marketing/quote/preview")
+async def admin_loanquote_preview(body: LoanQuoteResearchBody, admin=Depends(require_admin)):
+    """Render the current state as a PDF WITHOUT saving. Used for live preview."""
+    state = body.state.model_dump()
+    state["property_info"] = _cap_rate_math(state.get("property_info") or {})
+    pdf_bytes = render_loan_quote_pdf(state)
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="preview.pdf"'})
 
 
 # ================ AdsCopilot (existing internal tool) ================

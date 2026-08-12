@@ -11,6 +11,27 @@
 - P3: Refactor `server.py` (~7,700 lines) into modular routes
 
 
+### Loan Quote Studio (Marketing) — SHIPPED 2026-02
+Ada-driven builder for a 1-page branded Loan Quote PDF that brokers give to commercial listing agents. Live web rates via Perplexity Sonar API.
+
+**Route:** `/admin/marketing/loan-quote` (admin-only) — new sidebar nav item under `// MARKETING`.
+
+**Backend endpoints:**
+- `POST /admin/marketing/quote/chat` — turn-by-turn Ada conversation, extracts structured `updates` per message and merges into state. Auto-calculates cap_rate ↔ NOI on the fly.
+- `POST /admin/marketing/quote/propose-options` — hits Perplexity `sonar-pro` for CURRENT market rates for the property type + occupancy, feeds result + property facts to Claude Sonnet 4.5, returns 3 tailored financing option columns (Bank / Agency / Credit Union — Ada swaps Agency for SBA on owner-occupied deals).
+- `POST /admin/marketing/quote/preview` — live PDF preview (no persistence)
+- `POST /admin/marketing/quote/generate` — renders + persists PDF to `db.loan_quotes`, auto-adds listing agent to `db.contacts` with tag `"Listing Agent"`.
+- `GET /admin/marketing/quotes` — library
+- `GET /admin/marketing/quotes/{qid}/pdf` — download
+- `DELETE /admin/marketing/quotes/{qid}` — delete
+
+**Env:** `PERPLEXITY_API_KEY` added to `backend/.env` (must be added to production via Emergent Support before redeploy). Sonar-pro model, ~$3/M input / $15/M output; every call stores citations for auditability.
+
+**Frontend:** `AdminLoanQuoteStudio.jsx` (new). Side-by-side chat + inline-editable field panel + live iframe PDF preview + Marketing Library table at bottom.
+
+**Smoke test:** end-to-end verified — Ada extracted 8 fields from a single free-form broker message, cap rate auto-computed (12.56%), Perplexity returned 6 citations, Claude drafted Bank/Agency/CU columns with rates (6.61% / 5.80% / 6.25%), generate endpoint persisted PDF, listing agent auto-created in CRM with `Listing Agent` tag.
+
+
 ### Financials Tab + Executive Loan Summary — SHIPPED 2026-02
 Phase 1 + Phase 2 built in one push per user request. Owner-occupied support included.
 

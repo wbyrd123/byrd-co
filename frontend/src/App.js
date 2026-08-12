@@ -21,6 +21,7 @@ import AdminGuide from "@/byrd/AdminGuide";
 import AdminTestimonials from "@/byrd/AdminTestimonials";
 import AdminAssistant from "@/byrd/AdminAssistant";
 import AdminContacts from "@/byrd/AdminContacts";
+import AdminLoanQuoteStudio from "@/byrd/AdminLoanQuoteStudio";
 import Unsubscribe from "@/byrd/Unsubscribe";
 import FeeAgreementSign from "@/byrd/FeeAgreementSign";
 import LenderView from "@/byrd/LenderView";
@@ -132,6 +133,7 @@ function App() {
               <Route path="testimonials" element={<AdminTestimonials />} />
               <Route path="assistant" element={<AdminAssistant />} />
               <Route path="contacts" element={<AdminContacts />} />
+              <Route path="marketing/loan-quote" element={<AdminLoanQuoteStudio />} />
               <Route path="guide" element={<AdminGuide />} />
             </Route>
 

@@ -58,6 +58,13 @@ export default function AdminLayout() {
               // Marketing
             </div>
             <button
+              onClick={() => nav("/admin/marketing/loan-quote")}
+              data-testid="admin-open-loan-quote-studio"
+              className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm text-[#2A2A2A] hover:bg-[#F3EEE0]"
+            >
+              <FileText size={16} /> Loan Quote Studio
+            </button>
+            <button
               onClick={() => nav("/adscopilot")}
               data-testid="admin-open-google-ads-portal"
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm text-[#2A2A2A] hover:bg-[#F3EEE0]"
