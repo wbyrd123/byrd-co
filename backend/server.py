@@ -7605,6 +7605,8 @@ class LoanQuoteListingAgent(BaseModel):
     email: Optional[str] = None                  # validated when we actually email (future feature)
     phone: Optional[str] = None
     brokerage: Optional[str] = None
+    photo_b64: Optional[str] = None              # inline base64 headshot (jpg/png)
+    photo_content_type: Optional[str] = None
 
 
 class LoanQuoteOption(BaseModel):
@@ -7934,9 +7936,12 @@ def render_loan_quote_pdf(state: dict) -> bytes:
 
     # Financing options — 3 column comparison
     els.append(Paragraph("FINANCING OPTIONS", h2))
-    hdr = [Paragraph(f"<b>{o.get('label', '—')}</b>", ParagraphStyle(
-        "col_hdr", fontName="Helvetica-Bold", fontSize=11, textColor=BYRD_GOLD, alignment=1)) for o in options[:3]]
-    while len(hdr) < 3:
+    col_hdr_style = ParagraphStyle(
+        "col_hdr", fontName="Helvetica-Bold", fontSize=11, textColor=BYRD_GOLD, alignment=1)
+    # Table has 4 columns: [row-label | Bank | Agency | Credit Union]. The header row must
+    # start with an empty cell so labels sit ABOVE their data columns.
+    hdr = [""] + [Paragraph(f"<b>{o.get('label', '—')}</b>", col_hdr_style) for o in options[:3]]
+    while len(hdr) < 4:
         hdr.append(Paragraph("—", body))
     rows = [hdr]
 
@@ -7983,8 +7988,43 @@ def render_loan_quote_pdf(state: dict) -> bytes:
         "Rates and terms are indicative market estimates as of the quote date, "
         "subject to lender approval, appraisal, and full underwriting.</i>", small))
 
-    # Contact block
-    els.append(Spacer(1, 12))
+    # Listing Agent branding band — photo + contact block if we have any info
+    agent = state.get("listing_agent") or {}
+    agent_has_any = any(agent.get(k) for k in ("name", "phone", "email", "brokerage", "photo_b64"))
+    if agent_has_any:
+        els.append(Spacer(1, 14))
+        els.append(Paragraph("PRESENTED BY", h2))
+        photo_cell = ""
+        if agent.get("photo_b64"):
+            try:
+                photo_bytes = base64.b64decode(agent["photo_b64"])
+                photo_cell = RImage(BytesIO(photo_bytes), width=1.1 * inch, height=1.35 * inch, kind="proportional")
+            except Exception:
+                photo_cell = ""
+        info_lines = []
+        if agent.get("name"):
+            info_lines.append(f"<b><font size='11'>{agent['name']}</font></b>")
+        if agent.get("brokerage"):
+            info_lines.append(f"<font color='#6B6558'>{agent['brokerage']}</font>")
+        if agent.get("phone"):
+            info_lines.append(agent["phone"])
+        if agent.get("email"):
+            info_lines.append(agent["email"])
+        info_para = Paragraph("<br/>".join(info_lines), body)
+        band = Table([[photo_cell, info_para]], colWidths=[1.3 * inch, 6.0 * inch])
+        band.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), BYRD_IVORY),
+            ("BOX", (0, 0), (-1, -1), 0.5, BYRD_LINE),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ]))
+        els.append(band)
+
+    # Byrd contact block
+    els.append(Spacer(1, 10))
     contact = Table([[
         Paragraph("<b>Wayne Byrd</b><br/>832-813-9802<br/>wayne@byrd-co.com", body),
         Paragraph("<b>Caleb Byrd</b><br/>832-661-4390<br/>caleb@byrd-co.com", body),
@@ -8052,6 +8092,81 @@ async def admin_loanquote_generate(body: LoanQuoteGenerateBody, admin=Depends(re
 async def admin_list_loanquotes(admin=Depends(require_admin)):
     docs = await db.loan_quotes.find({}, {"_id": 0, "pdf_b64": 0}).sort("created_at", -1).to_list(200)
     return docs
+
+
+@api.get("/admin/marketing/quotes/search")
+async def admin_search_loanquotes(q: str, admin=Depends(require_admin)):
+    """Case-insensitive search on property name / address / city for the Ada 'load quote' flow."""
+    if not q or len(q.strip()) < 2:
+        return []
+    needle = q.strip()
+    regex = {"$regex": needle.replace("\\", "\\\\").replace(".", "\\."), "$options": "i"}
+    docs = await db.loan_quotes.find({
+        "$or": [
+            {"property_info.name": regex},
+            {"property_info.address": regex},
+            {"property_info.city": regex},
+        ]
+    }, {"_id": 0, "pdf_b64": 0}).sort("created_at", -1).to_list(20)
+    return docs
+
+
+@api.get("/admin/marketing/quotes/{qid}")
+async def admin_get_loanquote(qid: str, admin=Depends(require_admin)):
+    q = await db.loan_quotes.find_one({"id": qid}, {"_id": 0, "pdf_b64": 0})
+    if not q:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    return q
+
+
+@api.patch("/admin/marketing/quotes/{qid}")
+async def admin_update_loanquote(qid: str, body: LoanQuoteGenerateBody, admin=Depends(require_admin)):
+    """Overwrite an existing saved quote — re-renders the PDF and replaces stored payload."""
+    q = await db.loan_quotes.find_one({"id": qid})
+    if not q:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    state = body.state.model_dump()
+    state["property_info"] = _cap_rate_math(state.get("property_info") or {})
+    if not (state.get("options") and len(state["options"]) >= 1):
+        raise HTTPException(status_code=400, detail="Financing options are required")
+    pdf_bytes = render_loan_quote_pdf(state)
+    now = now_iso()
+    fname = (q.get("filename")
+             or f"byrd-loan-quote-{(state.get('property_info', {}).get('name') or 'quote').replace(' ', '-').lower()[:40]}.pdf")
+    la = state.get("listing_agent") or {}
+    contact_id = q.get("contact_id")
+    if body.add_listing_agent_to_crm and la.get("name") and la.get("email") and not contact_id:
+        # Only create a new Contact if we didn't already on the first save
+        existing = await db.contacts.find_one({"email": la["email"].lower()}, {"_id": 0})
+        if existing:
+            contact_id = existing["id"]
+            tags = list({*(existing.get("tags") or []), "Listing Agent"})
+            await db.contacts.update_one({"id": contact_id},
+                                         {"$set": {"tags": tags, "updated_at": now}})
+        else:
+            contact_id = str(uuid.uuid4())
+            await db.contacts.insert_one({
+                "id": contact_id, "name": la["name"], "email": la["email"].lower(),
+                "phone": la.get("phone") or "", "company": la.get("brokerage") or "",
+                "tags": ["Listing Agent"],
+                "notes": f"Auto-added from Loan Quote for {state.get('property_info', {}).get('name') or 'property'}.",
+                "created_at": now, "updated_at": now, "created_by": admin["id"],
+            })
+    await db.loan_quotes.update_one(
+        {"id": qid},
+        {"$set": {
+            "updated_at": now,
+            "property_info": state.get("property_info"),
+            "listing_agent": la,
+            "options": state.get("options"),
+            "research_note": state.get("research_note"),
+            "research_citations": state.get("research_citations", []),
+            "pdf_b64": base64.b64encode(pdf_bytes).decode("ascii"),
+            "size": len(pdf_bytes),
+            "contact_id": contact_id,
+        }},
+    )
+    return {"ok": True, "id": qid, "filename": fname, "contact_id": contact_id}
 
 
 @api.get("/admin/marketing/quotes/{qid}/pdf")

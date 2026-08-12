@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { Send, Sparkles, Trash2, Download, FileText, Wand2, Loader2, Save, User, Home } from "lucide-react";
+import { Send, Sparkles, Trash2, Download, FileText, Wand2, Loader2, Save, User, Home, Upload, X, Edit3 } from "lucide-react";
 
 const PROPERTY_TYPES = [
   "Multifamily", "Office", "Retail", "Industrial", "Hotel",
@@ -13,7 +13,7 @@ const emptyState = () => ({
     name: "", property_type: "", address: "", city: "", state: "",
     estimated_value: null, noi: null, cap_rate_pct: null, occupancy_type: null,
   },
-  listing_agent: { name: "", email: "", phone: "", brokerage: "" },
+  listing_agent: { name: "", email: "", phone: "", brokerage: "", photo_b64: null, photo_content_type: null },
   options: [],
   research_note: null,
   research_citations: [],
@@ -54,9 +54,10 @@ async function openAuthedPdf(url, filename = "document.pdf") {
 export default function AdminLoanQuoteStudio() {
   const [state, setState] = useState(emptyState());
   const [sessionId, setSessionId] = useState(null);
+  const [editingId, setEditingId] = useState(null);  // when set, save() PATCHes existing quote
   const [messages, setMessages] = useState([{
     role: "ada",
-    text: "Hi — I'm Ada. Let's build a Loan Quote for your listing agent. What's the property name?",
+    text: "Hi — I'm Ada. Let's build a Loan Quote for your listing agent. What's the property name?\n\nTip: you can also click Edit on any saved quote below to modify it.",
   }]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -143,13 +144,22 @@ export default function AdminLoanQuoteStudio() {
   const generateAndSave = async () => {
     setGenerating(true);
     try {
-      const r = await api.post("/admin/marketing/quote/generate", {
+      const url = editingId
+        ? `/admin/marketing/quotes/${editingId}`
+        : `/admin/marketing/quote/generate`;
+      const method = editingId ? "patch" : "post";
+      const r = await api[method](url, {
         state, add_listing_agent_to_crm: true,
       });
-      toast.success(`Quote saved${r.data.contact_id ? " · Listing agent added to CRM" : ""}`);
+      const qid = editingId || r.data.id;
+      toast.success(
+        editingId
+          ? "Quote updated"
+          : `Quote saved${r.data.contact_id ? " · Listing agent added to CRM" : ""}`
+      );
+      setEditingId(qid);      // switch to edit mode after first save
       loadLibrary();
-      // Open the freshly-saved PDF (authenticated fetch so Safari can render it)
-      await openAuthedPdf(`/admin/marketing/quotes/${r.data.id}/pdf`, r.data.filename || "loan-quote.pdf");
+      await openAuthedPdf(`/admin/marketing/quotes/${qid}/pdf`, r.data.filename || "loan-quote.pdf");
     } catch (e) {
       toast.error(errMsg(e, "Save failed"));
     } finally {
@@ -157,10 +167,41 @@ export default function AdminLoanQuoteStudio() {
     }
   };
 
+  const editQuote = async (qid) => {
+    try {
+      const r = await api.get(`/admin/marketing/quotes/${qid}`);
+      const q = r.data;
+      setEditingId(q.id);
+      setSessionId(null);
+      setState({
+        property_info: {
+          name: "", property_type: "", address: "", city: "", state: "",
+          estimated_value: null, noi: null, cap_rate_pct: null, occupancy_type: null,
+          ...(q.property_info || {}),
+        },
+        listing_agent: {
+          name: "", email: "", phone: "", brokerage: "", photo_b64: null, photo_content_type: null,
+          ...(q.listing_agent || {}),
+        },
+        options: q.options || [],
+        research_note: q.research_note || null,
+        research_citations: q.research_citations || [],
+      });
+      setMessages([{
+        role: "ada",
+        text: `Loaded quote for ${q.property_info?.name || q.property_info?.address || "this property"}. Edit anything you want in the panel, or tell me what to change — e.g., "bump the bank rate to 6.75%".`,
+      }]);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e) {
+      toast.error(errMsg(e, "Load failed"));
+    }
+  };
+
   const startNewQuote = () => {
     if (!window.confirm("Discard current quote and start a new one?")) return;
     setState(emptyState());
     setSessionId(null);
+    setEditingId(null);
     setPreviewUrl((p) => { if (p) URL.revokeObjectURL(p); return null; });
     setMessages([{
       role: "ada",
@@ -204,6 +245,11 @@ export default function AdminLoanQuoteStudio() {
             <p className="text-sm text-[#6B6558] mt-1">
               Chat with Ada to build a branded Loan Quote PDF for a listing agent. Live web rates via Perplexity.
             </p>
+            {editingId && (
+              <div className="mt-2 inline-flex items-center gap-2 byrd-chip byrd-chip-gold" data-testid="editing-badge">
+                <Edit3 size={12} /> Editing saved quote — changes overwrite on Save
+              </div>
+            )}
           </div>
           <div className="flex gap-2">
             <button onClick={startNewQuote} className="byrd-btn byrd-btn-outline" data-testid="lq-new">
@@ -355,6 +401,11 @@ export default function AdminLoanQuoteStudio() {
                       <td className="p-2 text-[11px] text-[#6B6558]">{new Date(q.created_at).toLocaleString()}</td>
                       <td className="p-2 text-right">
                         <button
+                          onClick={() => editQuote(q.id)}
+                          className="byrd-btn byrd-btn-outline text-xs mr-2" data-testid={`lq-edit-${q.id}`}>
+                          <Edit3 size={12} /> Edit
+                        </button>
+                        <button
                           onClick={() => openAuthedPdf(`/admin/marketing/quotes/${q.id}/pdf`, q.filename || "loan-quote.pdf")}
                           className="byrd-btn byrd-btn-outline text-xs" data-testid={`lq-dl-${q.id}`}>
                           <Download size={12} /> PDF
@@ -413,11 +464,18 @@ function QuoteFieldsPanel({ state, setProp, setAgent, setOption }) {
         <User size={14} className="text-[#C89434]" />
         <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Listing Agent</div>
       </div>
-      <div className="grid grid-cols-2 gap-2 text-sm">
-        <Inp label="Name" value={a.name} onChange={(v) => setAgent("name", v)} />
-        <Inp label="Email" value={a.email} onChange={(v) => setAgent("email", v)} />
-        <Inp label="Phone" value={a.phone} onChange={(v) => setAgent("phone", v)} />
-        <Inp label="Brokerage" value={a.brokerage} onChange={(v) => setAgent("brokerage", v)} />
+      <div className="flex gap-3 items-start">
+        <AgentPhotoBox
+          photoB64={a.photo_b64}
+          contentType={a.photo_content_type}
+          onSet={(b64, ct) => { setAgent("photo_b64", b64); setAgent("photo_content_type", ct); }}
+        />
+        <div className="grid grid-cols-2 gap-2 text-sm flex-1">
+          <Inp label="Name" value={a.name} onChange={(v) => setAgent("name", v)} />
+          <Inp label="Email" value={a.email} onChange={(v) => setAgent("email", v)} />
+          <Inp label="Phone" value={a.phone} onChange={(v) => setAgent("phone", v)} />
+          <Inp label="Brokerage" value={a.brokerage} onChange={(v) => setAgent("brokerage", v)} />
+        </div>
       </div>
 
       {state.options.length > 0 && (
@@ -486,6 +544,69 @@ function QuoteFieldsPanel({ state, setProp, setAgent, setOption }) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function AgentPhotoBox({ photoB64, contentType, onSet }) {
+  const [uploading, setUploading] = useState(false);
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast.error("Please choose an image file (jpg/png).");
+      return;
+    }
+    if (file.size > 3 * 1024 * 1024) {
+      toast.error("Photo must be under 3 MB.");
+      return;
+    }
+    setUploading(true);
+    try {
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => {
+          const s = r.result || "";
+          const c = s.indexOf(",");
+          res(c >= 0 ? s.slice(c + 1) : s);
+        };
+        r.onerror = rej;
+        r.readAsDataURL(file);
+      });
+      onSet(b64, file.type);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const src = photoB64 ? `data:${contentType || "image/jpeg"};base64,${photoB64}` : null;
+
+  return (
+    <div>
+      <span className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Photo</span>
+      <div className="mt-0.5 w-24 h-32 rounded-md border border-dashed border-[#E4DFD1] overflow-hidden relative bg-[#FBF8F1]">
+        {src ? (
+          <>
+            <img src={src} alt="Agent" className="w-full h-full object-cover" />
+            <button
+              onClick={() => onSet(null, null)}
+              className="absolute top-1 right-1 bg-white/90 hover:bg-white text-[#8A1F1A] rounded p-1"
+              title="Remove photo" data-testid="agent-photo-remove"
+            >
+              <X size={11} />
+            </button>
+          </>
+        ) : (
+          <label className="w-full h-full grid place-items-center cursor-pointer hover:bg-[#F3EEE0] transition">
+            <div className="text-center text-[#6B6558] text-[10px]">
+              {uploading ? <Loader2 size={16} className="animate-spin mx-auto" /> : (<><Upload size={16} className="mx-auto mb-1" /> Upload</>)}
+            </div>
+            <input type="file" accept="image/*" className="hidden"
+              onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = ""; }}
+              data-testid="agent-photo-input" />
+          </label>
+        )}
+      </div>
     </div>
   );
 }
