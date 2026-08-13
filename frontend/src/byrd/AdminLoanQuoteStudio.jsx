@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { Send, Sparkles, Trash2, Download, FileText, Wand2, Loader2, Save, User, Home, Upload, X, Edit3 } from "lucide-react";
+import { Send, Sparkles, Trash2, Download, FileText, Wand2, Loader2, Save, User, Home, Upload, X, Edit3, Mail, RefreshCw } from "lucide-react";
 
 const PROPERTY_TYPES = [
   "Multifamily", "Office", "Retail", "Industrial", "Hotel",
@@ -197,8 +197,27 @@ export default function AdminLoanQuoteStudio() {
     }
   };
 
+  const emailQuote = async (qid, agent) => {
+    if (!agent?.email) {
+      toast.error("Add the listing agent's email first, then Save the quote.");
+      return;
+    }
+    if (!window.confirm(`Email this loan quote to ${agent.email}?`)) return;
+    try {
+      await api.post(`/admin/marketing/quotes/${qid}/email`, {});
+      toast.success(`Emailed to ${agent.email}`);
+      loadLibrary();
+    } catch (e) {
+      toast.error(errMsg(e, "Email send failed"));
+    }
+  };
+
   const startNewQuote = () => {
-    if (!window.confirm("Discard current quote and start a new one?")) return;
+    // Only confirm if there's actual work in progress
+    const hasWork = !!(state.property_info.name || state.property_info.address
+      || state.property_info.estimated_value || state.options.length
+      || state.listing_agent.name || messages.length > 1);
+    if (hasWork && !window.confirm("Discard current quote and start a new one?")) return;
     setState(emptyState());
     setSessionId(null);
     setEditingId(null);
@@ -252,8 +271,8 @@ export default function AdminLoanQuoteStudio() {
             )}
           </div>
           <div className="flex gap-2">
-            <button onClick={startNewQuote} className="byrd-btn byrd-btn-outline" data-testid="lq-new">
-              <FileText size={14} /> New Quote
+            <button onClick={startNewQuote} className="byrd-btn byrd-btn-dark" data-testid="lq-new">
+              <RefreshCw size={14} /> Start New Quote
             </button>
           </div>
         </div>
@@ -270,9 +289,17 @@ export default function AdminLoanQuoteStudio() {
                 <div className="font-serif font-bold">Ada</div>
                 <div className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">// Live rate lookup ready</div>
               </div>
+              <button
+                onClick={startNewQuote}
+                className="ml-auto text-[11px] font-mono uppercase tracking-widest text-[#6B6558] hover:text-[#C89434] flex items-center gap-1"
+                data-testid="lq-restart-chat"
+                title="Clear the conversation and start a new quote"
+              >
+                <RefreshCw size={11} /> Restart
+              </button>
               {lastReadyMsg && !state.options.length && (
                 <button onClick={proposeOptions} disabled={proposing}
-                  className="ml-auto byrd-btn byrd-btn-dark text-xs"
+                  className="byrd-btn byrd-btn-dark text-xs"
                   data-testid="lq-propose">
                   {proposing ? (<><Loader2 size={12} className="animate-spin" /> Researching…</>) : (<><Wand2 size={12} /> Research rates &amp; propose</>)}
                 </button>
@@ -332,6 +359,12 @@ export default function AdminLoanQuoteStudio() {
                   <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Live preview</div>
                   <div className="flex gap-2">
                     <button onClick={refreshPreview} className="text-[11px] text-[#C89434] font-mono">Refresh</button>
+                    {editingId && state.listing_agent?.email && (
+                      <button onClick={() => emailQuote(editingId, state.listing_agent)}
+                        className="byrd-btn byrd-btn-outline text-xs" data-testid="lq-email">
+                        <Mail size={12} /> Email
+                      </button>
+                    )}
                     <button onClick={generateAndSave} disabled={!canGenerate || generating}
                       className="byrd-btn byrd-btn-dark text-xs" data-testid="lq-save">
                       {generating ? "Saving…" : (<><Save size={12} /> Save &amp; Download</>)}
@@ -400,6 +433,13 @@ export default function AdminLoanQuoteStudio() {
                       <td className="p-2">{fmtMoney(q.property_info?.estimated_value)}</td>
                       <td className="p-2 text-[11px] text-[#6B6558]">{new Date(q.created_at).toLocaleString()}</td>
                       <td className="p-2 text-right">
+                        <button
+                          onClick={() => emailQuote(q.id, q.listing_agent)}
+                          disabled={!q.listing_agent?.email}
+                          title={q.listing_agent?.email ? `Email to ${q.listing_agent.email}` : "Add listing agent email first"}
+                          className="byrd-btn byrd-btn-outline text-xs mr-2 disabled:opacity-40" data-testid={`lq-email-${q.id}`}>
+                          <Mail size={12} /> Email
+                        </button>
                         <button
                           onClick={() => editQuote(q.id)}
                           className="byrd-btn byrd-btn-outline text-xs mr-2" data-testid={`lq-edit-${q.id}`}>

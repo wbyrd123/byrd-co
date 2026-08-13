@@ -8189,6 +8189,69 @@ async def admin_delete_loanquote(qid: str, admin=Depends(require_admin)):
     return {"ok": True}
 
 
+class LoanQuoteEmailBody(BaseModel):
+    message: Optional[str] = None       # optional broker-personalized cover note
+
+
+@api.post("/admin/marketing/quotes/{qid}/email")
+async def admin_email_loanquote(qid: str, body: LoanQuoteEmailBody, admin=Depends(require_admin)):
+    """Email a saved Loan Quote PDF to the captured listing agent via Postmark."""
+    q = await db.loan_quotes.find_one({"id": qid})
+    if not q:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    la = q.get("listing_agent") or {}
+    to = (la.get("email") or "").strip()
+    if not to:
+        raise HTTPException(status_code=400, detail="Listing agent email is required — add it in the Studio and Save first.")
+    prop = q.get("property_info") or {}
+    prop_name = prop.get("name") or prop.get("address") or "your listing"
+    agent_first = (la.get("name") or "").split(" ")[0] or "there"
+    broker_note = (body.message or "").strip()
+
+    subject = f"Loan Quote — {prop_name}"
+    html_body = f"""
+<div style="font-family:Georgia, serif; color:#1A1A1A; max-width:560px;">
+  <p>Hi {agent_first},</p>
+  <p>Attached is a loan quote for <b>{prop_name}</b> that you can share with your prospective buyer.
+     Three financing options based on current market rates — bank, agency, and credit union.</p>
+  {('<p>' + broker_note.replace(chr(10), '<br/>') + '</p>') if broker_note else ''}
+  <p>Happy to jump on a call if the buyer wants to talk through structure or timing.</p>
+  <p style="margin-top:24px;">
+    <b>Wayne Byrd</b><br/>
+    Byrd &amp; Co · Commercial Real Estate Lending<br/>
+    832-813-9802 · <a href="mailto:wayne@byrd-co.com">wayne@byrd-co.com</a>
+  </p>
+</div>
+""".strip()
+    text_body = (
+        f"Hi {agent_first},\n\n"
+        f"Attached is a loan quote for {prop_name} that you can share with your prospective buyer. "
+        f"Three financing options based on current market rates — bank, agency, and credit union.\n\n"
+        + (broker_note + "\n\n" if broker_note else "")
+        + "Happy to jump on a call if the buyer wants to talk through structure or timing.\n\n"
+        + "Wayne Byrd\n"
+        + "Byrd & Co · Commercial Real Estate Lending\n"
+        + "832-813-9802 · wayne@byrd-co.com\n"
+    )
+    pdf_b64 = q.get("pdf_b64") or ""
+    if not pdf_b64:
+        raise HTTPException(status_code=500, detail="Saved PDF missing — re-save the quote and try again.")
+    attachments = [{
+        "Name": q.get("filename") or "loan-quote.pdf",
+        "Content": pdf_b64,
+        "ContentType": "application/pdf",
+    }]
+    result = send_email(
+        to=to, subject=subject, html=html_body, text=text_body,
+        tag="loan-quote", reply_to=admin.get("email"), attachments=attachments,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "Email send failed")
+    now = now_iso()
+    await db.loan_quotes.update_one({"id": qid}, {"$set": {"last_emailed_at": now, "last_emailed_to": to}})
+    return {"ok": True, "sent_to": to, "sent_at": now}
+
+
 @api.post("/admin/marketing/quote/preview")
 async def admin_loanquote_preview(body: LoanQuoteResearchBody, admin=Depends(require_admin)):
     """Render the current state as a PDF WITHOUT saving. Used for live preview."""

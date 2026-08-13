@@ -21,9 +21,11 @@ def _get_client() -> Optional[PostmarkClient]:
 
 def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag: str = "",
                from_email: Optional[str] = None, from_name: Optional[str] = None,
-               reply_to: Optional[str] = None) -> dict:
+               reply_to: Optional[str] = None,
+               attachments: Optional[list] = None) -> dict:
     """Fire-and-forget email send. Never raises; logs on failure.
     Optionally override the default From address (e.g. wayne@byrd-co.com for personal assistant emails).
+    `attachments` — list of {"Name": filename, "Content": base64_str, "ContentType": mime}.
     Returns a summary {'ok': bool, 'error': str|None, 'sent': int, 'failed': int} — callers that need
     immediate feedback (like the assistant email) can use it; background callers can ignore it."""
     client = _get_client()
@@ -50,6 +52,8 @@ def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag:
             )
             if reply_to:
                 kwargs["ReplyTo"] = reply_to
+            if attachments:
+                kwargs["Attachments"] = attachments
             client.emails.send(**kwargs)
             sent += 1
             logger.info("Sent Postmark email tag=%s to=%s from=%s", tag, r, resolved_email)
