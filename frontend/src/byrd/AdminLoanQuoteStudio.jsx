@@ -65,11 +65,15 @@ export default function AdminLoanQuoteStudio() {
   const [generating, setGenerating] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [library, setLibrary] = useState([]);
-  const chatEndRef = useRef(null);
+  const chatScrollRef = useRef(null);
 
   const loadLibrary = () => api.get("/admin/marketing/quotes").then((r) => setLibrary(r.data || []));
   useEffect(() => { loadLibrary(); }, []);
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  useEffect(() => {
+    // Scroll only the chat's own container to its bottom — DO NOT scroll the whole page.
+    const el = chatScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
 
   // ---- Chat ----
   const sendMessage = async () => {
