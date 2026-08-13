@@ -62,6 +62,7 @@ export default function AdminLoanQuoteStudio() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [proposing, setProposing] = useState(false);
+  const [lookingUp, setLookingUp] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [library, setLibrary] = useState([]);
@@ -91,15 +92,50 @@ export default function AdminLoanQuoteStudio() {
       setMessages((m) => [...m, {
         role: "ada", text: r.data.reply,
         ready_for_rates: r.data.ready_for_rates, has_agent: r.data.has_agent,
+        lookup_agent: r.data.lookup_agent,
       }]);
       if (r.data.ready_for_rates && !state.options.length && !proposing) {
         // Ada just confirmed she's ready — kick off rate research automatically
         proposeOptions();
       }
+      if (r.data.lookup_agent) {
+        // Ada wants us to search for the listing agent's contact info
+        agentLookup();
+      }
     } catch (e) {
       toast.error(errMsg(e, "Ada couldn't reply"));
     } finally {
       setSending(false);
+    }
+  };
+
+  // ---- Agent lookup (Perplexity) ----
+  const agentLookup = async () => {
+    const a = state.listing_agent || {};
+    if (!a.name || a.name.trim().length < 2) {
+      setMessages((m) => [...m, {
+        role: "ada",
+        text: "I need the agent's name before I can search — what's their full name?",
+      }]);
+      return;
+    }
+    setLookingUp(true);
+    setMessages((m) => [...m, { role: "ada", text: `Searching for ${a.name}${a.brokerage ? ` at ${a.brokerage}` : ""}…` }]);
+    try {
+      const r = await api.post("/admin/marketing/agent-lookup", {
+        name: a.name, brokerage: a.brokerage || null,
+        city: state.property_info?.city || null, state: state.property_info?.state || null,
+      });
+      setMessages((m) => [...m, {
+        role: "ada", isLookup: true, lookup: r.data,
+        text: r.data.found
+          ? `Found ${r.data.emails.length} email${r.data.emails.length === 1 ? "" : "s"} and ${r.data.phones.length} phone number${r.data.phones.length === 1 ? "" : "s"}. Click any to use:`
+          : "I couldn't confirm a publicly-listed email for that agent — you'll need to get it from them directly.",
+      }]);
+    } catch (e) {
+      setMessages((m) => [...m, { role: "ada", text: `Sorry, that search failed. ${errMsg(e, "")}`.trim() }]);
+    } finally {
+      setLookingUp(false);
     }
   };
 
@@ -284,7 +320,7 @@ export default function AdminLoanQuoteStudio() {
         {/* Main split — chat + preview */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Chat pane */}
-          <div className="byrd-card flex flex-col h-[640px]">
+          <div className="byrd-card flex flex-col h-[720px]">
             <div className="p-4 border-b border-[#E4DFD1] flex items-center gap-2">
               <div className="w-8 h-8 rounded-full bg-[#C89434] text-white grid place-items-center">
                 <Sparkles size={14} />
@@ -309,7 +345,7 @@ export default function AdminLoanQuoteStudio() {
                 </button>
               )}
             </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
               {messages.map((m, i) => (
                 <div key={i} className={`flex ${m.role === "broker" ? "justify-end" : "justify-start"}`}>
                   <div className={`max-w-[85%] px-3 py-2 rounded-md text-sm whitespace-pre-wrap ${
@@ -325,17 +361,42 @@ export default function AdminLoanQuoteStudio() {
                         {proposing ? "Researching…" : "→ Yes, research rates now"}
                       </button>
                     )}
+                    {m.isLookup && m.lookup && (
+                      <div className="mt-2 space-y-1">
+                        {(m.lookup.emails || []).map((e) => (
+                          <button key={e} onClick={() => setState((s) => ({ ...s, listing_agent: { ...s.listing_agent, email: e } }))}
+                            className="block text-left text-xs px-2 py-1 rounded bg-white border border-[#E4DFD1] hover:border-[#C89434] hover:bg-[#FBF8F1] transition w-full">
+                            <Mail size={10} className="inline mr-1 text-[#C89434]" /> {e}
+                          </button>
+                        ))}
+                        {(m.lookup.phones || []).map((p) => (
+                          <button key={p} onClick={() => setState((s) => ({ ...s, listing_agent: { ...s.listing_agent, phone: p } }))}
+                            className="block text-left text-xs px-2 py-1 rounded bg-white border border-[#E4DFD1] hover:border-[#C89434] hover:bg-[#FBF8F1] transition w-full">
+                            <User size={10} className="inline mr-1 text-[#C89434]" /> {p}
+                          </button>
+                        ))}
+                        {m.lookup.citations?.length > 0 && (
+                          <details className="text-[10px] text-[#6B6558] mt-1">
+                            <summary className="cursor-pointer font-mono uppercase tracking-widest">// sources</summary>
+                            <ul className="mt-1 space-y-0.5">
+                              {m.lookup.citations.map((u, ci) => (
+                                <li key={ci}><a href={u} target="_blank" rel="noopener noreferrer" className="underline break-all">{u}</a></li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
-              {sending && (
+              {(sending || lookingUp) && (
                 <div className="flex justify-start">
                   <div className="bg-[#F3EEE0] px-3 py-2 rounded-md text-sm text-[#6B6558]">
-                    <Loader2 size={12} className="animate-spin inline mr-2" /> Ada is thinking…
+                    <Loader2 size={12} className="animate-spin inline mr-2" /> {lookingUp ? "Ada is searching…" : "Ada is thinking…"}
                   </div>
                 </div>
               )}
-              <div ref={chatEndRef} />
             </div>
             <div className="p-3 border-t border-[#E4DFD1] flex gap-2">
               <input

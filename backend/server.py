@@ -7675,7 +7675,8 @@ Return ONLY valid JSON in this exact schema:
     "property_info": { ...only the fields you extracted from THIS broker message, omit others... },
     "listing_agent": { ...only fields extracted this turn... }
   },
-  "ready_for_rates": false
+  "ready_for_rates": false,
+  "lookup_agent": false
 }
 
 CRITICAL:
@@ -7684,6 +7685,7 @@ CRITICAL:
 - For occupancy_type, use exact strings: "owner_occupied" or "non_owner_occupied".
 - Numbers as raw numbers (not strings, no dollar signs or commas).
 - Never invent info the broker didn't provide.
+- If broker asks you to search / look up / find the listing agent's email or phone online, set "lookup_agent": true and in your "reply" say briefly "Let me look that up..." (do NOT claim you found anything — the app will do the actual search and post the results back).
 - Return raw JSON. No markdown fences. No text before or after."""
 
 
@@ -7719,6 +7721,37 @@ CRITICAL: return VALID JSON in this exact schema and NOTHING ELSE (no markdown f
   ],
   "note": "Short one-line qualifier, e.g., 'Rates indicative Jan 2026 — verify with lender.'"
 }"""
+
+
+async def _perplexity_query(query: str, max_tokens: int = 700) -> Optional[dict]:
+    """Generic Perplexity Sonar call. Returns {'content', 'citations'} or None."""
+    if not PERPLEXITY_API_KEY:
+        return None
+    payload = {
+        "model": "sonar-pro",
+        "messages": [{"role": "user", "content": query}],
+        "temperature": 0.1, "max_tokens": max_tokens, "return_citations": True,
+    }
+    headers = {"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            r = await client.post("https://api.perplexity.ai/chat/completions",
+                                  json=payload, headers=headers)
+            if r.status_code >= 400:
+                logger.warning("Perplexity %s: %s", r.status_code, r.text[:300])
+                return None
+            data = r.json()
+    except Exception as e:
+        logger.warning("Perplexity request failed: %s", e)
+        return None
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError):
+        return None
+    citations = data.get("citations") or data.get("search_results") or []
+    if isinstance(citations, list) and citations and isinstance(citations[0], dict):
+        citations = [c.get("url") or c.get("link") for c in citations if c.get("url") or c.get("link")]
+    return {"content": content, "citations": [c for c in citations if c][:6]}
 
 
 async def _perplexity_rate_search(prop: dict) -> Optional[dict]:
@@ -7778,6 +7811,53 @@ def _clean_json_output(txt: str) -> str:
     return t
 
 
+class LoanQuoteAgentLookupBody(BaseModel):
+    name: str = Field(min_length=1)
+    brokerage: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+
+
+@api.post("/admin/marketing/agent-lookup")
+async def admin_agent_lookup(body: LoanQuoteAgentLookupBody, admin=Depends(require_admin)):
+    """Perplexity search for a commercial listing agent's publicly-listed email + phone.
+    Only returns hits that appear in official brokerage websites or licensing directories."""
+    if not PERPLEXITY_API_KEY:
+        raise HTTPException(status_code=400, detail="Perplexity API not configured on this environment")
+    parts = [f"Find the professional email address and phone number for commercial real estate listing agent {body.name}"]
+    if body.brokerage:
+        parts.append(f"at {body.brokerage}")
+    if body.city:
+        loc = body.city + (f", {body.state}" if body.state else "")
+        parts.append(f"in {loc}")
+    query = " ".join(parts) + (
+        ". Return ONLY publicly available contact info from their brokerage website, LinkedIn profile, "
+        "or real estate license lookup. If you find multiple candidates, list up to 3 with the source URL. "
+        "If you cannot confidently find their contact info, say so explicitly. Do NOT invent email addresses."
+    )
+    result = await _perplexity_query(query, max_tokens=600)
+    if not result:
+        raise HTTPException(status_code=502, detail="Perplexity search failed")
+    content = result.get("content") or ""
+    citations = result.get("citations") or []
+    # Extract emails + phones from the synthesized text
+    email_re = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+    phone_re = re.compile(r"\(?\b\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b")
+    emails = sorted({e.strip(".,;:") for e in email_re.findall(content)})
+    phones = sorted({p for p in phone_re.findall(content)})
+    # Filter out obvious placeholders
+    banned = ("example.com", "domain.com", "email.com", "test.com")
+    emails = [e for e in emails if not any(b in e.lower() for b in banned)][:4]
+    phones = phones[:4]
+    return {
+        "found": bool(emails or phones),
+        "emails": emails,
+        "phones": phones,
+        "summary": content,
+        "citations": citations,
+    }
+
+
 @api.post("/admin/marketing/quote/chat")
 async def admin_loanquote_chat(body: LoanQuoteChatBody, admin=Depends(require_admin)):
     """Turn-by-turn Ada conversation. Broker asks; Ada fills in the state via natural dialogue."""
@@ -7817,6 +7897,7 @@ async def admin_loanquote_chat(body: LoanQuoteChatBody, admin=Depends(require_ad
     new_state["property_info"] = _cap_rate_math(new_state["property_info"])
     return {"session_id": sid, "reply": reply_text,
             "ready_for_rates": bool(parsed.get("ready_for_rates")),
+            "lookup_agent": bool(parsed.get("lookup_agent")),
             "state": new_state}
 
 

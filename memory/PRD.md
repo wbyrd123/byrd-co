@@ -11,6 +11,31 @@
 - P3: Refactor `server.py` (~7,700 lines) into modular routes
 
 
+### Loan Quote Studio — Iteration 2 — SHIPPED 2026-02
+Bug fixes + agent lookup capability layered on top of the initial Studio.
+
+**Bug fixes:**
+- **Scroll bug**: Typing + Enter in the reply box no longer scrolls the whole page — replaced `scrollIntoView()` on a bottom sentinel with `scrollTop = scrollHeight` on the chat's own inner container (`chatScrollRef`). Verified: `window.scrollY` drift = 0px across multiple Enter presses.
+- **Missing/wrong PDF download in Safari**: `openAuthedPdf()` helper fetches via axios (with auth header) → blob URL → anchor click. Replaced all raw `<a href>` links to protected endpoints.
+- **Blank screen crash on chat error**: Backend `listing_agent.email` relaxed from `EmailStr` → `Optional[str]`. Frontend added `errMsg()` helper that coerces Pydantic validation arrays to readable strings.
+
+**New capabilities:**
+- **Email to listing agent**: `POST /admin/marketing/quotes/{qid}/email` sends the saved PDF as a Postmark attachment with a Byrd-branded cover, ReplyTo set to the sending broker. Records `last_emailed_at`/`last_emailed_to`. `send_email` helper in `email_service.py` now supports attachments.
+- **Auto-trigger rate research**: When Ada sets `ready_for_rates: true` (after broker confirms), frontend automatically calls propose-options — no manual button click required.
+- **Edit existing quote**: `GET /admin/marketing/quotes/{qid}` + `PATCH /admin/marketing/quotes/{qid}` endpoints. "Edit" button on library rows loads the quote back into the Studio; gold "Editing saved quote" badge in header; Save & Download now PATCHes existing when in edit mode.
+- **Listing agent photo upload**: `photo_b64` + `photo_content_type` fields on `LoanQuoteListingAgent`. Any image (jpg/png/webp/avif — Pillow 12 supports AVIF natively) up to 3 MB. Photo renders in a new "PRESENTED BY" branding band at the bottom of the PDF.
+- **Agent contact lookup via Perplexity**: `POST /admin/marketing/agent-lookup` — searches for the agent's publicly-listed email/phone from brokerage sites / LinkedIn / license directories. Ada emits `lookup_agent: true` when broker asks and the frontend auto-triggers. Results render as clickable email/phone chips in the chat that populate `listing_agent.email`/`.phone`. `_perplexity_query` helper generalized for reuse.
+- **PDF header alignment fix**: financing options table header row now includes an empty leading cell so column labels sit directly above their data columns.
+
+**UI polish:**
+- Chat pane extended from `h-[640px]` → `h-[720px]` (empty space below the input eliminated).
+- Header CTA renamed "New Quote" → **"Start New Quote"** as a dark filled button.
+- Subtle "Restart" link inside the chat header for quick clear.
+- Smart confirmation: only asks "Discard?" if there's actual work in progress.
+
+**Test coverage:** `/app/backend/tests/test_loan_quote_agent_lookup.py` — 4 pytest cases, all passing. E2E frontend flow verified. See `/app/test_reports/iteration_12.json`.
+
+
 ### Loan Quote Studio (Marketing) — SHIPPED 2026-02
 Ada-driven builder for a 1-page branded Loan Quote PDF that brokers give to commercial listing agents. Live web rates via Perplexity Sonar API.
 
