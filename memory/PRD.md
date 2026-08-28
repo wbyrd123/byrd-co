@@ -305,3 +305,31 @@ Complete self-registration + credit-box + term-sheet marketplace. New surfaces:
 2. Private per admin, or a shared team address book with visibility per record?
 3. Auto-suppress list — if a client marks unsubscribe, should other admins also be blocked from emailing them?
 4. Do you want basic template library ("New product announcement", "Rate update", "Quarterly check-in") or freeform only for MVP?
+
+
+
+---
+
+## ✅ Two-Factor Authentication (2FA) — 2026-02-28
+
+**Status:** Shipped. 40/40 backend tests + 12/12 frontend E2E steps passed.
+
+**What was built:**
+- TOTP enrollment (Google Authenticator / 1Password / Authy / Microsoft Authenticator) with QR code + manual-entry secret
+- 10 single-use backup codes (bcrypt-hashed at rest, format `xxxx-xxxx`, downloadable as .txt)
+- Email fallback code via Postmark (`tmpl_2fa_code`, 10-min TTL, bcrypt-hashed)
+- 5-fail / 15-min rate limit on 2FA attempts (`db.two_fa_attempts` with TTL)
+- Short-lived challenge JWT (`aud="2fa-challenge"`, 5-min exp) between password and full token
+- Admin ability to reset 2FA on another user's account (`POST /admin/users/{uid}/2fa/reset`)
+
+**Files:**
+- Backend: `server.py` (helpers ~155, endpoints ~1065–1250), `email_service.py` (tmpl_2fa_code)
+- Frontend: `context/AuthContext.js`, `byrd/PortalLogin.jsx` (two-stage form), `byrd/SecuritySettings.jsx` (nav entry at `/admin/security`)
+- Deps: `pyotp==2.10.0`, `qrcode==8.2`
+
+**Data model additions to `users`:** `totp_secret`, `totp_enabled`, `totp_enrolled_at`, `backup_codes` (bcrypt hashes), `pending_totp_secret` (during enrollment only).
+
+**Optional hardening deferred (from test report):**
+- Rate-limit `/auth/2fa/send-email-code` (currently unlimited within a 5-min challenge window)
+- Cache consumed TOTP steps to block replay within the 90s valid window
+- Extract 2FA into `backend/routes/two_factor.py` (part of the broader server.py refactor backlog)

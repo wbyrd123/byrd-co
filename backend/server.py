@@ -23,6 +23,10 @@ import json
 import bcrypt
 import httpx
 import jwt as pyjwt
+import pyotp
+import qrcode
+import secrets as _secrets
+from io import BytesIO
 import re
 import time
 from pathlib import Path
@@ -36,7 +40,7 @@ from email_service import (
     tmpl_quote, tmpl_invite, tmpl_lender_activity,
     tmpl_lender_application_received, tmpl_lender_approved, tmpl_lender_invite,
     tmpl_term_sheet_submitted, tmpl_term_sheet_status_change,
-    tmpl_password_reset,
+    tmpl_password_reset, tmpl_2fa_code,
 )
 
 ROOT_DIR = Path(__file__).parent
@@ -143,7 +147,96 @@ def sanitize_user(u: dict) -> dict:
         "role": u.get("role", "client"),
         "phone": u.get("phone"),
         "company": u.get("company"),
+        "totp_enabled": bool(u.get("totp_enabled")),
     }
+
+
+# ================ 2FA (TOTP + Email fallback + Backup codes) ================
+# TOTP secret is stored as a base32 string on the user document. It is only useful
+# with the user's account context; JWT_SECRET compromise does NOT expose TOTP secrets
+# (they are stored plaintext-in-DB because the user themselves needs the raw value
+# only during initial enrollment, from which point the server uses it to VERIFY 6-digit
+# codes without ever needing to display it again). Backup codes are stored bcrypt-hashed.
+
+TWO_FA_ISSUER = "Byrd & CO"
+TWO_FA_CHALLENGE_TTL_MINUTES = 5
+TWO_FA_EMAIL_CODE_TTL_MINUTES = 10
+TWO_FA_MAX_ATTEMPTS = 5
+
+
+def make_2fa_challenge_token(user_id: str) -> str:
+    """Short-lived JWT issued after password success, before 2FA is verified."""
+    payload = {
+        "sub": user_id,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=TWO_FA_CHALLENGE_TTL_MINUTES),
+        "iat": datetime.now(timezone.utc),
+        "aud": "2fa-challenge",
+    }
+    return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+
+def verify_2fa_challenge_token(token: str) -> str:
+    """Return user_id from a valid challenge token; raise 401 otherwise."""
+    try:
+        payload = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO], audience="2fa-challenge")
+        return payload["sub"]
+    except pyjwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="2FA challenge expired. Please sign in again.")
+
+
+def _hash_backup_code(code: str) -> str:
+    # bcrypt hashing so a DB dump doesn't expose backup codes
+    return bcrypt.hashpw(code.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _check_backup_code(code: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(code.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def generate_backup_codes(count: int = 10) -> list[str]:
+    """Generate 10 human-friendly single-use backup codes (formatted xxxx-xxxx)."""
+    codes = []
+    for _ in range(count):
+        raw = _secrets.token_hex(4)  # 8 hex chars
+        codes.append(f"{raw[:4]}-{raw[4:]}")
+    return codes
+
+
+def _totp_provisioning_uri(secret: str, email: str) -> str:
+    return pyotp.TOTP(secret).provisioning_uri(name=email, issuer_name=TWO_FA_ISSUER)
+
+
+def _qr_data_url(uri: str) -> str:
+    """Render a QR code PNG for the given otpauth:// URI and return a data URL."""
+    img = qrcode.make(uri)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _verify_totp(secret: str, code: str) -> bool:
+    if not secret or not code:
+        return False
+    code = code.strip().replace(" ", "")
+    if not code.isdigit() or len(code) != 6:
+        return False
+    return pyotp.TOTP(secret).verify(code, valid_window=1)
+
+
+async def _consume_backup_code(user: dict, code: str) -> bool:
+    """If `code` matches one of the user's stored bcrypt-hashed backup codes,
+    remove that hash from the list (single-use) and return True."""
+    stored = list(user.get("backup_codes") or [])
+    normalized = code.strip().lower().replace(" ", "")
+    for h in stored:
+        if _check_backup_code(normalized, h):
+            stored.remove(h)
+            await db.users.update_one({"id": user["id"]}, {"$set": {"backup_codes": stored}})
+            return True
+    return False
 
 
 # ================ Startup: seed admins & default doc template ================
@@ -253,6 +346,13 @@ async def seed():
     except Exception as e:
         logger.warning("login_attempts TTL index setup failed: %s", e)
 
+    # TTL indexes for 2FA collections — email codes expire, and attempts age out.
+    try:
+        await db.two_fa_email_codes.create_index("expires_at", expireAfterSeconds=0)
+        await db.two_fa_attempts.create_index("attempted_at", expireAfterSeconds=1800)
+    except Exception as e:
+        logger.warning("2FA index setup failed: %s", e)
+
     # Nightly encrypted backup to Backblaze B2 (only if B2 creds are configured).
     if os.environ.get("B2_KEY_ID") and os.environ.get("B2_APPLICATION_KEY"):
         try:
@@ -312,8 +412,34 @@ class LoginInput(BaseModel):
 
 
 class AuthResponse(BaseModel):
-    token: str
-    user: dict
+    token: Optional[str] = None
+    user: Optional[dict] = None
+    # 2FA challenge flow: when a user with 2FA enabled logs in, we return
+    # requires_2fa=True + a short-lived challenge_token instead of a full JWT.
+    requires_2fa: bool = False
+    challenge_token: Optional[str] = None
+    # Which 2FA channels are available for this user (for the UI)
+    totp_available: bool = False
+    email_available: bool = False
+
+
+class TwoFAVerifySetup(BaseModel):
+    code: str = Field(min_length=6, max_length=6)
+
+
+class TwoFAChallengeBody(BaseModel):
+    challenge_token: str
+    code: str
+    method: Literal["totp", "email", "backup"] = "totp"
+
+
+class TwoFAEmailRequestBody(BaseModel):
+    challenge_token: str
+
+
+class TwoFADisableBody(BaseModel):
+    password: str
+    code: str  # TOTP or backup code
 
 
 class InviteCreate(BaseModel):
@@ -920,12 +1046,205 @@ async def login(body: LoginInput):
         await _record_login_attempt(email, success=False)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     await _record_login_attempt(email, success=True)
+    # If 2FA is enabled, require a second factor before issuing the full JWT.
+    if user.get("totp_enabled"):
+        return {
+            "requires_2fa": True,
+            "challenge_token": make_2fa_challenge_token(user["id"]),
+            "totp_available": True,
+            "email_available": True,
+        }
     return {"token": make_token(user["id"]), "user": sanitize_user(user)}
 
 
 @api.get("/auth/me")
 async def me(user=Depends(get_current_user)):
     return sanitize_user(user)
+
+
+# ================ 2FA endpoints ================
+# Enrollment: user must be authenticated with a full JWT (already logged in).
+# Challenge: user has a short-lived challenge_token from the login endpoint.
+
+@api.get("/auth/2fa/status")
+async def two_fa_status(user=Depends(get_current_user)):
+    """Current 2FA state for the logged-in user."""
+    full = await db.users.find_one({"id": user["id"]}, {"_id": 0, "backup_codes": 1, "totp_enabled": 1, "totp_enrolled_at": 1})
+    return {
+        "enabled": bool(full and full.get("totp_enabled")),
+        "enrolled_at": (full or {}).get("totp_enrolled_at"),
+        "backup_codes_remaining": len((full or {}).get("backup_codes") or []),
+    }
+
+
+@api.post("/auth/2fa/setup")
+async def two_fa_setup(user=Depends(get_current_user)):
+    """Begin 2FA enrollment. Returns a fresh TOTP secret + QR data URL. The secret
+    is stored on the user as `pending_totp_secret` and is only promoted to `totp_secret`
+    once the user proves possession by submitting a valid TOTP code via /verify-setup."""
+    full = await db.users.find_one({"id": user["id"]})
+    if full and full.get("totp_enabled"):
+        raise HTTPException(status_code=400, detail="2FA is already enabled. Disable it first to re-enroll.")
+    secret = pyotp.random_base32()
+    await db.users.update_one({"id": user["id"]}, {"$set": {"pending_totp_secret": secret}})
+    uri = _totp_provisioning_uri(secret, user["email"])
+    return {
+        "secret": secret,  # shown to user for manual entry
+        "otpauth_uri": uri,
+        "qr_data_url": _qr_data_url(uri),
+        "issuer": TWO_FA_ISSUER,
+        "account": user["email"],
+    }
+
+
+@api.post("/auth/2fa/verify-setup")
+async def two_fa_verify_setup(body: TwoFAVerifySetup, user=Depends(get_current_user)):
+    """Confirm the TOTP secret. On success: enable 2FA, generate & return 10 backup codes."""
+    full = await db.users.find_one({"id": user["id"]})
+    pending = (full or {}).get("pending_totp_secret")
+    if not pending:
+        raise HTTPException(status_code=400, detail="No pending 2FA setup. Call /auth/2fa/setup first.")
+    if not _verify_totp(pending, body.code):
+        raise HTTPException(status_code=400, detail="That code didn't match. Check your authenticator app and try again.")
+    codes = generate_backup_codes(10)
+    hashed = [_hash_backup_code(c.lower()) for c in codes]
+    await db.users.update_one({"id": user["id"]}, {
+        "$set": {
+            "totp_secret": pending,
+            "totp_enabled": True,
+            "totp_enrolled_at": now_iso(),
+            "backup_codes": hashed,
+        },
+        "$unset": {"pending_totp_secret": ""},
+    })
+    return {
+        "ok": True,
+        "backup_codes": codes,
+        "message": "2FA is now active. Save these 10 backup codes somewhere safe — each works once.",
+    }
+
+
+@api.post("/auth/2fa/disable")
+async def two_fa_disable(body: TwoFADisableBody, user=Depends(get_current_user)):
+    """Disable 2FA. Requires current password AND a valid TOTP or backup code."""
+    full = await db.users.find_one({"id": user["id"]})
+    if not full or not full.get("totp_enabled"):
+        raise HTTPException(status_code=400, detail="2FA is not enabled on this account.")
+    if not check_pw(body.password, full["password_hash"]):
+        raise HTTPException(status_code=401, detail="Password is incorrect.")
+    secret = full.get("totp_secret")
+    code_ok = _verify_totp(secret, body.code) or await _consume_backup_code(full, body.code.lower())
+    if not code_ok:
+        raise HTTPException(status_code=400, detail="Verification code is invalid.")
+    await db.users.update_one({"id": user["id"]}, {
+        "$set": {"totp_enabled": False, "backup_codes": []},
+        "$unset": {"totp_secret": "", "pending_totp_secret": "", "totp_enrolled_at": ""},
+    })
+    return {"ok": True}
+
+
+@api.post("/auth/2fa/regenerate-backup-codes")
+async def two_fa_regenerate_backup_codes(body: TwoFAVerifySetup, user=Depends(get_current_user)):
+    """Regenerate the 10 backup codes. Requires a current valid TOTP code."""
+    full = await db.users.find_one({"id": user["id"]})
+    if not full or not full.get("totp_enabled"):
+        raise HTTPException(status_code=400, detail="2FA is not enabled on this account.")
+    if not _verify_totp(full.get("totp_secret"), body.code):
+        raise HTTPException(status_code=400, detail="That code didn't match. Check your authenticator app and try again.")
+    codes = generate_backup_codes(10)
+    hashed = [_hash_backup_code(c.lower()) for c in codes]
+    await db.users.update_one({"id": user["id"]}, {"$set": {"backup_codes": hashed}})
+    return {"backup_codes": codes}
+
+
+# ---- 2FA challenge (post-password, pre-JWT) ----
+
+async def _record_2fa_attempt(user_id: str, success: bool):
+    await db.two_fa_attempts.insert_one({
+        "user_id": user_id, "success": success,
+        "attempted_at": datetime.now(timezone.utc),
+    })
+    if success:
+        await db.two_fa_attempts.delete_many({"user_id": user_id, "success": False})
+
+
+async def _two_fa_lockout(user_id: str) -> Optional[str]:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+    fails = await db.two_fa_attempts.count_documents({
+        "user_id": user_id, "success": False, "attempted_at": {"$gte": cutoff},
+    })
+    if fails < TWO_FA_MAX_ATTEMPTS:
+        return None
+    return "Too many failed 2FA attempts. Please sign in again in a few minutes."
+
+
+@api.post("/auth/2fa/send-email-code")
+async def two_fa_send_email_code(body: TwoFAEmailRequestBody, background: BackgroundTasks):
+    """Send a 6-digit email fallback code to the user identified by the challenge token."""
+    user_id = verify_2fa_challenge_token(body.challenge_token)
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found")
+    code = f"{_secrets.randbelow(1_000_000):06d}"
+    await db.two_fa_email_codes.insert_one({
+        "user_id": user_id,
+        "code_hash": _hash_backup_code(code),
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=TWO_FA_EMAIL_CODE_TTL_MINUTES),
+        "used": False,
+    })
+    subj, html, text = tmpl_2fa_code(user.get("name") or "there", code)
+    background.add_task(send_email, user["email"], subj, html, text, "2fa_code")
+    # Mask email in response for privacy
+    masked = user["email"][0] + "***@" + user["email"].split("@", 1)[-1]
+    return {"ok": True, "sent_to_masked": masked, "expires_in_minutes": TWO_FA_EMAIL_CODE_TTL_MINUTES}
+
+
+@api.post("/auth/2fa/challenge", response_model=AuthResponse)
+async def two_fa_challenge(body: TwoFAChallengeBody):
+    """Verify the second factor and issue a full JWT."""
+    user_id = verify_2fa_challenge_token(body.challenge_token)
+    lock = await _two_fa_lockout(user_id)
+    if lock:
+        raise HTTPException(status_code=429, detail=lock)
+    user = await db.users.find_one({"id": user_id})
+    if not user or not user.get("totp_enabled"):
+        raise HTTPException(status_code=400, detail="2FA is not active on this account.")
+    ok = False
+    if body.method == "totp":
+        ok = _verify_totp(user.get("totp_secret"), body.code)
+    elif body.method == "backup":
+        ok = await _consume_backup_code(user, body.code.lower())
+    elif body.method == "email":
+        cutoff = datetime.now(timezone.utc)
+        # Find the most recent non-expired unused email code for this user
+        code_doc = await db.two_fa_email_codes.find_one(
+            {"user_id": user_id, "used": False, "expires_at": {"$gte": cutoff}},
+            sort=[("created_at", -1)],
+        )
+        if code_doc and _check_backup_code(body.code.strip(), code_doc["code_hash"]):
+            await db.two_fa_email_codes.update_one({"_id": code_doc["_id"]}, {"$set": {"used": True}})
+            ok = True
+    await _record_2fa_attempt(user_id, success=ok)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Verification code is invalid or expired.")
+    return {"token": make_token(user["id"]), "user": sanitize_user(user)}
+
+
+# ---- Admin: reset another user's 2FA (in case they lose their device) ----
+
+@api.post("/admin/users/{uid}/2fa/reset")
+async def admin_reset_two_fa(uid: str, admin=Depends(require_admin)):
+    """Disable 2FA on a user's account. Used when a user loses access to their
+    authenticator app AND their backup codes. Post-reset the user should re-enroll."""
+    target = await db.users.find_one({"id": uid})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one({"id": uid}, {
+        "$set": {"totp_enabled": False, "backup_codes": []},
+        "$unset": {"totp_secret": "", "pending_totp_secret": "", "totp_enrolled_at": ""},
+    })
+    return {"ok": True, "user_id": uid}
 
 
 # ================ Invites ================
@@ -1410,7 +1729,6 @@ async def admin_delete_quote(qid: str, admin=Depends(require_admin)):
 # ================================================================
 # Deal Engine — Scenarios, Lenders, Lender Shares (Phase 1 + 2)
 # ================================================================
-from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors

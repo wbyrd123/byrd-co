@@ -377,3 +377,38 @@ def tmpl_password_reset(name: str, reset_url: str) -> tuple[str, str, str]:
     """
     return subject, html, text
 
+
+def tmpl_2fa_code(name: str, code: str) -> tuple[str, str, str]:
+    subject = f"Your Byrd & CO sign-in code: {code}"
+    text = (
+        f"Hi {name},\n\n"
+        f"Your Byrd & CO sign-in verification code is:\n\n"
+        f"    {code}\n\n"
+        f"This code expires in 10 minutes.\n\n"
+        f"If you didn't try to sign in, someone may know your password. Reset it immediately and let us know.\n\n"
+        f"— Byrd & CO Commercial RE Lending\n"
+    )
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:600px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">Sign-In Verification</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 12px;font-family:Georgia,serif;">Hi {name},</h2>
+        <p style="font-family:Arial,sans-serif;font-size:14px;line-height:1.55;">
+          Use this code to finish signing in to your Byrd &amp; CO account:
+        </p>
+        <div style="text-align:center;margin:24px 0;">
+          <div style="display:inline-block;background:#1A1A1A;color:#C89434;padding:16px 32px;font-family:'Courier New',monospace;font-size:32px;letter-spacing:0.4em;font-weight:bold;">{code}</div>
+        </div>
+        <p style="font-family:Arial,sans-serif;font-size:12px;color:#6B6558;">
+          This code expires in 10 minutes. Enter it on the sign-in screen to continue.
+        </p>
+        <p style="font-family:Arial,sans-serif;font-size:12px;color:#6B6558;margin-top:24px;">
+          If you didn't try to sign in, someone may know your password — reset it immediately and let us know.
+        </p>
+      </div>
+    </div>
+    """
+    return subject, html, text

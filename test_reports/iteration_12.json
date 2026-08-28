@@ -1,0 +1,47 @@
+{
+  "summary": "Full E2E test of the new 2FA feature (TOTP + email fallback + backup codes + admin reset) on the Byrd & CO platform. Backend: 40/40 pytest assertions passed in /app/backend/tests/test_two_factor.py covering enrollment, challenge-gated JWT issuance, backup-code single-use, regeneration invalidating old codes, 5-fail 429 lockout, disable, admin reset, and challenge-token/auth-JWT audience isolation. Frontend: full Playwright flow passed — enroll via /admin/security (QR + secret + 10 backup codes), logout, password login -> '// TWO-FACTOR VERIFICATION' screen, bad code error toast, backup/email/TOTP method switching, valid TOTP -> /admin, then disable 2FA. Final state verified: 2FA is OFF for wayne@byrd-co.com and caleb@byrd-co.com and both log in with a full JWT (no lockout risk).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/2fa/send-email-code", "issue": "No rate limiting / cooldown. Any holder of a valid 5-min challenge token can spam Postmark email-code sends (each call inserts a new code doc). Consider max 3 sends per challenge / 60s cooldown."},
+      {"endpoint": "POST /api/auth/2fa/challenge", "issue": "TOTP codes are accepted repeatedly within the same 30s step (pyotp verify with valid_window=1, no used-code replay cache). Low risk but replay of a sniffed code is possible for up to ~90s."},
+      {"endpoint": "POST /api/auth/2fa/disable", "issue": "A backup code can satisfy the second factor (_consume_backup_code) which is reasonable, but the consumed code is burned even when the request later succeeds/fails elsewhere — acceptable, just noting the side effect is not idempotent."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "PortalLogin 2FA challenge screen ('Trouble?' block)", "issues": ["The three fallback links render on a single crowded line with no separation: 'Email me a code instead,' butts directly against 'Use a backup code' and '<- Start over' (see screenshot). Cause: the email button uses inline-flex without the 'block' class its siblings have, so the parent space-y-2 gap does not apply. Add 'block' to two-fa-use-email (or wrap each link in a div)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_two_factor.py",
+    "/app/backend/tests/test_2fa_final_state.py",
+    "/app/test_reports/pytest/two_factor_results.xml"
+  ],
+  "action_items": [
+    "Minor CSS fix: add 'block' to data-testid=two-fa-use-email so the 'Trouble?' fallback links stack instead of colliding on one line.",
+    "Optional hardening: rate-limit /api/auth/2fa/send-email-code (cooldown + max sends per challenge token).",
+    "Optional hardening: mark a consumed TOTP step as used to block replay within the valid window.",
+    "Pre-existing (not 2FA): CORSMiddleware uses allow_credentials=True with allow_origins defaulting to '*' (server.py ~9017) — browsers reject credentialed wildcard; set explicit CORS_ORIGINS."
+  ],
+  "critical_code_review_comments": [
+    "Challenge-token isolation is correctly implemented: aud='2fa-challenge' + 5-min exp; verified a full auth JWT is rejected as a challenge_token (401) and a challenge_token is rejected by /api/auth/me (401).",
+    "Backup codes are bcrypt-hashed ($2b$) and single-use; regeneration correctly invalidates the prior set. Email codes are also bcrypt-hashed with a TTL index.",
+    "2FA lockout is enforced BEFORE code verification, so a valid TOTP is still rejected with 429 while locked — correct fail-closed behavior.",
+    "server.py is ~10,286 lines — well past the 700-line guideline. 2FA (helpers 154-240, routes 1065-1248) is a clean candidate for extraction into backend/routes/two_factor.py.",
+    "TOTP secrets are stored in plaintext on the user doc (documented in code). Acceptable for TOTP verification, but consider app-level encryption at rest if the threat model includes DB dumps."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_two_factor.py",
+    "/app/backend/tests/test_2fa_final_state.py"
+  ],
+  "success_rate": {"backend": "100% (40/40 + 2/2 final-state)", "frontend": "100% (all 12 E2E steps passed)"},
+  "seed_data_creation": "No new users created. 2FA was temporarily enrolled/disabled on wayne@byrd-co.com and caleb@byrd-co.com; test data in db.two_fa_attempts cleared and both accounts confirmed 2FA-OFF at end of run.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "wayne@byrd-co.com / byrdco2026 (admin), caleb@byrd-co.com / byrdco2026 (admin) — from /app/memory/test_credentials.md",
+  "context_for_next_testing_agent": "Run 2FA tests with `pytest tests/test_two_factor.py -n 0` — pytest.ini forces -n 2 --dist loadscope which breaks the intentional cross-class shared state (secret/backup codes carried on pytest module attributes). The module has an autouse fixture that hard-disables 2FA in Mongo for wayne+caleb before and after the run, so an aborted run cannot lock the accounts out; always finish with tests/test_2fa_final_state.py. For Playwright, TOTP can be computed inline with stdlib hmac/base64 (no pyotp needed in the browser tool). Email-code content cannot be intercepted (real Postmark), so email fallback is verified only up to send + masked-address display + wrong-code 400.",
+  "rca_of_the_issue": "No functional defect found. The single initial test failure ('security nav not visible') was a test-side race: is_visible() was called immediately after wait_for_url before the admin layout mounted; fixed by wait_for_selector(state='visible'). Note that a 400 console error observed during testing is the expected response to the deliberately submitted wrong 2FA code."
+}
