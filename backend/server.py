@@ -247,6 +247,13 @@ DEFAULT_SCENARIO_TEMPLATE_KEY = "purchase"
 
 @app.on_event("startup")
 async def seed():
+    # TTL index on login_attempts — auto-purge records older than 30 minutes.
+    # (idempotent — create_index is safe to call repeatedly)
+    try:
+        await db.login_attempts.create_index("attempted_at", expireAfterSeconds=1800)
+    except Exception as e:
+        logger.warning("login_attempts TTL index setup failed: %s", e)
+
     seeds = [
         {"email": "wayne@byrd-co.com", "name": "Wayne Byrd", "phone": "832-813-9802"},
         {"email": "caleb@byrd-co.com", "name": "Caleb Byrd", "phone": "832-661-4390"},
@@ -854,11 +861,57 @@ async def principals():
 
 
 # ================ Auth ================
+# ---- Login rate limiting ----
+# 5 failed attempts per email within 15 minutes → 15-minute cooldown before more tries.
+# Tracked in db.login_attempts with a MongoDB TTL index that auto-purges after 30 min.
+LOGIN_ATTEMPT_WINDOW_SECONDS = 15 * 60
+LOGIN_ATTEMPT_MAX = 5
+
+
+async def _login_lockout_status(email: str) -> Optional[str]:
+    """Return an error string if this email is currently locked out, else None."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=LOGIN_ATTEMPT_WINDOW_SECONDS)
+    fails = await db.login_attempts.count_documents({
+        "email": email, "success": False, "attempted_at": {"$gte": cutoff},
+    })
+    if fails < LOGIN_ATTEMPT_MAX:
+        return None
+    # Find earliest failure in window → cooldown ends 15 min after that
+    earliest = await db.login_attempts.find_one(
+        {"email": email, "success": False, "attempted_at": {"$gte": cutoff}},
+        sort=[("attempted_at", 1)],
+    )
+    if not earliest:
+        return None
+    ea = earliest["attempted_at"]
+    if ea.tzinfo is None:
+        ea = ea.replace(tzinfo=timezone.utc)
+    unlock_at = ea + timedelta(seconds=LOGIN_ATTEMPT_WINDOW_SECONDS)
+    mins = max(1, int((unlock_at - datetime.now(timezone.utc)).total_seconds() / 60))
+    return f"Too many failed sign-in attempts. Try again in about {mins} minute{'s' if mins != 1 else ''}."
+
+
+async def _record_login_attempt(email: str, success: bool):
+    await db.login_attempts.insert_one({
+        "email": email, "success": success,
+        "attempted_at": datetime.now(timezone.utc),
+    })
+    if success:
+        # Clear failed attempts for this email on a successful login
+        await db.login_attempts.delete_many({"email": email, "success": False})
+
+
 @api.post("/auth/login", response_model=AuthResponse)
 async def login(body: LoginInput):
-    user = await db.users.find_one({"email": body.email.lower()})
+    email = body.email.lower()
+    locked = await _login_lockout_status(email)
+    if locked:
+        raise HTTPException(status_code=429, detail=locked)
+    user = await db.users.find_one({"email": email})
     if not user or not check_pw(body.password, user["password_hash"]):
+        await _record_login_attempt(email, success=False)
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    await _record_login_attempt(email, success=True)
     return {"token": make_token(user["id"]), "user": sanitize_user(user)}
 
 

@@ -11,6 +11,19 @@
 - P3: Refactor `server.py` (~7,700 lines) into modular routes
 
 
+### Security Hardening — Phase 1 — SHIPPED 2026-02
+Login rate limiting implemented per user's Phase 1 security plan.
+
+**Login rate limiting:**
+- 5 failed attempts per email within 15 minutes → 15-minute cooldown returning HTTP 429 with a human-readable "Try again in about N minutes" message.
+- Tracked in `db.login_attempts` with a 30-min TTL index (auto-purge).
+- Successful login clears failure history for that email.
+- Bcrypt already slows each guess to ~300ms as defense-in-depth.
+- **Backblaze B2 bucket credentials stored** in backend/.env (B2_BUCKET_NAME, B2_ENDPOINT, B2_KEY_ID, B2_APPLICATION_KEY) — ready for backup script build (Phase 2).
+
+**Verified end-to-end:** 6 wrong attempts on wayne@byrd-co.com → attempts 1-5 return 401, attempt 6 returns 429 with "Try again in about 14 minutes." Correct password while locked still returns 429 (lockout is per-email, independent of actual password).
+
+
 ### Loan Quote Studio — Iteration 2 — SHIPPED 2026-02
 Bug fixes + agent lookup capability layered on top of the initial Studio.
 
