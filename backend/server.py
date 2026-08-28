@@ -248,11 +248,19 @@ DEFAULT_SCENARIO_TEMPLATE_KEY = "purchase"
 @app.on_event("startup")
 async def seed():
     # TTL index on login_attempts — auto-purge records older than 30 minutes.
-    # (idempotent — create_index is safe to call repeatedly)
     try:
         await db.login_attempts.create_index("attempted_at", expireAfterSeconds=1800)
     except Exception as e:
         logger.warning("login_attempts TTL index setup failed: %s", e)
+
+    # Nightly encrypted backup to Backblaze B2 (only if B2 creds are configured).
+    if os.environ.get("B2_KEY_ID") and os.environ.get("B2_APPLICATION_KEY"):
+        try:
+            from backup_service import scheduled_backup_loop
+            asyncio.create_task(scheduled_backup_loop(db))
+            logger.info("Scheduled nightly backup task started")
+        except Exception as e:
+            logger.warning("Backup scheduler failed to start: %s", e)
 
     seeds = [
         {"email": "wayne@byrd-co.com", "name": "Wayne Byrd", "phone": "832-813-9802"},
@@ -2719,6 +2727,33 @@ async def scenario_pdf(sid: str, admin=Depends(require_admin)):
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="byrd-scenario-{sid[:8]}.pdf"'},
     )
+
+
+# ================ Admin Backups (encrypted MongoDB dumps to Backblaze B2) ================
+@api.post("/admin/security/backup/run")
+async def admin_run_backup(admin=Depends(require_admin)):
+    """Kick off an on-demand backup. Runs off the event loop so the request returns quickly."""
+    try:
+        from backup_service import run_backup_async
+        meta = await run_backup_async(retention_days=30)
+        await db.backup_log.insert_one(dict(meta))  # copy so insert_one's _id mutation doesn't leak into response
+        return {"ok": True, **meta}
+    except Exception as e:
+        logger.exception("Manual backup failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)[:400]}")
+
+
+@api.get("/admin/security/backup/list")
+async def admin_list_backups(admin=Depends(require_admin), from_b2: bool = False):
+    """List recent backups. `from_b2=true` reads directly from Backblaze (source of truth)."""
+    if from_b2:
+        try:
+            from backup_service import list_recent_backups_b2
+            return {"source": "b2", "backups": list_recent_backups_b2(limit=30)}
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"B2 list failed: {str(e)[:300]}")
+    logs = await db.backup_log.find({}, {"_id": 0}).sort("started_at", -1).to_list(30)
+    return {"source": "log", "backups": logs}
 
 
 # ================ Financial Periods (multi-year NOI/DSCR calculator) ================

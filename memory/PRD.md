@@ -11,6 +11,21 @@
 - P3: Refactor `server.py` (~7,700 lines) into modular routes
 
 
+### Security Hardening — Phase 2 (Backups) — INFRASTRUCTURE SHIPPED 2026-02
+Encrypted nightly MongoDB backups to Backblaze B2 with 30-day Object Lock (Compliance mode).
+
+**Files:**
+- `/app/backend/backup_service.py` — mongodump → Fernet encrypt (key derived from JWT_SECRET) → boto3 upload w/ Object Lock retention header → 24-hour scheduler loop (starts 5 min after app boot).
+- `/app/backend/server.py` — startup task registration + `POST /admin/security/backup/run` (manual) + `GET /admin/security/backup/list` (source `log` or `b2`).
+- `/app/BACKUP_RESTORE.md` — full runbook: verify, download, decrypt, restore with mongorestore, key rotation, cost estimate.
+
+**Env vars stored:** `B2_BUCKET_NAME`, `B2_ENDPOINT`, `B2_KEY_ID`, `B2_APPLICATION_KEY`.
+
+**BLOCKED on credential regeneration:** Backblaze returns `InvalidAuthToken`. The provided `applicationKey` is 30 chars but valid B2 keys are 31 chars — one character was clipped on copy-paste. User needs to regenerate the key in Backblaze → App Keys → Add a New Application Key (same settings: bucket-restricted, Read+Write) and paste the full value. Everything else is verified: scheduler task starts, endpoints registered, decryption round-trip works locally.
+
+**Backblaze bucket** correctly configured: Compliance Object Lock enabled, private, SSE-B2 encryption enabled.
+
+
 ### Security Hardening — Phase 1 — SHIPPED 2026-02
 Login rate limiting implemented per user's Phase 1 security plan.
 
