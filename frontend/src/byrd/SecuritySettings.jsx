@@ -4,6 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import {
   ShieldCheck, ShieldAlert, Smartphone, Copy, Download, RefreshCcw, X, ArrowRight, Lock,
+  DatabaseBackup, HardDrive, CheckCircle2, AlertCircle, Loader2,
 } from "lucide-react";
 
 /**
@@ -345,8 +346,168 @@ export default function SecuritySettings() {
               </div>
             </div>
           </div>
+
+          {/* Backups Section */}
+          <BackupsPanel />
         </>
       )}
+    </div>
+  );
+}
+
+function BackupsPanel() {
+  const [backups, setBackups] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [running, setRunning] = React.useState(false);
+  const [lastResult, setLastResult] = React.useState(null);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const res = await api.get("/admin/security/backup/list");
+      setBackups(res.data.backups || []);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't load backup history");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  React.useEffect(() => { load(); }, []);
+
+  const runNow = async () => {
+    setRunning(true);
+    setLastResult(null);
+    try {
+      const res = await api.post("/admin/security/backup/run");
+      setLastResult({ ok: true, ...res.data });
+      toast.success("Backup complete");
+      await load();
+    } catch (e) {
+      setLastResult({ ok: false, error: e?.response?.data?.detail || "Backup failed" });
+      toast.error(e?.response?.data?.detail || "Backup failed");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const fmtBytes = (n) => {
+    if (!n && n !== 0) return "—";
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
+
+  const fmtDate = (iso) => {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleString(); } catch { return iso; }
+  };
+
+  const successful = (backups || []).filter((b) => b.status !== "error");
+  const lastBackup = successful[0];
+
+  return (
+    <div className="byrd-card p-6" data-testid="backups-panel">
+      <div className="flex items-start gap-4">
+        <div className="w-11 h-11 rounded-md grid place-items-center shrink-0 bg-[#1A1A1A] text-[#C89434]">
+          <DatabaseBackup size={20} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-serif text-xl font-bold">Database Backups</div>
+          <div className="text-sm text-[#6B6558] mt-1">
+            Automated encrypted backups run every <b>6 hours</b> to Backblaze B2 with 30-day
+            ransomware-proof Object Lock. You can also trigger one right now — for example, before a big change.
+          </div>
+        </div>
+        <button
+          onClick={runNow}
+          disabled={running}
+          data-testid="backup-run-now-btn"
+          className="byrd-btn byrd-btn-dark shrink-0"
+        >
+          {running ? <><Loader2 size={14} className="animate-spin" /> Backing up…</> : <><HardDrive size={14} /> Backup Now</>}
+        </button>
+      </div>
+
+      {/* Last-run banner */}
+      {lastResult && (
+        <div
+          className={`mt-4 rounded-md p-3 text-sm flex items-start gap-2 ${
+            lastResult.ok ? "bg-[#E8F1E8] text-[#2A5D2A]" : "bg-[#FBE9E9] text-[#8B2A2A]"
+          }`}
+          data-testid="backup-last-result"
+        >
+          {lastResult.ok ? <CheckCircle2 size={16} className="mt-0.5 shrink-0" /> : <AlertCircle size={16} className="mt-0.5 shrink-0" />}
+          <div>
+            {lastResult.ok ? (
+              <>
+                Backup saved: <code className="font-mono text-xs">{lastResult.key}</code> · {fmtBytes(lastResult.encrypted_size)} · retained
+                until {new Date(lastResult.retain_until).toLocaleDateString()}
+              </>
+            ) : (
+              <>Backup failed: {lastResult.error}</>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Backup log */}
+      <div className="mt-6 pt-6 border-t border-[#E4DFD1]">
+        <div className="flex items-center justify-between mb-3">
+          <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Recent Backups</div>
+          <button
+            onClick={load}
+            data-testid="backup-refresh-btn"
+            className="text-xs text-[#C89434] hover:text-[#1A1A1A] inline-flex items-center gap-1"
+          >
+            <RefreshCcw size={11} /> Refresh
+          </button>
+        </div>
+        {loading ? (
+          <div className="text-sm text-[#6B6558]">Loading history…</div>
+        ) : !backups || backups.length === 0 ? (
+          <div className="text-sm text-[#6B6558]">No backups yet. Click "Backup Now" to take the first one.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm" data-testid="backup-history-table">
+              <thead>
+                <tr className="text-[10px] uppercase font-mono tracking-widest text-[#6B6558] text-left">
+                  <th className="pb-2 pr-3">When</th>
+                  <th className="pb-2 pr-3">Status</th>
+                  <th className="pb-2 pr-3">Size</th>
+                  <th className="pb-2 pr-3">Retained Until</th>
+                  <th className="pb-2">Key</th>
+                </tr>
+              </thead>
+              <tbody>
+                {backups.slice(0, 15).map((b, i) => (
+                  <tr key={i} className="border-t border-[#E4DFD1]">
+                    <td className="py-2 pr-3 whitespace-nowrap">{fmtDate(b.finished_at || b.started_at)}</td>
+                    <td className="py-2 pr-3">
+                      {b.status === "error" ? (
+                        <span className="inline-flex items-center gap-1 text-[#8B2A2A]"><AlertCircle size={12} /> Error</span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[#2A5D2A]"><CheckCircle2 size={12} /> OK</span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 whitespace-nowrap">{fmtBytes(b.encrypted_size)}</td>
+                    <td className="py-2 pr-3 whitespace-nowrap">{b.retain_until ? new Date(b.retain_until).toLocaleDateString() : "—"}</td>
+                    <td className="py-2 font-mono text-xs text-[#6B6558] truncate max-w-[280px]" title={b.key || b.error}>
+                      {b.key || b.error || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {lastBackup && (
+          <div className="text-xs text-[#6B6558] mt-3">
+            Last successful backup: <b>{fmtDate(lastBackup.finished_at || lastBackup.started_at)}</b>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

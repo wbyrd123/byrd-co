@@ -121,7 +121,7 @@ async def run_backup_async(retention_days: int = 30) -> dict:
 
 
 async def scheduled_backup_loop(db):
-    """Fire once at startup after a 5-min warmup, then every 24h. Records each run in db.backup_log."""
+    """Fire once at startup after a 5-min warmup, then every 6h. Records each run in db.backup_log."""
     await asyncio.sleep(300)  # 5-min warmup so app fully boots
     while True:
         try:
@@ -137,7 +137,7 @@ async def scheduled_backup_loop(db):
                 })
             except Exception:
                 pass
-        await asyncio.sleep(24 * 60 * 60)  # 24 hours
+        await asyncio.sleep(6 * 60 * 60)  # 6 hours
 
 
 def list_recent_backups_b2(limit: int = 20) -> list:

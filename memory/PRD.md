@@ -333,3 +333,41 @@ Complete self-registration + credit-box + term-sheet marketplace. New surfaces:
 - Rate-limit `/auth/2fa/send-email-code` (currently unlimited within a 5-min challenge window)
 - Cache consumed TOTP steps to block replay within the 90s valid window
 - Extract 2FA into `backend/routes/two_factor.py` (part of the broader server.py refactor backlog)
+
+
+---
+
+## ✅ Backup Frequency + Manual Trigger — 2026-02-28
+
+**Status:** Shipped and smoke-tested (backup completes in ~2s and appears in history).
+
+**Changes:**
+- `backup_service.py` cadence: 24h → **6h** (was every 24 hours, now every 6 hours). Retention still 30 days with Backblaze Object Lock.
+- New UI panel at `/admin/security`: **"Database Backups"** with:
+  - `Backup Now` button (calls existing `POST /admin/security/backup/run`)
+  - Live status banner showing archive key, size, retention date
+  - Recent Backups history table (last 15 runs, success/error, size, timestamp)
+- Wired to existing admin-only endpoints — no new backend routes.
+
+**Cost impact:** ~4x storage usage on B2 (still <$5/mo at current DB size of ~60 KB compressed per snapshot).
+
+---
+
+## 🗓️ Backlog Item — MongoDB Atlas M10 Migration (deferred)
+
+**When:** After first closed deal originates through the platform.
+
+**What:** Move `MONGO_URL` from local `mongodb://localhost:27017` → Atlas M10 dedicated cluster.
+
+**Why:** Real-time replica set (3 nodes with auto-failover) + point-in-time recovery for the last 72 hours. Backblaze stays as the offsite belt-and-suspenders copy.
+
+**Cost:** ~$70/mo all-in (compute + storage + backup retention + egress).
+
+**Migration effort:** ~15 min. Change `MONGO_URL` env var, run `mongorestore` from a fresh Backblaze snapshot, restart. Zero code changes required.
+
+**Prerequisites:**
+1. Wayne creates an Atlas account (free)
+2. Provision M10 cluster in us-east or us-south region (Houston latency)
+3. Whitelist the Emergent container's egress IP
+4. Copy the SRV connection string into `MONGO_URL`
+

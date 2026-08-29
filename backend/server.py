@@ -358,7 +358,7 @@ async def seed():
         try:
             from backup_service import scheduled_backup_loop
             asyncio.create_task(scheduled_backup_loop(db))
-            logger.info("Scheduled nightly backup task started")
+            logger.info("Scheduled backup task started (every 6h)")
         except Exception as e:
             logger.warning("Backup scheduler failed to start: %s", e)
 
