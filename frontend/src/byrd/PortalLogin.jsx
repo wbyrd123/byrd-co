@@ -20,6 +20,8 @@ export default function PortalLogin() {
   const [twoFACode, setTwoFACode] = useState("");
   const [twoFAMethod, setTwoFAMethod] = useState("totp"); // "totp" | "email" | "backup"
   const [emailStatus, setEmailStatus] = useState(null); // {sent_to_masked, expires_in_minutes}
+  const [primaryMethod, setPrimaryMethod] = useState("totp"); // user's enrolled primary method
+  const [totpAvailable, setTotpAvailable] = useState(true);
 
   const routeUser = (user) => {
     const dest =
@@ -35,10 +37,24 @@ export default function PortalLogin() {
       if (result.requires_2fa) {
         setChallengeToken(result.challenge_token);
         setStage("2fa");
-        setTwoFAMethod("totp");
+        setPrimaryMethod(result.primary_method || "totp");
+        setTotpAvailable(!!result.totp_available);
         setTwoFACode("");
         setEmailStatus(null);
-        toast.success("Password accepted. Enter your 6-digit code.");
+        if (result.primary_method === "email") {
+          // Email-primary users: auto-send the code right away
+          setTwoFAMethod("email");
+          try {
+            const emailRes = await send2FAEmail(result.challenge_token);
+            setEmailStatus(emailRes);
+            toast.success(`Check your email — we sent a code to ${emailRes.sent_to_masked}`);
+          } catch (err) {
+            toast.error(err?.response?.data?.detail || "Couldn't send email code");
+          }
+        } else {
+          setTwoFAMethod("totp");
+          toast.success("Password accepted. Enter your 6-digit code.");
+        }
       } else {
         toast.success(`Welcome back, ${result.user.name}`);
         routeUser(result.user);
@@ -198,17 +214,17 @@ export default function PortalLogin() {
                     onClick={requestEmailCode}
                     disabled={busy}
                     data-testid="two-fa-use-email"
-                    className="text-xs text-[#C89434] hover:text-[#1A1A1A] inline-flex items-center gap-1 block"
+                    className="text-xs text-[#C89434] hover:text-[#1A1A1A] flex items-center gap-1 w-fit"
                   >
                     <Mail size={12} /> Email me a code instead
                   </button>
                 )}
-                {twoFAMethod !== "totp" && (
+                {twoFAMethod !== "totp" && totpAvailable && (
                   <button
                     type="button"
                     onClick={() => { setTwoFAMethod("totp"); setTwoFACode(""); }}
                     data-testid="two-fa-use-totp"
-                    className="text-xs text-[#C89434] hover:text-[#1A1A1A] inline-flex items-center gap-1 block"
+                    className="text-xs text-[#C89434] hover:text-[#1A1A1A] flex items-center gap-1 w-fit"
                   >
                     <ShieldCheck size={12} /> Use my authenticator app
                   </button>
@@ -218,7 +234,7 @@ export default function PortalLogin() {
                     type="button"
                     onClick={() => { setTwoFAMethod("backup"); setTwoFACode(""); }}
                     data-testid="two-fa-use-backup"
-                    className="text-xs text-[#C89434] hover:text-[#1A1A1A] inline-flex items-center gap-1 block"
+                    className="text-xs text-[#C89434] hover:text-[#1A1A1A] flex items-center gap-1 w-fit"
                   >
                     <KeyRound size={12} /> Use a backup code
                   </button>
@@ -227,7 +243,7 @@ export default function PortalLogin() {
                   type="button"
                   onClick={restartLogin}
                   data-testid="two-fa-restart"
-                  className="text-xs text-[#6B6558] hover:text-[#1A1A1A] inline-flex items-center gap-1 block mt-2"
+                  className="text-xs text-[#6B6558] hover:text-[#1A1A1A] flex items-center gap-1 w-fit mt-2"
                 >
                   <ArrowLeft size={12} /> Start over
                 </button>

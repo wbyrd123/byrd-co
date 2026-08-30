@@ -6,6 +6,7 @@ import { LOGO_URL, CONTACT } from "@/byrd/data";
 import { StatusChip, readFileAsBase64, fmtSize } from "@/byrd/docHelpers";
 import { toast } from "sonner";
 import AdaChatPanel from "@/byrd/AdaChatPanel";
+import TwoFAHeaderLink from "@/byrd/TwoFAHeaderLink";
 import {
   LogOut, Upload, FileText, Download, Phone, Mail, CheckCircle2, Circle, CircleAlert,
   ChevronDown, ChevronRight, PenLine, Trash2,
@@ -99,6 +100,7 @@ export default function ClientPortal() {
               <div className="text-sm font-semibold">{user?.name}</div>
               <div className="text-xs text-[#6B6558]">{user?.email}</div>
             </div>
+            <TwoFAHeaderLink enabled={user?.totp_enabled} />
             <button
               onClick={() => { logout(); nav("/"); }}
               data-testid="client-logout"

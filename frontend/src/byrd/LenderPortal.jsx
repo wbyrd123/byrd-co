@@ -7,6 +7,7 @@ import {
   Building2, LogOut, Sliders, Inbox, FileText, Check, X as XIcon,
   Send, Edit3, ExternalLink, Upload, Paperclip, Download,
 } from "lucide-react";
+import TwoFAHeaderLink from "@/byrd/TwoFAHeaderLink";
 
 const PROPERTY_TYPES = [
   "Multifamily", "Office", "Retail", "Industrial", "Hospitality",
@@ -79,6 +80,7 @@ export default function LenderPortal() {
               <div className="text-sm font-semibold" data-testid="lender-name">{me?.name || "…"}</div>
               <div className="text-[11px] text-[#6B6558]">{user?.email}</div>
             </div>
+            <TwoFAHeaderLink enabled={user?.totp_enabled} securityPath="/lender/portal/security" />
             <button onClick={logout} className="byrd-btn byrd-btn-outline h-9 px-3 text-xs" data-testid="lender-logout">
               <LogOut size={12} /> Log out
             </button>

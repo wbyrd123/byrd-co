@@ -34,6 +34,7 @@ export const AuthProvider = ({ children }) => {
         challenge_token: res.data.challenge_token,
         totp_available: res.data.totp_available,
         email_available: res.data.email_available,
+        primary_method: res.data.primary_method,
       };
     }
     localStorage.setItem("ac_token", res.data.token);

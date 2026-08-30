@@ -4,34 +4,41 @@ import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import {
   ShieldCheck, ShieldAlert, Smartphone, Copy, Download, RefreshCcw, X, ArrowRight, Lock,
-  DatabaseBackup, HardDrive, CheckCircle2, AlertCircle, Loader2,
+  DatabaseBackup, HardDrive, CheckCircle2, AlertCircle, Loader2, Mail, KeyRound, Send,
 } from "lucide-react";
 
 /**
  * SecuritySettings — enroll / manage Two-Factor Authentication for the current user.
- * Works for any authenticated role (admin, client, lender).
+ * Works for any authenticated role (admin, client, lender). The Database Backups
+ * panel is admin-only (backend enforces this).
  */
 export default function SecuritySettings() {
-  const { refreshUser } = useAuth();
-  const [status, setStatus] = useState(null); // { enabled, enrolled_at, backup_codes_remaining }
+  const { user, refreshUser } = useAuth();
+  const isAdmin = user?.role === "admin";
+
+  const [status, setStatus] = useState(null); // { enabled, enrolled_at, backup_codes_remaining, method }
   const [loading, setLoading] = useState(true);
 
   // Enrollment state
-  const [setup, setSetup] = useState(null); // { secret, qr_data_url, otpauth_uri, ... }
+  const [chooseMethod, setChooseMethod] = useState(false); // showing the "pick TOTP or Email" chooser
+  const [setup, setSetup] = useState(null); // TOTP setup payload
+  const [emailSetup, setEmailSetup] = useState(null); // { sent_to_masked, expires_in_minutes }
   const [enrollCode, setEnrollCode] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // Backup codes state (shown once after enroll or regenerate)
+  // Backup codes (shown once after enroll / regenerate)
   const [backupCodes, setBackupCodes] = useState(null);
 
   // Disable state
   const [disableOpen, setDisableOpen] = useState(false);
   const [disablePw, setDisablePw] = useState("");
   const [disableCode, setDisableCode] = useState("");
+  const [disableEmailSent, setDisableEmailSent] = useState(null);
 
   // Regenerate state
   const [regenOpen, setRegenOpen] = useState(false);
   const [regenCode, setRegenCode] = useState("");
+  const [regenEmailSent, setRegenEmailSent] = useState(null);
 
   useEffect(() => { load(); }, []);
 
@@ -47,12 +54,16 @@ export default function SecuritySettings() {
     }
   };
 
-  const startSetup = async () => {
+  // ---- Enrollment flows ----
+
+  const startTotpSetup = async () => {
     setBusy(true);
     try {
       const res = await api.post("/auth/2fa/setup");
       setSetup(res.data);
+      setEmailSetup(null);
       setEnrollCode("");
+      setChooseMethod(false);
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Couldn't start 2FA setup");
     } finally {
@@ -60,27 +71,98 @@ export default function SecuritySettings() {
     }
   };
 
-  const cancelSetup = () => {
-    setSetup(null);
-    setEnrollCode("");
+  const startEmailSetup = async () => {
+    setBusy(true);
+    try {
+      const res = await api.post("/auth/2fa/email/setup");
+      setEmailSetup(res.data);
+      setSetup(null);
+      setEnrollCode("");
+      setChooseMethod(false);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't send email code");
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const confirmSetup = async () => {
-    if (enrollCode.trim().length !== 6) {
-      toast.error("Enter the 6-digit code from your authenticator app");
-      return;
+  const resendEmailSetup = async () => {
+    setBusy(true);
+    try {
+      const res = await api.post("/auth/2fa/email/setup");
+      setEmailSetup(res.data);
+      toast.success(`New code sent to ${res.data.sent_to_masked}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't resend code");
+    } finally {
+      setBusy(false);
     }
+  };
+
+  const cancelSetup = () => {
+    setSetup(null);
+    setEmailSetup(null);
+    setEnrollCode("");
+    setChooseMethod(false);
+  };
+
+  const confirmTotpSetup = async () => {
+    if (enrollCode.trim().length !== 6) return toast.error("Enter the 6-digit code from your authenticator app");
     setBusy(true);
     try {
       const res = await api.post("/auth/2fa/verify-setup", { code: enrollCode.trim() });
       setBackupCodes(res.data.backup_codes);
-      setSetup(null);
-      setEnrollCode("");
+      cancelSetup();
       await refreshUser();
       await load();
-      toast.success("2FA is now active on your account");
+      toast.success("2FA is now active (authenticator app)");
     } catch (e) {
       toast.error(e?.response?.data?.detail || "That code didn't match. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmEmailSetup = async () => {
+    if (enrollCode.trim().length !== 6) return toast.error("Enter the 6-digit code from your email");
+    setBusy(true);
+    try {
+      const res = await api.post("/auth/2fa/email/verify-setup", { code: enrollCode.trim() });
+      setBackupCodes(res.data.backup_codes);
+      cancelSetup();
+      await refreshUser();
+      await load();
+      toast.success("2FA is now active (email codes)");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "That code didn't match. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ---- Sensitive-action helpers (for email-only users) ----
+
+  const sendVerificationForDisable = async () => {
+    setBusy(true);
+    try {
+      const res = await api.post("/auth/2fa/email/send-verification");
+      setDisableEmailSent(res.data);
+      toast.success(`Verification code sent to ${res.data.sent_to_masked}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't send code");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendVerificationForRegen = async () => {
+    setBusy(true);
+    try {
+      const res = await api.post("/auth/2fa/email/send-verification");
+      setRegenEmailSent(res.data);
+      toast.success(`Verification code sent to ${res.data.sent_to_masked}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't send code");
     } finally {
       setBusy(false);
     }
@@ -94,6 +176,7 @@ export default function SecuritySettings() {
       setDisableOpen(false);
       setDisablePw("");
       setDisableCode("");
+      setDisableEmailSent(null);
       await refreshUser();
       await load();
       toast.success("2FA has been disabled");
@@ -112,8 +195,9 @@ export default function SecuritySettings() {
       setBackupCodes(res.data.backup_codes);
       setRegenOpen(false);
       setRegenCode("");
+      setRegenEmailSent(null);
       await load();
-      toast.success("New backup codes generated. Old ones no longer work.");
+      toast.success("New backup codes generated");
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Couldn't regenerate backup codes");
     } finally {
@@ -121,15 +205,17 @@ export default function SecuritySettings() {
     }
   };
 
+  const method = status?.method; // "totp" | "email" | null
+
   return (
     <div className="space-y-6" data-testid="security-settings-page">
       <div>
         <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Security</div>
         <h1 className="font-serif text-3xl font-bold mt-1">Account Security</h1>
         <p className="text-sm text-[#6B6558] mt-2 max-w-2xl">
-          Two-factor authentication (2FA) adds a second layer to your sign-in. After entering your
-          password, you'll be asked for a 6-digit code from an authenticator app on your phone.
-          If you lose your phone you can fall back to an email code or one of your backup codes.
+          Two-factor authentication (2FA) adds a second layer to your sign-in. After entering your password,
+          you'll be asked for a 6-digit code — either from an authenticator app on your phone, or sent to your email.
+          You can also use one of 10 backup codes if you lose access.
         </p>
       </div>
 
@@ -150,17 +236,18 @@ export default function SecuritySettings() {
                 <div className="text-sm text-[#6B6558] mt-1">
                   {status?.enabled ? (
                     <>
-                      Enrolled {status.enrolled_at ? new Date(status.enrolled_at).toLocaleDateString() : "recently"}.
-                      You have <b>{status.backup_codes_remaining}</b> backup code{status.backup_codes_remaining === 1 ? "" : "s"} left.
+                      Method: <b>{method === "email" ? "Email codes" : "Authenticator app"}</b> ·{" "}
+                      Enrolled {status.enrolled_at ? new Date(status.enrolled_at).toLocaleDateString() : "recently"} ·{" "}
+                      <b>{status.backup_codes_remaining}</b> backup code{status.backup_codes_remaining === 1 ? "" : "s"} left
                     </>
                   ) : (
-                    "Turn it on to require a code from your phone every time you sign in."
+                    "Turn it on to require a second code every time you sign in."
                   )}
                 </div>
               </div>
-              {!status?.enabled && !setup && (
+              {!status?.enabled && !setup && !emailSetup && !chooseMethod && (
                 <button
-                  onClick={startSetup}
+                  onClick={() => setChooseMethod(true)}
                   disabled={busy}
                   data-testid="two-fa-enable-btn"
                   className="byrd-btn byrd-btn-dark"
@@ -173,14 +260,14 @@ export default function SecuritySettings() {
             {status?.enabled && (
               <div className="flex flex-wrap gap-2 mt-6 pt-6 border-t border-[#E4DFD1]">
                 <button
-                  onClick={() => setRegenOpen(true)}
+                  onClick={() => { setRegenOpen(true); setRegenEmailSent(null); setRegenCode(""); }}
                   data-testid="two-fa-regen-btn"
                   className="byrd-btn byrd-btn-outline"
                 >
                   <RefreshCcw size={14} /> Regenerate Backup Codes
                 </button>
                 <button
-                  onClick={() => setDisableOpen(true)}
+                  onClick={() => { setDisableOpen(true); setDisableEmailSent(null); setDisableCode(""); setDisablePw(""); }}
                   data-testid="two-fa-disable-btn"
                   className="byrd-btn byrd-btn-outline text-[#B23B3B] border-[#B23B3B]/40 hover:bg-[#B23B3B] hover:text-white"
                 >
@@ -190,7 +277,55 @@ export default function SecuritySettings() {
             )}
           </div>
 
-          {/* Enrollment Flow (QR code) */}
+          {/* Method chooser */}
+          {chooseMethod && (
+            <div className="byrd-card p-6" data-testid="two-fa-method-chooser">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Pick a method</div>
+                  <h2 className="font-serif text-xl font-bold mt-1">How would you like to receive codes?</h2>
+                </div>
+                <button onClick={cancelSetup} className="text-[#6B6558] hover:text-[#1A1A1A]" data-testid="two-fa-cancel-chooser">
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <button
+                  onClick={startTotpSetup}
+                  disabled={busy}
+                  data-testid="two-fa-choose-totp"
+                  className="text-left p-4 border border-[#E4DFD1] rounded-md hover:border-[#C89434] hover:bg-[#F3EEE0]/40 transition-colors"
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <Smartphone size={18} className="text-[#C89434]" />
+                    <div className="font-serif font-bold">Authenticator App</div>
+                    <span className="ml-auto text-[10px] font-mono uppercase tracking-widest bg-[#C89434] text-[#1A1A1A] px-1.5 py-0.5 rounded">Recommended</span>
+                  </div>
+                  <p className="text-xs text-[#6B6558] leading-relaxed">
+                    Codes come from an app like 1Password, Authy, Google Authenticator, or Microsoft Authenticator.
+                    Strongest security — works offline, no reliance on email.
+                  </p>
+                </button>
+                <button
+                  onClick={startEmailSetup}
+                  disabled={busy}
+                  data-testid="two-fa-choose-email"
+                  className="text-left p-4 border border-[#E4DFD1] rounded-md hover:border-[#C89434] hover:bg-[#F3EEE0]/40 transition-colors"
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <Mail size={18} className="text-[#C89434]" />
+                    <div className="font-serif font-bold">Email Code</div>
+                  </div>
+                  <p className="text-xs text-[#6B6558] leading-relaxed">
+                    We'll send a 6-digit code to your inbox each time you sign in. No app to install.
+                    Slightly weaker than an authenticator (depends on your email security), but simpler.
+                  </p>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* TOTP Enrollment Flow */}
           {setup && (
             <div className="byrd-card p-6 space-y-6" data-testid="two-fa-setup-card">
               <div className="flex items-start justify-between gap-4">
@@ -198,8 +333,8 @@ export default function SecuritySettings() {
                   <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Step 1</div>
                   <h2 className="font-serif text-xl font-bold mt-1">Scan the QR code</h2>
                   <p className="text-sm text-[#6B6558] mt-1 max-w-lg">
-                    Open your authenticator app (1Password, Google Authenticator, Authy, or Microsoft
-                    Authenticator) and scan the code below. Or tap "Enter secret manually" if you'd rather type it.
+                    Open your authenticator app (1Password, Google Authenticator, Authy, or Microsoft Authenticator)
+                    and scan the code below. Or type the secret manually.
                   </p>
                 </div>
                 <button onClick={cancelSetup} className="text-[#6B6558] hover:text-[#1A1A1A]" data-testid="two-fa-cancel-setup">
@@ -238,14 +373,11 @@ export default function SecuritySettings() {
                 <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Step 2</div>
                 <h2 className="font-serif text-xl font-bold mt-1">Enter the 6-digit code</h2>
                 <p className="text-sm text-[#6B6558] mt-1">
-                  Your authenticator app will now show a rotating 6-digit code for "Byrd & CO". Type it below to confirm.
+                  Your authenticator app will now show a rotating code for "Byrd & CO". Type it below to confirm.
                 </p>
                 <div className="mt-4 flex items-center gap-3 max-w-sm">
                   <input
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
+                    type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6}
                     value={enrollCode}
                     onChange={(e) => setEnrollCode(e.target.value.replace(/\D/g, ""))}
                     data-testid="two-fa-enroll-code"
@@ -253,7 +385,7 @@ export default function SecuritySettings() {
                     placeholder="123456"
                   />
                   <button
-                    onClick={confirmSetup}
+                    onClick={confirmTotpSetup}
                     disabled={busy || enrollCode.length !== 6}
                     data-testid="two-fa-confirm-setup"
                     className="byrd-btn byrd-btn-dark"
@@ -265,17 +397,63 @@ export default function SecuritySettings() {
             </div>
           )}
 
-          {/* Backup Codes (shown once after enroll or regenerate) */}
+          {/* Email Enrollment Flow */}
+          {emailSetup && (
+            <div className="byrd-card p-6 space-y-4" data-testid="two-fa-email-setup-card">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Confirm your email</div>
+                  <h2 className="font-serif text-xl font-bold mt-1">Enter the code we just emailed you</h2>
+                  <p className="text-sm text-[#6B6558] mt-2">
+                    We sent a 6-digit code to <b>{emailSetup.sent_to_masked}</b>. It expires in <b>{emailSetup.expires_in_minutes} minutes</b>.
+                    Check your inbox — and your spam folder if it doesn't arrive.
+                  </p>
+                </div>
+                <button onClick={cancelSetup} className="text-[#6B6558] hover:text-[#1A1A1A]" data-testid="two-fa-cancel-email-setup">
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="flex items-center gap-3 max-w-sm">
+                <input
+                  type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={6}
+                  value={enrollCode}
+                  onChange={(e) => setEnrollCode(e.target.value.replace(/\D/g, ""))}
+                  data-testid="two-fa-email-enroll-code"
+                  autoFocus
+                  className="flex-1 h-11 px-3 rounded-md border border-[#E4DFD1] bg-white focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434] font-mono tracking-widest text-center text-lg"
+                  placeholder="123456"
+                />
+                <button
+                  onClick={confirmEmailSetup}
+                  disabled={busy || enrollCode.length !== 6}
+                  data-testid="two-fa-confirm-email-setup"
+                  className="byrd-btn byrd-btn-dark"
+                >
+                  {busy ? "Verifying…" : "Verify"} <ArrowRight size={14} />
+                </button>
+              </div>
+              <button
+                onClick={resendEmailSetup}
+                disabled={busy}
+                data-testid="two-fa-resend-email-setup"
+                className="text-xs text-[#C89434] hover:text-[#1A1A1A] inline-flex items-center gap-1"
+              >
+                <RefreshCcw size={11} /> Didn't get it? Resend the code
+              </button>
+            </div>
+          )}
+
+          {/* Backup Codes shown once */}
           {backupCodes && (
             <BackupCodesModal codes={backupCodes} onClose={() => setBackupCodes(null)} />
           )}
 
-          {/* Disable modal */}
+          {/* Disable modal (method-aware) */}
           {disableOpen && (
             <Modal title="Disable Two-Factor Authentication" onClose={() => setDisableOpen(false)}>
               <p className="text-sm text-[#6B6558] mb-4">
-                To disable 2FA we need your password plus one code from your authenticator app (or a backup code).
-                After this, only your password will be needed to sign in.
+                To disable 2FA we need your password plus one verification code.
+                {method === "email" ? " We'll email you a fresh code — click below." : " Enter a 6-digit code from your authenticator app (or a backup code)."}
               </p>
               <form onSubmit={submitDisable} className="space-y-3">
                 <label className="block">
@@ -286,8 +464,28 @@ export default function SecuritySettings() {
                     className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1] bg-white"
                   />
                 </label>
+
+                {method === "email" && !disableEmailSent && (
+                  <button
+                    type="button"
+                    onClick={sendVerificationForDisable}
+                    disabled={busy}
+                    data-testid="two-fa-disable-send-email"
+                    className="byrd-btn byrd-btn-outline w-full justify-center"
+                  >
+                    <Send size={14} /> {busy ? "Sending…" : "Email me a verification code"}
+                  </button>
+                )}
+                {method === "email" && disableEmailSent && (
+                  <div className="text-xs text-[#2A5D2A] bg-[#E8F1E8] rounded-md px-3 py-2">
+                    Code sent to {disableEmailSent.sent_to_masked} · expires in {disableEmailSent.expires_in_minutes} min
+                  </div>
+                )}
+
                 <label className="block">
-                  <div className="text-[10px] uppercase font-mono tracking-widest text-[#6B6558]">6-digit code or backup code</div>
+                  <div className="text-[10px] uppercase font-mono tracking-widest text-[#6B6558]">
+                    {method === "email" ? "Email code (or backup code)" : "6-digit code or backup code"}
+                  </div>
                   <input
                     type="text" required autoComplete="one-time-code" value={disableCode}
                     onChange={(e) => setDisableCode(e.target.value)}
@@ -305,16 +503,34 @@ export default function SecuritySettings() {
             </Modal>
           )}
 
-          {/* Regenerate modal */}
+          {/* Regenerate modal (method-aware) */}
           {regenOpen && (
             <Modal title="Regenerate Backup Codes" onClose={() => setRegenOpen(false)}>
               <p className="text-sm text-[#6B6558] mb-4">
                 This creates 10 fresh backup codes. Your <b>old backup codes will stop working immediately.</b>
-                Confirm with a 6-digit code from your authenticator.
+                Confirm with a {method === "email" ? "code sent to your email" : "6-digit code from your authenticator"}.
               </p>
               <form onSubmit={submitRegen} className="space-y-3">
+                {method === "email" && !regenEmailSent && (
+                  <button
+                    type="button"
+                    onClick={sendVerificationForRegen}
+                    disabled={busy}
+                    data-testid="two-fa-regen-send-email"
+                    className="byrd-btn byrd-btn-outline w-full justify-center"
+                  >
+                    <Send size={14} /> {busy ? "Sending…" : "Email me a verification code"}
+                  </button>
+                )}
+                {method === "email" && regenEmailSent && (
+                  <div className="text-xs text-[#2A5D2A] bg-[#E8F1E8] rounded-md px-3 py-2">
+                    Code sent to {regenEmailSent.sent_to_masked} · expires in {regenEmailSent.expires_in_minutes} min
+                  </div>
+                )}
                 <label className="block">
-                  <div className="text-[10px] uppercase font-mono tracking-widest text-[#6B6558]">6-digit code</div>
+                  <div className="text-[10px] uppercase font-mono tracking-widest text-[#6B6558]">
+                    {method === "email" ? "Email code" : "6-digit code"}
+                  </div>
                   <input
                     type="text" required inputMode="numeric" maxLength={6} value={regenCode}
                     onChange={(e) => setRegenCode(e.target.value.replace(/\D/g, ""))}
@@ -336,19 +552,20 @@ export default function SecuritySettings() {
           {/* Recommended apps hint */}
           <div className="byrd-card p-6 bg-[#F3EEE0]/40">
             <div className="flex items-start gap-3">
-              <Smartphone size={20} className="text-[#C89434] shrink-0 mt-0.5" />
+              <KeyRound size={20} className="text-[#C89434] shrink-0 mt-0.5" />
               <div>
-                <div className="font-serif font-bold">Which authenticator app should I use?</div>
+                <div className="font-serif font-bold">Not sure which method to pick?</div>
                 <div className="text-sm text-[#6B6558] mt-1">
-                  Any of these work: <b>1Password</b>, <b>Google Authenticator</b>, <b>Authy</b>, or <b>Microsoft Authenticator</b>.
-                  If you already use 1Password to store passwords, add it there — new codes appear right next to your login.
+                  If you already use <b>1Password</b> to store passwords, choose the <b>Authenticator App</b> option —
+                  the codes appear right next to your login for byrd-co.com. If you'd rather not install anything,
+                  <b> Email Codes</b> work well: we send a fresh code to your inbox each time you sign in.
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Backups Section */}
-          <BackupsPanel />
+          {/* Admin-only: Backups Section */}
+          {isAdmin && <BackupsPanel />}
         </>
       )}
     </div>
@@ -430,7 +647,6 @@ function BackupsPanel() {
         </button>
       </div>
 
-      {/* Last-run banner */}
       {lastResult && (
         <div
           className={`mt-4 rounded-md p-3 text-sm flex items-start gap-2 ${
@@ -452,7 +668,6 @@ function BackupsPanel() {
         </div>
       )}
 
-      {/* Backup log */}
       <div className="mt-6 pt-6 border-t border-[#E4DFD1]">
         <div className="flex items-center justify-between mb-3">
           <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Recent Backups</div>
@@ -536,7 +751,7 @@ function BackupCodesModal({ codes, onClose }) {
   return (
     <Modal title="Save your backup codes" onClose={onClose}>
       <p className="text-sm text-[#6B6558] mb-4">
-        These 10 codes are the only way in if you lose access to your phone AND email.
+        These 10 codes are your lifeline if you lose access to your authenticator/email.
         Each works exactly once. <b>Save them now</b> — this is the only time we'll show them.
       </p>
       <div className="grid grid-cols-2 gap-2 bg-[#1A1A1A] text-[#C89434] font-mono p-4 rounded-md mb-4" data-testid="two-fa-backup-codes-list">

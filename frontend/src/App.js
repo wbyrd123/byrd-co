@@ -23,6 +23,7 @@ import AdminAssistant from "@/byrd/AdminAssistant";
 import AdminContacts from "@/byrd/AdminContacts";
 import AdminLoanQuoteStudio from "@/byrd/AdminLoanQuoteStudio";
 import SecuritySettings from "@/byrd/SecuritySettings";
+import PortalSecurityPage from "@/byrd/PortalSecurityPage";
 import Unsubscribe from "@/byrd/Unsubscribe";
 import FeeAgreementSign from "@/byrd/FeeAgreementSign";
 import LenderView from "@/byrd/LenderView";
@@ -104,6 +105,14 @@ function App() {
                 </RequireAuth>
               }
             />
+            <Route
+              path="/lender/portal/security"
+              element={
+                <RequireAuth role="lender">
+                  <PortalSecurityPage backPath="/lender/portal" label="Lender Portal" />
+                </RequireAuth>
+              }
+            />
 
             {/* Client portal (role=client) */}
             <Route
@@ -111,6 +120,14 @@ function App() {
               element={
                 <RequireAuth role="client">
                   <ClientPortal />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/portal/security"
+              element={
+                <RequireAuth role="client">
+                  <PortalSecurityPage backPath="/portal" label="Client Portal" />
                 </RequireAuth>
               }
             />

@@ -371,3 +371,33 @@ Complete self-registration + credit-box + term-sheet marketplace. New surfaces:
 3. Whitelist the Emergent container's egress IP
 4. Copy the SRV connection string into `MONGO_URL`
 
+
+
+---
+
+## ✅ 2FA Extended: Email-Only Method + Client/Lender Rollout — 2026-02-28
+
+**Status:** Shipped. 54/54 backend pytest + full frontend E2E (with 2 bugs found and fixed post-test).
+
+### Backend additions to `server.py`
+- **New endpoints:**
+  - `POST /auth/2fa/email/setup` — sends verification code (purpose="setup")
+  - `POST /auth/2fa/email/verify-setup` — enables 2FA with `two_fa_method="email"` + 10 backup codes
+  - `POST /auth/2fa/email/send-verification` — sends code (purpose="verify") for disable/regen
+- **Unified helpers:** `_send_email_verification_code(purpose)` + `_consume_email_verification_code(purpose)`. Purposes: `login`, `setup`, `verify`.
+- **Login endpoint** now returns `primary_method` and only sets `totp_available=true` if a TOTP secret exists.
+- **Disable + Regenerate** accept email codes (`purpose="verify"`) as an alternative to TOTP.
+- **Admin reset** clears `two_fa_method` alongside `totp_secret` + `totp_enabled`.
+- **New DB indexes:** TTL on `two_fa_email_codes.expires_at` (auto-purge), compound on `(user_id, purpose, used, created_at)`.
+
+### Frontend
+- **SecuritySettings.jsx** — method chooser card ("Authenticator App" **Recommended** vs "Email Code"). Enrollment flows for both. Disable/Regenerate modals are method-aware (show "Email me a code" for email users). BackupsPanel only renders for `role=admin`.
+- **TwoFAHeaderLink.jsx** (new) — gold "Enable 2FA" pill + question-mark help button in Client + Lender portal headers. Help modal uses `createPortal(document.body)` to escape backdrop-blur containing block.
+- **PortalSecurityPage.jsx** (new) — standalone chrome for `/portal/security` (role=client) and `/lender/portal/security` (role=lender). Same SecuritySettings component reused.
+- **PortalLogin.jsx** — auto-sends email code for `primary_method="email"` users on 2FA stage entry. Hides "Use authenticator app" fallback link when `totp_available=false`. Trouble-links className fixed to `flex w-fit`.
+
+### Deferred (from test report)
+- **Postmark inactive-recipient handling** — `send_email` runs as a BackgroundTask, so a 406 from Postmark is currently invisible to the user. Recommended follow-up: pre-flight suppression check OR await synchronously and surface a friendly error.
+- **Rate limit** on email-code send endpoints (60s cooldown / N per window)
+- **Extract 2FA to `backend/routes/two_factor.py`** — 2FA block is ~330 lines, self-contained, good candidate for the broader `server.py` refactor
+

@@ -1,0 +1,55 @@
+{
+  "summary": "Full backend + frontend E2E test of the Byrd & CO email-only 2FA enhancement and cross-role (admin/client/lender) 2FA exposure. Backend: 54/54 pytest assertions pass across new /app/backend/tests/test_two_factor_email.py (12 tests) plus the iteration-12 regression suites (test_two_factor.py, test_2fa_final_state.py). Covered: TOTP enrollment regression (method='totp', status, sanitize_user.two_fa_method, login primary_method/totp_available, disable), email enrollment (setup send + masked email + purpose='setup' doc, bad-code 400, happy path via DB-seeded code hash -> method='email', no totp_secret, replay of used code rejected), send-verification (purpose='verify', requires totp_enabled, auth required), regenerate-backup-codes with email verify code (old codes invalidated), disable with backup code (valid=200 / invalid=400 / wrong password=401), email-only login shape (primary_method='email', totp_available=false, email_available=true), purpose isolation both directions ('verify' code rejected for login challenge, 'login' code rejected for disable), client+lender role enrollment + re-enroll guard (400), admin 2FA reset clearing two_fa_method (+403 for non-admin, 404 for unknown uid). Frontend: admin /admin/security method chooser (both cards, TOTP QR+32-char secret, email card with masked email/resend/bad-code error), Backups panel admin-only, client + lender header 'Enable 2FA' pill + help modal + 'Set it up now' navigation to /portal/security and /lender/portal/security with SecuritySettings rendered and NO Backups panel, and PortalLogin email-primary auto-send ('We sent a 6-digit code to t***@byrd-co.com', two-fa-use-totp absent, backup-code fallback authenticates). Final state verified: Wayne, Caleb, sample@example.com, contact@testfrost.example all have totp_enabled=false/two_fa_method=null and log in with a full JWT; temp seeded user deleted.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/2fa/email/setup (and /send-verification, /send-email-code)", "issue": "Email delivery failure is invisible to the user. Postmark returned 406 'inactive recipient' for sample@example.com during this run (backend.err.log), yet the API still returned {ok:true, sent_to_masked} and the UI said 'We sent a 6-digit code'. Because send_email runs in a BackgroundTask there is no way for a client/lender whose address is suppressed to ever complete email-only enrollment or email login. Recommend a pre-send deliverability/suppression check or surfacing the send result (and a support hint) to the user."},
+      {"endpoint": "POST /api/auth/2fa/email/setup + /send-verification", "issue": "No rate limit / cooldown: each call inserts another code doc and triggers another Postmark send. Same gap flagged for /send-email-code in iteration 12 — still unrated. Suggest 60s cooldown + max sends per window."},
+      {"endpoint": "db.two_fa_email_codes", "issue": "No TTL index on expires_at and old/used docs are never purged, so the collection grows unbounded. login_attempts has a TTL index; this one does not."},
+      {"endpoint": "POST /api/auth/2fa/challenge (method='email')", "issue": "Failed email-code attempts are counted by _record_2fa_attempt, but a wrong email code does NOT invalidate the outstanding code, so an attacker gets TWO_FA_MAX_ATTEMPTS tries against the same 6-digit code (1e6 space, low risk). Also each new send leaves prior unexpired codes valid (only the newest is checked, older ones simply linger)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "TwoFAHeaderLink help modal on ClientPortal", "issue": "Help modal is rendered 248px above the viewport top on the client portal — the title 'What is Two-Factor Authentication?', the intro paragraph and the 'Why it matters' text are cut off and unreadable (measured boundingBox y = -247.9 at 1920x1080). ROOT CAUSE: the modal is a child of ClientPortal's <header className='... bg-white/80 backdrop-blur sticky top-0 z-30'> (ClientPortal.jsx:89); backdrop-filter creates a containing block, so 'fixed inset-0' resolves against the 64px-tall header instead of the viewport and items-center centers the 560px modal on the header. Lender portal header has no backdrop-blur, so it renders correctly there. FIX: render the overlay with ReactDOM.createPortal(..., document.body) inside TwoFAHeaderLink (also protects PortalSecurityPage.jsx:17, which has the same backdrop-blur header).", "selector": "[data-testid=\"two-fa-help-modal\"]", "priority": "HIGH"},
+      {"component": "PortalLogin 'Trouble?' fallback links", "issue": "Iteration-12 issue NOT fixed: 'Email me a code instead' and '\u2190 Start over' still collide on one line. The className is 'inline-flex ... block' (PortalLogin.jsx:217) — Tailwind emits .inline-flex after .block, so inline-flex wins and the parent space-y gap never applies. Remove 'inline-flex' (use 'flex' + w-fit) or wrap each link in its own div.", "selector": "[data-testid=\"two-fa-use-email\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/lender/portal/security (PortalSecurityPage)", "issues": ["Header shows the user's first name 'Sam' for contact@testfrost.example while the lender portal header shows 'Test Frost Bank' — inconsistent identity label between the portal and its security page."]},
+      {"screen": "2FA method chooser (/admin/security)", "issues": ["Cards render well; only nit is that the 'Email Code' card has no 'less secure' visual weight beyond body copy while 'Authenticator App' has a RECOMMENDED pill — acceptable, no action required."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_two_factor_email.py",
+    "/app/backend/tests/test_2fa_email_final_state.py",
+    "/app/backend/tests/seed_email_2fa_user.py",
+    "/app/test_reports/pytest/two_factor_email.xml"
+  ],
+  "action_items": [
+    "HIGH: Portal the TwoFAHeaderLink help modal into document.body (createPortal) — backdrop-blur header breaks position:fixed on the client portal, clipping the modal heading.",
+    "MEDIUM: Fix two-fa-use-email display class in PortalLogin.jsx (drop 'inline-flex') so the 'Trouble?' links stack.",
+    "MEDIUM: Handle/surface email send failures (Postmark 406 inactive recipient) for the email-only 2FA flows — today the user is told a code was sent when it was not, and they can never finish enrollment.",
+    "LOW: Add a TTL index on two_fa_email_codes.expires_at and rate-limit the three email-code send endpoints.",
+    "LOW: Align the user label on PortalSecurityPage for lender accounts."
+  ],
+  "critical_code_review_comments": [
+    "TwoFAHeaderLink: overlays must never be mounted inside a backdrop-filter/transform ancestor; use a portal.",
+    "_send_email_verification_code returns success before the background send executes — no delivery signal, no dedupe, no cooldown; consider awaiting the provider call or storing send status on the code doc.",
+    "server.py is ~10.4k lines; the 2FA block (lines ~1000-1332) is self-contained and should be split into backend/routers/two_factor.py.",
+    "CORSMiddleware (server.py:9102) uses allow_credentials=True with allow_origins defaulting to '*' — pre-existing, still unfixed; browsers reject credentialed wildcard requests.",
+    "JWT signing key is 22 bytes (InsecureKeyLengthWarning in backend logs) — raise to >=32 bytes for HS256."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_two_factor_email.py",
+    "/app/backend/tests/test_2fa_email_final_state.py",
+    "/app/backend/tests/seed_email_2fa_user.py"
+  ],
+  "success_rate": {"backend": "100% (54/54 assertions across 3 suites)", "frontend": "90% (all specified flows pass; 1 HIGH modal-clipping bug + 1 unfixed layout bug)"},
+  "seed_data_creation": "Temporary Mongo user test_2fa_email_user@byrd-co.com / TestEmail2fa!23 (role=client, totp_enabled=true, two_fa_method='email', backup code 'abcd-1234') used for the email-primary login E2E; DELETED at end of run (verified by test_2fa_email_final_state.py). Email codes were seeded directly into two_fa_email_codes with bcrypt hashes since inbox content is unreadable. No production/seed data modified; all four real accounts left with 2FA OFF.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "wayne@byrd-co.com/byrdco2026, caleb@byrd-co.com/byrdco2026, sample@example.com/sample123, contact@testfrost.example/testlender123 (all verified working, 2FA off)",
+  "context_for_next_testing_agent": "Run `python /app/backend/tests/seed_email_2fa_user.py seed` to recreate the email-primary user for PortalLogin tests and `... clean` afterwards; its backup code must be 9 chars (xxxx-xxxx) because the challenge input has maxLength=9. Email codes cannot be read — seed docs into two_fa_email_codes with bcrypt hash of a known code (see helper in test_two_factor_email.py). Note EmailStr rejects .test TLD (422) so test users must use a real-looking domain. Always finish with pytest tests/test_2fa_final_state.py tests/test_2fa_email_final_state.py to prove no account is left enrolled. Not retested this round: TOTP challenge lockout/429 and admin backups panel functionality (covered in iteration 12).",
+  "rca_of_the_issue": "Client-portal help modal clipping: ClientPortal.jsx:89 header uses Tailwind 'backdrop-blur' (backdrop-filter), which per CSS spec establishes a containing block for position:fixed descendants. TwoFAHeaderLink renders its 'fixed inset-0 flex items-center' overlay as a header descendant, so the 560px modal is centered inside the 64px header, pushing its top 248px above the viewport. Reproduce: log in as sample@example.com, click [data-testid=two-fa-header-help], evaluate boundingBox of [data-testid=two-fa-help-modal] -> y = -247.9. Mitigation: createPortal the overlay to document.body."
+}
