@@ -40,7 +40,7 @@ from email_service import (
     tmpl_quote, tmpl_invite, tmpl_lender_activity,
     tmpl_lender_application_received, tmpl_lender_approved, tmpl_lender_invite,
     tmpl_term_sheet_submitted, tmpl_term_sheet_status_change,
-    tmpl_password_reset, tmpl_2fa_code,
+    tmpl_password_reset, tmpl_2fa_code, friendly_delivery_error,
 )
 import audit_service
 from audit_service import log_event as audit_log
@@ -1163,8 +1163,27 @@ async def two_fa_verify_setup(body: TwoFAVerifySetup, request: Request, user=Dep
 
 async def _send_email_verification_code(user_id: str, email: str, name: str, purpose: str,
                                         background: BackgroundTasks) -> dict:
-    """Send a 6-digit email code for `purpose` (setup, disable, regenerate) and store its hash."""
+    """Send a 6-digit email code for `purpose` (setup, disable, regenerate) and store its hash.
+
+    Sends SYNCHRONOUSLY (via to_thread) so we can surface a friendly delivery error to the
+    caller if Postmark rejects the recipient (inactive, hard-bounced, etc). If the send fails,
+    we raise a 502 with `friendly_delivery_error` message instead of storing the code — so the
+    user isn't left staring at "code sent" when nothing arrived.
+    """
+    import asyncio
     code = f"{_secrets.randbelow(1_000_000):06d}"
+    subj, html, text = tmpl_2fa_code(name or "there", code)
+    # BLOCKING send in a threadpool — we need the result for delivery confirmation
+    result = await asyncio.to_thread(send_email, email, subj, html, text, f"2fa_{purpose}")
+    if not result.get("ok"):
+        # Do NOT store the code — nothing to verify against.
+        friendly = friendly_delivery_error(result)
+        # Log the raw postmark error server-side for debugging (audit_log will pick up upstream)
+        logger.warning("2FA email send failed: purpose=%s email=%s postmark_code=%s err=%s",
+                       purpose, email, result.get("error_code"), result.get("error"))
+        # Use 400 (not 502) so Cloudflare/ingress doesn't replace our friendly body with its 5xx page.
+        raise HTTPException(status_code=400, detail=friendly)
+    # Only persist the code when the send succeeded
     await db.two_fa_email_codes.insert_one({
         "user_id": user_id,
         "purpose": purpose,
@@ -1173,8 +1192,6 @@ async def _send_email_verification_code(user_id: str, email: str, name: str, pur
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=TWO_FA_EMAIL_CODE_TTL_MINUTES),
         "used": False,
     })
-    subj, html, text = tmpl_2fa_code(name or "there", code)
-    background.add_task(send_email, email, subj, html, text, f"2fa_{purpose}")
     masked = email[0] + "***@" + email.split("@", 1)[-1]
     return {"sent_to_masked": masked, "expires_in_minutes": TWO_FA_EMAIL_CODE_TTL_MINUTES}
 

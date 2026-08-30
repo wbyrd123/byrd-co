@@ -3,6 +3,7 @@ import os
 import logging
 from typing import Iterable, Optional
 from postmarker.core import PostmarkClient
+from postmarker.exceptions import ClientError as PostmarkClientError
 
 logger = logging.getLogger("email")
 
@@ -19,6 +20,36 @@ def _get_client() -> Optional[PostmarkClient]:
     return _client
 
 
+# Human-readable messages for Postmark error codes we care about.
+# Full list: https://postmarkapp.com/developer/api/overview#error-codes
+POSTMARK_FRIENDLY: dict[int, str] = {
+    300: "That email address doesn't look valid. Please double-check the spelling.",
+    405: "This email address has been marked as spam by a recipient and can't receive our messages. "
+         "Contact Byrd & CO to have it reactivated.",
+    406: "This email address is on our inactive list (bounced or unsubscribed previously) and can't "
+         "receive our messages. Contact Byrd & CO to have it reactivated.",
+    412: "This email address has hard-bounced from our system. Contact Byrd & CO to reactivate it.",
+    429: "We're sending too many messages right now — please wait a moment and try again.",
+}
+FALLBACK_DELIVERY_ERROR = (
+    "We couldn't send an email to that address right now. Please try again in a minute — "
+    "if it keeps failing, contact Byrd & CO for help."
+)
+
+
+def friendly_delivery_error(result: dict) -> str:
+    """Map a send_email() failure result to a friendly message the UI can show."""
+    if not result:
+        return FALLBACK_DELIVERY_ERROR
+    code = result.get("error_code")
+    if isinstance(code, int) and code in POSTMARK_FRIENDLY:
+        return POSTMARK_FRIENDLY[code]
+    # If postmark isn't configured at all
+    if result.get("error") and "not configured" in result["error"].lower():
+        return "Email service is temporarily unavailable. Contact Byrd & CO to sign in."
+    return FALLBACK_DELIVERY_ERROR
+
+
 def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag: str = "",
                from_email: Optional[str] = None, from_name: Optional[str] = None,
                reply_to: Optional[str] = None,
@@ -26,12 +57,14 @@ def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag:
     """Fire-and-forget email send. Never raises; logs on failure.
     Optionally override the default From address (e.g. wayne@byrd-co.com for personal assistant emails).
     `attachments` — list of {"Name": filename, "Content": base64_str, "ContentType": mime}.
-    Returns a summary {'ok': bool, 'error': str|None, 'sent': int, 'failed': int} — callers that need
-    immediate feedback (like the assistant email) can use it; background callers can ignore it."""
+    Returns a summary {'ok': bool, 'error': str|None, 'error_code': int|None, 'sent': int, 'failed': int}.
+    Callers that need immediate feedback (2FA codes, password reset) can inspect the result and use
+    `friendly_delivery_error()` to translate the code into a user-facing message."""
     client = _get_client()
     if not client:
         logger.warning("POSTMARK_TOKEN not set — skipping email: %s", subject)
-        return {"ok": False, "error": "Email service not configured (POSTMARK_TOKEN missing)", "sent": 0, "failed": 0}
+        return {"ok": False, "error": "Email service not configured (POSTMARK_TOKEN missing)",
+                "error_code": None, "sent": 0, "failed": 0}
     resolved_name = from_name or os.environ.get("POSTMARK_FROM_NAME", "Byrd & CO")
     resolved_email = from_email or os.environ.get("POSTMARK_FROM", "notifications@mail.byrd-co.com")
     from_hdr = f"{resolved_name} <{resolved_email}>"
@@ -39,6 +72,7 @@ def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag:
     sent = 0
     failed = 0
     last_err: Optional[str] = None
+    last_code: Optional[int] = None
     for r in recipients:
         try:
             kwargs = dict(
@@ -57,11 +91,17 @@ def send_email(to: str | Iterable[str], subject: str, html: str, text: str, tag:
             client.emails.send(**kwargs)
             sent += 1
             logger.info("Sent Postmark email tag=%s to=%s from=%s", tag, r, resolved_email)
+        except PostmarkClientError as e:
+            failed += 1
+            last_err = str(e)
+            last_code = getattr(e, "error_code", None)
+            logger.error("Postmark client error tag=%s to=%s code=%s err=%s", tag, r, last_code, e)
         except Exception as e:
             failed += 1
             last_err = str(e)
             logger.error("Postmark send failed tag=%s to=%s err=%s", tag, r, e)
-    return {"ok": failed == 0 and sent > 0, "error": last_err, "sent": sent, "failed": failed}
+    return {"ok": failed == 0 and sent > 0, "error": last_err, "error_code": last_code,
+            "sent": sent, "failed": failed}
 
 
 def broker_emails() -> list[str]:

@@ -481,3 +481,39 @@ Each scenario carries its own list of outside parties: **Title Company**, **Real
 - Wire the same read-only panel into the authenticated `LenderPortal` scenario list rows (backend already returns editable=false for lenders; UI not wired)
 - Optional: switch native `<select>` for contact type to a shadcn combobox with typeahead
 
+
+
+---
+
+## ✅ Postmark Suppression Handling — 2026-02-28
+
+**Status:** Shipped. 52/52 2FA pytest passes, 36/36 audit + contacts pytest passes, real-address deliver path 200s, suppressed-address path returns friendly 400.
+
+### Problem
+2FA email codes were sent via `BackgroundTasks` — the send happened AFTER the response was returned, so Postmark rejections (inactive recipient, hard bounce, spam complaint, rate limit) were invisible. A user with a suppressed inbox would see "code sent" and never receive anything.
+
+### Fix
+- **`send_email`** now captures `postmarker.exceptions.ClientError.error_code` and returns it in the result dict.
+- **`friendly_delivery_error(result)`** helper maps Postmark codes to plain-English messages:
+  - **300** — invalid email format
+  - **405** — recipient marked as spam by another user
+  - **406** — inactive recipient (bounced/unsubscribed previously)
+  - **412** — hard bounce
+  - **429** — Postmark rate limit
+- **`_send_email_verification_code`** in server.py now sends **synchronously** (via `asyncio.to_thread`) and:
+  - Raises **HTTP 400** (not 502 — Cloudflare/ingress swallows 5xx) with the friendly message if Postmark rejects
+  - Skips storing the code so the user can retry immediately without wasting a slot
+
+### Where it applies
+All three critical 2FA email endpoints:
+1. `POST /api/auth/2fa/email/setup` (enrollment)
+2. `POST /api/auth/2fa/send-email-code` (login-time fallback)
+3. `POST /api/auth/2fa/email/send-verification` (disable / regenerate)
+
+Frontend picks up the `.detail` string automatically — both `SecuritySettings.jsx` and `PortalLogin.jsx` already toast `err?.response?.data?.detail`, so no UI changes needed.
+
+### Deferred / follow-up
+- Apply the same treatment to `/public/password-reset/request` (currently silent-fires via background) — arguably deliberate for security (don't confirm account existence), so leaving as-is.
+- Rate-limit the send endpoints so a stuck-on-"resend" user doesn't burn through Postmark quota (60s cooldown per user).
+- Postmark suppression pre-check via API before send — nice-to-have, not necessary; the post-send check catches every case anyway.
+
