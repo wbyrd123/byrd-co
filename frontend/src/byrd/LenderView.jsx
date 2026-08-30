@@ -4,6 +4,7 @@ import { API_BASE, api } from "@/lib/api";
 import { LOGO_URL } from "@/byrd/data";
 import { fmtMoney, fmtPct, fmtNum } from "@/byrd/dealData";
 import DealContactsPanel from "@/byrd/DealContactsPanel";
+import NotesPanel from "@/byrd/NotesPanel";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -516,6 +517,14 @@ export default function LenderView() {
         {/* Deal Contacts (read-only, session-gated to match sibling lender-view endpoints) */}
         <DealContactsPanel
           fetchUrl={`/lender-view/${token}/deal-contacts?session_token=${encodeURIComponent(session)}`}
+          readOnly
+        />
+
+        {/* Deal Notes (read-only) */}
+        <NotesPanel
+          scenarioId="lender-view"
+          fetchUrl={`/lender-view/${token}/notes?session_token=${encodeURIComponent(session)}`}
+          title="Deal Notes"
           readOnly
         />
 

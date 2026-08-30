@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import AdaChatPanel from "@/byrd/AdaChatPanel";
 import TwoFAHeaderLink from "@/byrd/TwoFAHeaderLink";
 import DealContactsPanel from "@/byrd/DealContactsPanel";
+import NotesPanel, { DocNoteButton } from "@/byrd/NotesPanel";
 import {
   LogOut, Upload, FileText, Download, Phone, Mail, CheckCircle2, Circle, CircleAlert,
   ChevronDown, ChevronRight, PenLine, Trash2,
@@ -30,8 +31,22 @@ export default function ClientPortal() {
   const [uploading, setUploading] = useState(null);
   // Track which scenario cards are collapsed (default: open)
   const [collapsed, setCollapsed] = useState({});
+  // Per-doc notes: which are expanded + count map for badges
+  const [openDocNotes, setOpenDocNotes] = useState({});
+  const [docNoteCounts, setDocNoteCounts] = useState({});
+  const toggleDocNotes = (did) => setOpenDocNotes((m) => ({ ...m, [did]: !m[did] }));
+  const refreshNoteCounts = async (sid) => {
+    try {
+      const r = await api.get(`/scenarios/${sid}/notes/doc-counts`);
+      setDocNoteCounts((prev) => ({ ...prev, ...(r.data?.counts || {}) }));
+    } catch { /* silent — badges just won't update */ }
+  };
 
-  const load = () => api.get("/client/me").then((r) => setData(r.data));
+  const load = () => api.get("/client/me").then((r) => {
+    setData(r.data);
+    // Fetch note counts for each visible scenario for badge display
+    (r.data?.scenarios || []).forEach((s) => refreshNoteCounts(s.id));
+  });
 
   useEffect(() => { load(); }, []);
 
@@ -220,8 +235,9 @@ export default function ClientPortal() {
                     </div>
 
                     {!isCollapsed && (
-                      <div className="mt-6 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-6">
-                        <div className="space-y-6 min-w-0">
+                      <div className="mt-6 space-y-6">
+                        <DealContactsPanel scenarioId={s.id} />
+                        <NotesPanel scenarioId={s.id} title="Deal Notes" />
                         {total === 0 ? (
                           <div className="text-sm text-[#6B6558] py-6 text-center">
                             Nothing on this deal&apos;s checklist yet — your broker will add items shortly.
@@ -280,6 +296,13 @@ export default function ClientPortal() {
                                         </div>
                                         <div className="flex items-center gap-2 flex-wrap">
                                           <StatusChip status={d.status} />
+                                          <DocNoteButton
+                                            scenarioId={s.id}
+                                            docId={d.id}
+                                            count={docNoteCounts[d.id] || 0}
+                                            open={!!openDocNotes[d.id]}
+                                            onToggle={() => toggleDocNotes(d.id)}
+                                          />
                                           {isFeeAgreement && pendingSignToken && (
                                             <a
                                               href={`/fee-agreement/${pendingSignToken}`}
@@ -356,6 +379,16 @@ export default function ClientPortal() {
                                           ))}
                                         </ul>
                                       )}
+                                      {openDocNotes[d.id] && (
+                                        <div className="mt-3 border-t border-[#E4DFD1]/70 pt-3">
+                                          <NotesPanel
+                                            scenarioId={s.id}
+                                            docId={d.id}
+                                            title={`Notes on ${d.label}`}
+                                            compact
+                                          />
+                                        </div>
+                                      )}
                                     </div>
                                   );
                                 })}
@@ -364,10 +397,6 @@ export default function ClientPortal() {
                           ))
                         )}
                         <ScenarioTermSheetsSection scenarioId={s.id} />
-                        </div>
-                        <aside className="space-y-4">
-                          <DealContactsPanel scenarioId={s.id} compact />
-                        </aside>
                       </div>
                     )}
                   </section>

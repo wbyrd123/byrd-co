@@ -368,6 +368,13 @@ async def seed():
     except Exception as e:
         logger.warning("audit_log index setup failed: %s", e)
 
+    # Scenario notes — fast lookup by scenario + doc, sorted by creation time.
+    try:
+        await db.scenario_notes.create_index([("scenario_id", 1), ("doc_id", 1), ("created_at", 1)])
+        await db.scenario_notes.create_index([("author_id", 1)])
+    except Exception as e:
+        logger.warning("scenario_notes index setup failed: %s", e)
+
     # Nightly encrypted backup to Backblaze B2 (only if B2 creds are configured).
     if os.environ.get("B2_KEY_ID") and os.environ.get("B2_APPLICATION_KEY"):
         try:
@@ -2019,6 +2026,175 @@ async def lender_view_deal_contacts(token: str, session_token: Optional[str] = N
         raise HTTPException(status_code=404, detail="Deal not found")
     await _log_view(share["scenario_id"], share["id"], session, "view_deal_contacts")
     return {"contacts": [_sanitize_contact(c) for c in (scen.get("deal_contacts") or [])]}
+
+
+# ========== Deal Notes (per-scenario + per-document) ==========
+# Shared conversation trail visible to admin + owning client + invited lender for a scenario.
+# Two flavours: general (doc_id=null) and per-document. All parties can add; author (or admin)
+# can edit or delete their own. Also readable via token-gated LenderView.
+
+class NoteInput(BaseModel):
+    body: str = Field(min_length=1, max_length=4000)
+    doc_id: Optional[str] = None  # null / omitted = general scenario note
+
+
+def _sanitize_note(n: dict) -> dict:
+    return {
+        "id": n.get("id"),
+        "scenario_id": n.get("scenario_id"),
+        "doc_id": n.get("doc_id"),
+        "body": n.get("body") or "",
+        "author_role": n.get("author_role"),
+        "author_id": n.get("author_id"),
+        "author_name": n.get("author_name"),
+        "created_at": n.get("created_at"),
+        "updated_at": n.get("updated_at"),
+    }
+
+
+async def _user_can_access_scenario_notes(scen: dict, user: dict) -> bool:
+    role = user.get("role")
+    if role == "admin":
+        return True
+    if role == "client":
+        return _client_can_access_scenario(scen, user)
+    if role == "lender":
+        return await _lender_can_access_scenario(scen["id"], user)
+    return False
+
+
+@api.get("/scenarios/{sid}/notes")
+async def list_scenario_notes(sid: str, doc_id: Optional[str] = None,
+                              user=Depends(get_current_user)):
+    """List notes for a scenario. `doc_id=null` (default) returns general notes; passing
+    `doc_id=<id>` returns notes for that document. `doc_id=all` returns everything."""
+    scen = await _scenario_or_404(sid)
+    if not await _user_can_access_scenario_notes(scen, user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    q: dict = {"scenario_id": sid}
+    if doc_id == "all":
+        pass
+    elif doc_id is None or doc_id == "":
+        q["doc_id"] = None
+    else:
+        q["doc_id"] = doc_id
+    rows = await db.scenario_notes.find(q, {"_id": 0}).sort("created_at", 1).to_list(500)
+    return {
+        "editable": user.get("role") in ("admin", "client", "lender"),
+        "current_user_id": user["id"],
+        "notes": [_sanitize_note(n) for n in rows],
+    }
+
+
+@api.post("/scenarios/{sid}/notes")
+async def create_scenario_note(sid: str, body: NoteInput, request: Request,
+                               user=Depends(get_current_user)):
+    scen = await _scenario_or_404(sid)
+    if not await _user_can_access_scenario_notes(scen, user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if body.doc_id:
+        # Validate doc actually belongs to this scenario
+        exists = await db.client_docs.count_documents({"id": body.doc_id, "scenario_id": sid})
+        if not exists:
+            raise HTTPException(status_code=404, detail="Document not found on this scenario")
+    now = now_iso()
+    note = {
+        "id": str(uuid.uuid4()),
+        "scenario_id": sid,
+        "doc_id": body.doc_id or None,
+        "body": body.body.strip(),
+        "author_role": user.get("role"),
+        "author_id": user["id"],
+        "author_name": user.get("name") or user.get("email"),
+        "author_email": user.get("email"),
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.scenario_notes.insert_one(note)
+    await audit_log(db, event_type="scenario.update", request=request, user=user,
+                    resource_type="scenario", resource_id=sid,
+                    resource_name=scen.get("name"),
+                    metadata={"fields": ["notes"], "action": "note_added",
+                              "note_id": note["id"], "doc_id": body.doc_id or None})
+    return _sanitize_note(note)
+
+
+@api.patch("/scenarios/{sid}/notes/{nid}")
+async def update_scenario_note(sid: str, nid: str, body: NoteInput, request: Request,
+                               user=Depends(get_current_user)):
+    scen = await _scenario_or_404(sid)
+    if not await _user_can_access_scenario_notes(scen, user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    note = await db.scenario_notes.find_one({"id": nid, "scenario_id": sid})
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    # Only the author OR admin may edit
+    if user.get("role") != "admin" and note.get("author_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the author or an admin can edit this note")
+    now = now_iso()
+    await db.scenario_notes.update_one(
+        {"id": nid},
+        {"$set": {"body": body.body.strip(), "updated_at": now}},
+    )
+    updated = await db.scenario_notes.find_one({"id": nid}, {"_id": 0})
+    await audit_log(db, event_type="scenario.update", request=request, user=user,
+                    resource_type="scenario", resource_id=sid,
+                    resource_name=scen.get("name"),
+                    metadata={"fields": ["notes"], "action": "note_updated", "note_id": nid,
+                              "doc_id": note.get("doc_id")})
+    return _sanitize_note(updated)
+
+
+@api.delete("/scenarios/{sid}/notes/{nid}")
+async def delete_scenario_note(sid: str, nid: str, request: Request,
+                               user=Depends(get_current_user)):
+    scen = await _scenario_or_404(sid)
+    if not await _user_can_access_scenario_notes(scen, user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    note = await db.scenario_notes.find_one({"id": nid, "scenario_id": sid})
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if user.get("role") != "admin" and note.get("author_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the author or an admin can remove this note")
+    await db.scenario_notes.delete_one({"id": nid})
+    await audit_log(db, event_type="scenario.update", request=request, user=user,
+                    resource_type="scenario", resource_id=sid,
+                    resource_name=scen.get("name"),
+                    metadata={"fields": ["notes"], "action": "note_removed", "note_id": nid,
+                              "doc_id": note.get("doc_id")})
+    return {"ok": True}
+
+
+@api.get("/scenarios/{sid}/notes/doc-counts")
+async def scenario_doc_note_counts(sid: str, user=Depends(get_current_user)):
+    """Return a map of {doc_id: count} for badge indicators on the docs list."""
+    scen = await _scenario_or_404(sid)
+    if not await _user_can_access_scenario_notes(scen, user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    pipeline = [
+        {"$match": {"scenario_id": sid, "doc_id": {"$ne": None}}},
+        {"$group": {"_id": "$doc_id", "count": {"$sum": 1}}},
+    ]
+    counts = {}
+    async for row in db.scenario_notes.aggregate(pipeline):
+        counts[row["_id"]] = row["count"]
+    return {"counts": counts}
+
+
+# Token-gated LenderView — read-only view of general + per-doc notes.
+@api.get("/lender-view/{token}/notes")
+async def lender_view_notes(token: str, session_token: Optional[str] = None,
+                            doc_id: Optional[str] = None):
+    share, session = await _require_view_session(token, session_token)
+    q: dict = {"scenario_id": share["scenario_id"]}
+    if doc_id == "all":
+        pass
+    elif doc_id is None or doc_id == "":
+        q["doc_id"] = None
+    else:
+        q["doc_id"] = doc_id
+    rows = await db.scenario_notes.find(q, {"_id": 0}).sort("created_at", 1).to_list(500)
+    return {"notes": [_sanitize_note(n) for n in rows]}
 
 
 @api.post("/client/docs/{doc_id}/upload")

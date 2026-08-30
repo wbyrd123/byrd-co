@@ -16,6 +16,7 @@ import ScenarioAIFab from "@/byrd/ScenarioAIFab";
 import BulkUploadZone from "@/byrd/BulkUploadZone";
 import AdminFinancialsTab from "@/byrd/AdminFinancialsTab";
 import DealContactsPanel from "@/byrd/DealContactsPanel";
+import NotesPanel from "@/byrd/NotesPanel";
 
 const useDebouncedSave = (fn, delay = 800) => {
   const [timer, setTimer] = useState(null);
@@ -371,15 +372,18 @@ export default function AdminScenarioDetail() {
       )}
 
       {tab === "docs" && (
-        <DocsTab
-          scen={scen}
-          onAddDoc={addDocLine}
-          onUpdateDoc={updateDocLine}
-          onRemoveDoc={removeDocLine}
-          onToggleVisibility={toggleDocVisibility}
-          onCopyDocs={copyDocs}
-          onReload={load}
-        />
+        <div className="space-y-6">
+          <NotesPanel scenarioId={id} title="Deal Notes" />
+          <DocsTab
+            scen={scen}
+            onAddDoc={addDocLine}
+            onUpdateDoc={updateDocLine}
+            onRemoveDoc={removeDocLine}
+            onToggleVisibility={toggleDocVisibility}
+            onCopyDocs={copyDocs}
+            onReload={load}
+          />
+        </div>
       )}
 
       {tab === "contacts" && (

@@ -517,3 +517,34 @@ Frontend picks up the `.detail` string automatically — both `SecuritySettings.
 - Rate-limit the send endpoints so a stuck-on-"resend" user doesn't burn through Postmark quota (60s cooldown per user).
 - Postmark suppression pre-check via API before send — nice-to-have, not necessary; the post-send check catches every case anyway.
 
+
+
+---
+
+## ✅ Deal Notes + Layout Reshuffle — 2026-02-28
+
+**Status:** Shipped. Backend smoke-tested end-to-end (create/list/patch/delete), frontend E2E verified with client account (general notes post, doc-level notes expand inline).
+
+### What was built
+1. **Per-document notes** — every doc line now has an "Add Note" button with a badge showing note count. Click expands an inline notes panel beneath the row. Admin + client + logged-in lender can all post; author or admin can edit/delete.
+2. **General "Deal Notes"** — freeform shared conversation for the whole scenario, visible to admin/client/lender.
+3. **ClientPortal reshuffle**: Deal Contacts → General Notes → Documents list (top-down inside each expanded scenario). Removed the right-side sidebar layout.
+
+### Backend (`server.py` around line 1990)
+- `POST/GET/PATCH/DELETE /api/scenarios/{sid}/notes` — role-gated (any authorized party can read + create; author or admin can edit/delete).
+- `GET /api/scenarios/{sid}/notes?doc_id=<id>|all` — filter general vs per-doc vs everything.
+- `GET /api/scenarios/{sid}/notes/doc-counts` — `{doc_id: count}` map for badge indicators.
+- `GET /api/lender-view/{token}/notes?session_token=…` — read-only, session-gated.
+- New collection `scenario_notes`, indexed on `(scenario_id, doc_id, created_at)` and `(author_id)`.
+- Every mutation emits `scenario.update` audit with `metadata.action = note_added/updated/removed`.
+
+### Frontend
+- `/app/frontend/src/byrd/NotesPanel.jsx` — reusable component + `DocNoteButton` badge widget. Renders threaded notes with role-tinted author badges (Byrd & CO gold, Borrower amber, Lender purple).
+- Wired into: **ClientPortal** (general Deal Notes + per-doc buttons + inline expansion), **AdminScenarioDetail** Docs tab (Deal Notes above the docs table), **LenderView** (read-only, session-gated, above Documents section).
+
+### Deferred (session ended)
+- **Testing agent regression pass** — small feature, backend smoke-verified but no `test_notes.py` file yet. Next session: `pytest tests/test_notes.py` should mirror the deal-contacts test style (CRUD, RBAC, admin-override edit/delete, token-gated read).
+- **Per-doc note badges on Admin Docs tab** — currently only ClientPortal shows count badges. Admin sees notes when they expand a doc, but no at-a-glance count.
+- **LenderView note-writing** — currently read-only in the token view. Backend could accept anonymous writes using `viewer_name` from the session, but requires product decision on whether prospects should be able to post.
+- **Real-time refresh** — notes fetch on load only. Consider polling or SSE if lenders/clients often work simultaneously.
+
