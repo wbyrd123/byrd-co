@@ -401,3 +401,43 @@ Complete self-registration + credit-box + term-sheet marketplace. New surfaces:
 - **Rate limit** on email-code send endpoints (60s cooldown / N per window)
 - **Extract 2FA to `backend/routes/two_factor.py`** — 2FA block is ~330 lines, self-contained, good candidate for the broader `server.py` refactor
 
+
+
+---
+
+## ✅ Audit Log — Chain-of-Custody Trail — 2026-02-28
+
+**Status:** Shipped. 23/24 pytest passed + 1 skipped (side-effect test not needed after CSV cap fix). Frontend E2E verified: page, filters, pagination, detail modal (portal-rendered), CSV export.
+
+### What it captures
+- **Auth**: `auth.login.success`, `auth.login.password_ok` (2FA pending), `auth.login.failure`, `auth.2fa.challenge.success/failure`, `auth.2fa.enrolled`, `auth.2fa.disabled`, `auth.2fa.reset` (admin action), `auth.password_reset.request/complete`, `auth.invite.accepted`
+- **Documents**: `document.view`, `document.download` (Client-Disposition attachment via `?download=1`), `document.upload`, `document.delete`
+- **Term sheets**: `term_sheet.submit`, `term_sheet.status_change`, `term_sheet.delete`, `term_sheet.view`
+- **Scenarios**: `scenario.create`, `scenario.update`, `scenario.delete`
+- **Admin**: `admin.invite.sent`
+
+### Data captured per event
+`{ timestamp, event_type, user_id, user_email, user_name, user_role, ip, user_agent, resource_type, resource_id, resource_name, metadata, result }` — retention **indefinite**, no TTL.
+
+### Backend
+- `/app/backend/audit_service.py` — `EVENT_TYPES` catalog (23 entries), `log_event` (fire-and-forget try/except, never breaks request path), `query_events` (regex-escaped `q`, `hard_cap` param for CSV export), `export_csv`, `get_client_ip` (X-Forwarded-For first hop, then X-Real-IP, then `request.client.host`).
+- `/app/backend/server.py` — every endpoint listed above emits its audit event. `_parse_iso_ts(end_of_day=True)` so date filter `to=YYYY-MM-DD` includes today's events.
+- `GET /admin/audit-log` (filters + pagination), `GET /admin/audit-log/event-types`, `GET /admin/audit-log/export.csv` (up to 50k rows).
+- Indexes: `(timestamp DESC)`, `(event_type, timestamp)`, `(user_id, timestamp)`, `(resource_id, timestamp)`, `(ip, timestamp)`.
+
+### Frontend
+- `/app/frontend/src/byrd/AdminAuditLog.jsx` — filterable table with pagination, CSV export button, event-family color badges, `createPortal(document.body)` detail modal.
+- Route: `/admin/audit-log` — role=admin only.
+- Sidebar entry: `admin-nav-audit-log` between Security and Guide.
+
+### Bugs found in test iteration 15 (all fixed)
+- `document.delete` was losing filename — `fm.get("id")` → `fm.get("file_id")` at server.py:1831 + 3095
+- CSV export silently truncated at 500 rows — added `hard_cap=50000` argument to `query_events`, exported via that path
+- Detail modal off-screen due to fade-up transform ancestor — moved to `createPortal(document.body)`
+- Lender term-sheet document upload wasn't audited — instrumented
+
+### Deferred
+- Refactor `server.py` (~10.6k lines) into `backend/routes/` — audit-log endpoints good candidate
+- Optional: swap native date pickers for shadcn calendar to match rest of admin
+- Optional: fire audit inserts as BackgroundTasks to remove one Mongo round-trip from hot paths (login, file view)
+

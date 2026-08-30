@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { LOGO_URL } from "@/byrd/data";
 import {
   LayoutDashboard, Users, Inbox, Sparkles, LogOut, FileText, Building2, BookOpen, MessageSquareQuote,
-  Bot, Contact, ShieldCheck,
+  Bot, Contact, ShieldCheck, ScrollText,
 } from "lucide-react";
 
 const NAV = [
@@ -17,6 +17,7 @@ const NAV = [
   { to: "/admin/quotes", label: "Quote Inbox", icon: Inbox, testId: "admin-nav-quotes" },
   { to: "/admin/testimonials", label: "Testimonials", icon: MessageSquareQuote, testId: "admin-nav-testimonials" },
   { to: "/admin/security", label: "Security", icon: ShieldCheck, testId: "admin-nav-security" },
+  { to: "/admin/audit-log", label: "Audit Log", icon: ScrollText, testId: "admin-nav-audit-log" },
   { to: "/admin/guide", label: "Guide", icon: BookOpen, testId: "admin-nav-guide" },
 ];
 

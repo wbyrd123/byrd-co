@@ -23,6 +23,7 @@ import AdminAssistant from "@/byrd/AdminAssistant";
 import AdminContacts from "@/byrd/AdminContacts";
 import AdminLoanQuoteStudio from "@/byrd/AdminLoanQuoteStudio";
 import SecuritySettings from "@/byrd/SecuritySettings";
+import AdminAuditLog from "@/byrd/AdminAuditLog";
 import PortalSecurityPage from "@/byrd/PortalSecurityPage";
 import Unsubscribe from "@/byrd/Unsubscribe";
 import FeeAgreementSign from "@/byrd/FeeAgreementSign";
@@ -153,6 +154,7 @@ function App() {
               <Route path="contacts" element={<AdminContacts />} />
               <Route path="marketing/loan-quote" element={<AdminLoanQuoteStudio />} />
               <Route path="security" element={<SecuritySettings />} />
+              <Route path="audit-log" element={<AdminAuditLog />} />
               <Route path="guide" element={<AdminGuide />} />
             </Route>
 

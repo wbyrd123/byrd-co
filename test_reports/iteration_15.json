@@ -1,0 +1,63 @@
+{
+  "summary": "Executed full backend + frontend testing of the new Audit Log feature. Wrote /app/backend/tests/test_audit_log.py (24 tests, single class, cleans up after itself): 21 passed, 2 failed, 1 skipped (the skipped case was re-proven with a direct probe). Verified event emission for login success/failure, the new auth.login.password_ok -> 2FA -> auth.login.success split, 2FA challenge success/failure, client + admin document upload/view/download/delete, scenario create/update/delete, term-sheet submit/status_change/delete/view, admin invites (create-only + send), password-reset request success/failure, admin 2FA reset, RBAC (401/403/200), all query filters incl. regex-escaped q, date_to end-of-day inclusivity, pagination (60 dummy events, 25/page x3), event-types catalog (23 incl. password_ok), CSV export headers/filename/content-type/limit, X-Forwarded-For first-hop IP extraction, and log_event error swallowing. Frontend /admin/audit-log verified end-to-end with Playwright (load, sidebar link, dropdown, filters, clear, special-char search, date filter, detail modal content, CSV download, pagination show/hide + next/prev, empty state, client RBAC redirect). 3 real defects found: document.delete audit rows lose the filename, CSV export is silently truncated at 500 rows, and the Details modal renders off-screen because of a stale CSS transform on the admin layout wrapper.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "DELETE /api/client/docs/{doc_id}/files/{file_id} and DELETE /api/admin/scenarios/{sid}/docs/{doc_id}/files/{file_id}",
+        "issue": "document.delete audit events always have resource_name=null. server.py:1831 and 3095 look up the file meta with `fm.get(\"id\") == file_id`, but _append_file_to_doc (server.py:2727) stores the key as `file_id`. Chain-of-custody therefore never records WHICH file was deleted (only metadata.file_id). Fix: `fm.get(\"file_id\") == file_id`. Reproduced by tests 06 and 07 (both FAILED).",
+        "priority": "HIGH"
+      },
+      {
+        "endpoint": "GET /api/admin/audit-log/export.csv",
+        "issue": "Export is silently capped at 500 rows regardless of `limit` (documented default 10000, hard max 50000). audit_service.query_events clamps page_size = max(1, min(page_size, 500)), and export passes limit as page_size. Proven: inserted 600 matching events, requested limit=5000 -> CSV returned exactly 500 data rows with no warning. A compliance export of a busy log will silently omit data. Fix: give query_events a `max_page_size`/`hard_cap` parameter (or iterate/cursor for export).",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {"endpoint": "GET /api/admin/audit-log", "issue": "page_size is silently clamped to 500 (request page_size=600 -> page_size echoed 500). Acceptable, but undocumented in the response; consider returning the applied cap explicitly."},
+      {"endpoint": "POST /api/lender/scenarios/{sid}/term-sheet/upload", "issue": "Lender term-sheet document upload writes to term_sheet_files but emits NO audit event, while every other upload path does. Spec says record every upload."},
+      {"endpoint": "POST /api/admin/users/{uid}/2fa/reset", "issue": "No side-effect issue with audit, but note the endpoint always resets and always logs even when the target had 2FA disabled (no-op events pollute the log). Low priority."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "AdminAuditLog / EventDetailModal (AdminAuditLog.jsx:300) + AdminLayout content wrapper",
+        "issue": "Details modal is invisible to the user. The modal uses `fixed inset-0`, but its ancestor `div.max-w-6xl mx-auto p-6 md:p-10 fade-up` has a lingering `transform: matrix(1,0,0,1,0,0)` from the fade-up animation, which makes it the containing block for position:fixed. Measured: overlay box = {x:514, y:24, w:1152, h:3369} and modal card box = {x:754, y:1467, w:672, h:503} at a 1080px viewport -> clicking 'Details' just dims the content column and the dialog sits ~1500px below the fold. Side effects: backdrop does not cover the sidebar, backdrop click over the sidebar does nothing, and while open the overlay intercepts pointer events over Export CSV / Apply / pagination so the page appears frozen. Fix: render the modal through a React portal to document.body (or set transform:none / animation-fill-mode so .fade-up leaves no transform).",
+        "selector": "[data-testid=\"audit-detail-modal\"]",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/admin/audit-log filters", "issues": ["From/To use native browser date inputs (type=\"date\", mm/dd/yyyy) instead of the shadcn calendar used elsewhere in the product", "Filter field labels are 10px uppercase #6B6558 on #FBF8F1 — legible but at the low end of contrast/size for a compliance screen"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_audit_log.py",
+    "/app/test_reports/pytest/iteration15_audit_log.xml"
+  ],
+  "action_items": [
+    "Fix file-meta key lookup (`fm.get(\"file_id\")`) at server.py:1831 and server.py:3095 so document.delete records the filename",
+    "Remove the 500-row clamp for CSV export (add a hard_cap/max_page_size arg to audit_service.query_events) so limit up to 50000 actually works",
+    "Portal the audit-log Details modal to document.body (or kill the .fade-up transform) so the dialog is viewport-centered and the backdrop covers the sidebar",
+    "Add a document.upload audit event to POST /api/lender/scenarios/{sid}/term-sheet/upload",
+    "Optional: swap the From/To native date inputs for the shadcn calendar component"
+  ],
+  "critical_code_review_comments": [
+    "audit_service.query_events is reused for both paginated listing and CSV export but hard-clamps page_size to 500 — export correctness depends on a UI-oriented guard. Separate the two code paths.",
+    "server.py is 10.6k lines; the audit-log admin endpoints (~3272-3355) and the instrumented handlers would be easier to maintain in a router module.",
+    "Deleted-file audit metadata relies on an ad-hoc `next(...)` lookup duplicated in two places with a wrong key — extract a `_find_file_meta(doc, file_id)` helper to avoid the drift that caused this bug.",
+    "log_event is awaited inline on hot paths (login, file download). It swallows errors correctly, but consider BackgroundTasks/fire-and-forget to avoid adding a Mongo round-trip to every document view."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_audit_log.py (new)"
+  ],
+  "success_rate": {"backend": "88% (21/24 pytest cases; 2 failed on document.delete resource_name, 1 skipped and separately proven as the 500-row export cap)", "frontend": "92% (all flows pass except the off-screen Details modal / backdrop scope)"},
+  "seed_data_creation": "Temporary only, all removed: 2FA user test_2fa_email_user@byrd-co.com (seed_email_2fa_user.py seed/clean), scenario TEST_audit_scenario (+ cascaded docs/files), invite user test_audit_invite_*@example.com, one lender term sheet + TEST_term_sheet.txt, 60 dummy login-failure audit rows for pagination and 60 UI-probe audit rows (both deleted). Verified afterwards: no TEST_ audit artifacts remain (the pre-existing TEST_metrics_calc scenario is from an earlier iteration, untouched). NOTE side effect: test_11 called the admin 2FA-reset endpoint on sample@example.com, so that account now has totp_enabled=false / two_fa_method=null.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "Used /app/memory/test_credentials.md as-is: wayne@byrd-co.com/byrdco2026 (admin), sample@example.com/sample123 (client), contact@testfrost.example/testlender123 (lender). All valid.",
+  "context_for_next_testing_agent": "Re-run `pytest /app/backend/tests/test_audit_log.py` — tests 06 and 07 are the only failures and assert exactly the document.delete resource_name bug; test_19 skips unless >500 audit rows exist (to reproduce the export cap, bulk-insert 600 rows into db.audit_log with a marker email, request export.csv?limit=5000&q=<marker>, expect 500 rows today). audit_log had 81 rows after this run. For the modal bug, measure `page.locator('[data-testid=\"audit-detail-modal\"]').bounding_box()` — y must be < viewport height. RBAC on the frontend correctly bounces clients to /portal.",
+  "rca_of_the_issue": "1) document.delete filename loss: file meta dicts are created with the key `file_id` in _append_file_to_doc, but both delete handlers search with `fm.get('id')`, so file_meta is always None and resource_name is null. 2) CSV truncation: export.csv forwards its `limit` as query_events' page_size, which is clamped to 500 by `page_size = max(1, min(page_size, 500))` in audit_service.query_events. 3) Off-screen modal: the .fade-up animation leaves a computed `transform: matrix(1,0,0,1,0,0)` on the admin layout content wrapper, creating a containing block for the modal's `position: fixed`, so `inset-0` resolves to the 3369px-tall content column instead of the viewport and the centered card lands ~1467px down the page."
+}

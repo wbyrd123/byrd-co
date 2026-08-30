@@ -42,6 +42,8 @@ from email_service import (
     tmpl_term_sheet_submitted, tmpl_term_sheet_status_change,
     tmpl_password_reset, tmpl_2fa_code,
 )
+import audit_service
+from audit_service import log_event as audit_log
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -354,6 +356,17 @@ async def seed():
         await db.two_fa_attempts.create_index("attempted_at", expireAfterSeconds=1800)
     except Exception as e:
         logger.warning("2FA index setup failed: %s", e)
+
+    # Audit log indexes — no TTL (compliance retention). Timestamp DESC is the
+    # dominant sort; add secondary indexes for common filters.
+    try:
+        await db.audit_log.create_index([("timestamp", -1)])
+        await db.audit_log.create_index([("event_type", 1), ("timestamp", -1)])
+        await db.audit_log.create_index([("user_id", 1), ("timestamp", -1)])
+        await db.audit_log.create_index([("resource_id", 1), ("timestamp", -1)])
+        await db.audit_log.create_index([("ip", 1), ("timestamp", -1)])
+    except Exception as e:
+        logger.warning("audit_log index setup failed: %s", e)
 
     # Nightly encrypted backup to Backblaze B2 (only if B2 creds are configured).
     if os.environ.get("B2_KEY_ID") and os.environ.get("B2_APPLICATION_KEY"):
@@ -1040,19 +1053,28 @@ async def _record_login_attempt(email: str, success: bool):
 
 
 @api.post("/auth/login", response_model=AuthResponse)
-async def login(body: LoginInput):
+async def login(body: LoginInput, request: Request):
     email = body.email.lower()
     locked = await _login_lockout_status(email)
     if locked:
+        await audit_log(db, event_type="auth.login.failure", request=request,
+                        actor_email=email, metadata={"reason": "locked"}, result="failure")
         raise HTTPException(status_code=429, detail=locked)
     user = await db.users.find_one({"email": email})
     if not user or not check_pw(body.password, user["password_hash"]):
         await _record_login_attempt(email, success=False)
+        await audit_log(db, event_type="auth.login.failure", request=request,
+                        actor_email=email,
+                        metadata={"reason": "bad_credentials"}, result="failure")
         raise HTTPException(status_code=401, detail="Invalid credentials")
     await _record_login_attempt(email, success=True)
     # If 2FA is enabled, require a second factor before issuing the full JWT.
     if user.get("totp_enabled"):
         method = user.get("two_fa_method") or "totp"
+        # Distinct event — password succeeded but 2FA is still pending. The real
+        # `auth.login.success` only fires after /auth/2fa/challenge passes.
+        await audit_log(db, event_type="auth.login.password_ok", request=request, user=user,
+                        metadata={"method": method})
         return {
             "requires_2fa": True,
             "challenge_token": make_2fa_challenge_token(user["id"]),
@@ -1060,6 +1082,8 @@ async def login(body: LoginInput):
             "email_available": True,
             "primary_method": method,
         }
+    await audit_log(db, event_type="auth.login.success", request=request, user=user,
+                    metadata={"stage": "password_only"})
     return {"token": make_token(user["id"]), "user": sanitize_user(user)}
 
 
@@ -1105,7 +1129,7 @@ async def two_fa_setup(user=Depends(get_current_user)):
 
 
 @api.post("/auth/2fa/verify-setup")
-async def two_fa_verify_setup(body: TwoFAVerifySetup, user=Depends(get_current_user)):
+async def two_fa_verify_setup(body: TwoFAVerifySetup, request: Request, user=Depends(get_current_user)):
     """Confirm the TOTP secret. On success: enable 2FA, generate & return 10 backup codes."""
     full = await db.users.find_one({"id": user["id"]})
     pending = (full or {}).get("pending_totp_secret")
@@ -1125,6 +1149,8 @@ async def two_fa_verify_setup(body: TwoFAVerifySetup, user=Depends(get_current_u
         },
         "$unset": {"pending_totp_secret": ""},
     })
+    await audit_log(db, event_type="auth.2fa.enrolled", request=request, user=user,
+                    metadata={"method": "totp"})
     return {
         "ok": True,
         "backup_codes": codes,
@@ -1176,7 +1202,7 @@ async def two_fa_email_setup(background: BackgroundTasks, user=Depends(get_curre
 
 
 @api.post("/auth/2fa/email/verify-setup")
-async def two_fa_email_verify_setup(body: TwoFAVerifySetup, user=Depends(get_current_user)):
+async def two_fa_email_verify_setup(body: TwoFAVerifySetup, request: Request, user=Depends(get_current_user)):
     """Confirm email-only 2FA enrollment. On success, enables 2FA (method='email') + 10 backup codes."""
     full = await db.users.find_one({"id": user["id"]})
     if full and full.get("totp_enabled"):
@@ -1195,6 +1221,8 @@ async def two_fa_email_verify_setup(body: TwoFAVerifySetup, user=Depends(get_cur
         },
         "$unset": {"pending_totp_secret": "", "totp_secret": ""},
     })
+    await audit_log(db, event_type="auth.2fa.enrolled", request=request, user=user,
+                    metadata={"method": "email"})
     return {
         "ok": True,
         "backup_codes": codes,
@@ -1215,7 +1243,7 @@ async def two_fa_email_send_verification(background: BackgroundTasks, user=Depen
 
 
 @api.post("/auth/2fa/disable")
-async def two_fa_disable(body: TwoFADisableBody, user=Depends(get_current_user)):
+async def two_fa_disable(body: TwoFADisableBody, request: Request, user=Depends(get_current_user)):
     """Disable 2FA. Requires current password AND ONE of:
     - Valid TOTP code (for TOTP users)
     - Valid backup code (any user)
@@ -1238,6 +1266,7 @@ async def two_fa_disable(body: TwoFADisableBody, user=Depends(get_current_user))
         "$set": {"totp_enabled": False, "backup_codes": [], "two_fa_method": None},
         "$unset": {"totp_secret": "", "pending_totp_secret": "", "totp_enrolled_at": ""},
     })
+    await audit_log(db, event_type="auth.2fa.disabled", request=request, user=user)
     return {"ok": True}
 
 
@@ -1293,7 +1322,7 @@ async def two_fa_send_email_code(body: TwoFAEmailRequestBody, background: Backgr
 
 
 @api.post("/auth/2fa/challenge", response_model=AuthResponse)
-async def two_fa_challenge(body: TwoFAChallengeBody):
+async def two_fa_challenge(body: TwoFAChallengeBody, request: Request):
     """Verify the second factor and issue a full JWT."""
     user_id = verify_2fa_challenge_token(body.challenge_token)
     lock = await _two_fa_lockout(user_id)
@@ -1312,14 +1341,22 @@ async def two_fa_challenge(body: TwoFAChallengeBody):
             ok = True
     await _record_2fa_attempt(user_id, success=ok)
     if not ok:
+        await audit_log(db, event_type="auth.2fa.challenge.failure", request=request, user=user,
+                        metadata={"method": body.method}, result="failure")
         raise HTTPException(status_code=400, detail="Verification code is invalid or expired.")
+    await audit_log(db, event_type="auth.2fa.challenge.success", request=request, user=user,
+                    metadata={"method": body.method})
+    # Also emit the final login success — this is the moment a fully-authenticated
+    # JWT is issued for a 2FA-enabled user.
+    await audit_log(db, event_type="auth.login.success", request=request, user=user,
+                    metadata={"factor": body.method})
     return {"token": make_token(user["id"]), "user": sanitize_user(user)}
 
 
 # ---- Admin: reset another user's 2FA (in case they lose their device) ----
 
 @api.post("/admin/users/{uid}/2fa/reset")
-async def admin_reset_two_fa(uid: str, admin=Depends(require_admin)):
+async def admin_reset_two_fa(uid: str, request: Request, admin=Depends(require_admin)):
     """Disable 2FA on a user's account. Used when a user loses access to their
     authenticator app AND their backup codes. Post-reset the user should re-enroll."""
     target = await db.users.find_one({"id": uid})
@@ -1329,12 +1366,15 @@ async def admin_reset_two_fa(uid: str, admin=Depends(require_admin)):
         "$set": {"totp_enabled": False, "backup_codes": [], "two_fa_method": None},
         "$unset": {"totp_secret": "", "pending_totp_secret": "", "totp_enrolled_at": ""},
     })
+    await audit_log(db, event_type="auth.2fa.reset", request=request, user=admin,
+                    resource_type="user", resource_id=uid,
+                    resource_name=target.get("email"), metadata={"target_email": target.get("email")})
     return {"ok": True, "user_id": uid}
 
 
 # ================ Invites ================
 @api.post("/admin/invites")
-async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=Depends(require_admin)):
+async def create_invite(body: InviteCreate, background: BackgroundTasks, request: Request, admin=Depends(require_admin)):
     # If user already exists, error out; otherwise create pending user + invite token
     existing = await db.users.find_one({"email": body.email.lower()})
     if existing:
@@ -1362,6 +1402,11 @@ async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=D
         "created_at": now,
         "used_at": None,
     })
+    await audit_log(db, event_type="admin.invite.sent", request=request, user=admin,
+                    resource_type="user", resource_id=user_id,
+                    resource_name=body.email.lower(),
+                    metadata={"invitee_name": body.name, "invitee_company": body.company,
+                              "email_sent": False, "reason": "create_only"})
     # Document checklists now live on each SCENARIO (not the client). Nothing to seed here.
     # NOTE: No email is sent automatically. Broker triggers via /admin/users/{uid}/send-invite
     # once documents/fee agreement are ready.
@@ -1376,7 +1421,7 @@ async def create_invite(body: InviteCreate, background: BackgroundTasks, admin=D
 
 
 @api.post("/admin/users/{uid}/send-invite")
-async def send_invite_email(uid: str, background: BackgroundTasks, admin=Depends(require_admin)):
+async def send_invite_email(uid: str, background: BackgroundTasks, request: Request, admin=Depends(require_admin)):
     """Manually trigger (or resend) the portal invite email for a client."""
     user = await db.users.find_one({"id": uid}, {"_id": 0})
     if not user:
@@ -1403,6 +1448,11 @@ async def send_invite_email(uid: str, background: BackgroundTasks, admin=Depends
     invite_url = f"{public_base_url()}/portal/invite/{token}" if public_base_url() else f"/portal/invite/{token}"
     subj, html, text = tmpl_invite({"name": user.get("name"), "email": user.get("email")}, invite_url)
     background.add_task(send_email, user["email"], subj, html, text, "invite")
+    await audit_log(db, event_type="admin.invite.sent", request=request, user=admin,
+                    resource_type="user", resource_id=uid,
+                    resource_name=user.get("email"),
+                    metadata={"invitee_name": user.get("name"), "email_sent": True,
+                              "reason": "resend" if inv else "first_send"})
     return {"ok": True, "invite_url_path": f"/portal/invite/{token}", "sent_to": user["email"]}
 
 
@@ -1424,7 +1474,7 @@ async def get_invite(token: str):
 
 
 @api.post("/invites/{token}/accept", response_model=AuthResponse)
-async def accept_invite(token: str, body: InviteAccept):
+async def accept_invite(token: str, body: InviteAccept, request: Request):
     inv = await db.invites.find_one({"token": token})
     if not inv:
         raise HTTPException(status_code=404, detail="Invite not found")
@@ -1442,6 +1492,9 @@ async def accept_invite(token: str, body: InviteAccept):
         }},
     )
     await db.invites.update_one({"id": inv["id"]}, {"$set": {"used_at": now_iso()}})
+    await audit_log(db, event_type="auth.invite.accepted", request=request, user=user,
+                    resource_type="user", resource_id=user["id"],
+                    resource_name=user.get("email"))
     return {"token": make_token(user["id"]), "user": sanitize_user({**user, "role": "client"})}
 
 
@@ -1558,7 +1611,7 @@ class PasswordResetConfirm(BaseModel):
 
 
 @api.post("/public/password-reset/request")
-async def password_reset_request(body: PasswordResetRequest, background: BackgroundTasks):
+async def password_reset_request(body: PasswordResetRequest, background: BackgroundTasks, request: Request):
     """Send a password-reset email to any user (admin/client/lender). Always returns 200 to
     avoid disclosing whether an email is registered."""
     email = body.email.lower()
@@ -1580,6 +1633,11 @@ async def password_reset_request(body: PasswordResetRequest, background: Backgro
                      if public_base_url() else f"/portal/reset-password/{token}")
         subj, html, text = tmpl_password_reset(user.get("name") or "there", reset_url)
         background.add_task(send_email, email, subj, html, text, "password_reset")
+        await audit_log(db, event_type="auth.password_reset.request", request=request, user=user)
+    else:
+        await audit_log(db, event_type="auth.password_reset.request", request=request,
+                        actor_email=email, result="failure",
+                        metadata={"reason": "no_active_account"})
     # Uniform response
     return {"ok": True}
 
@@ -1609,7 +1667,7 @@ async def password_reset_check(token: str):
 
 
 @api.post("/public/password-reset/{token}", response_model=AuthResponse)
-async def password_reset_confirm(token: str, body: PasswordResetConfirm):
+async def password_reset_confirm(token: str, body: PasswordResetConfirm, request: Request):
     tok = await db.password_reset_tokens.find_one({"token": token})
     if not tok:
         raise HTTPException(status_code=404, detail="Reset link invalid")
@@ -1635,6 +1693,7 @@ async def password_reset_confirm(token: str, body: PasswordResetConfirm):
         {"user_id": user["id"], "used_at": None, "id": {"$ne": tok["id"]}},
         {"$set": {"used_at": now_iso()}},
     )
+    await audit_log(db, event_type="auth.password_reset.complete", request=request, user=user)
     return {"token": make_token(user["id"]), "user": sanitize_user(user)}
 
 
@@ -1745,7 +1804,7 @@ async def _resolve_client_doc_for_user(doc_id: str, user: dict) -> dict:
 
 
 @api.post("/client/docs/{doc_id}/upload")
-async def client_upload(doc_id: str, body: DocUploadInput, user=Depends(require_client)):
+async def client_upload(doc_id: str, body: DocUploadInput, request: Request, user=Depends(require_client)):
     """Append a new file to a doc line. A single line can hold many files
     (e.g., 3 years of tax returns, multi-page entity docs). Marks status='uploaded'.
     Works for both the primary client and any linked sponsor on the scenario."""
@@ -1754,23 +1813,35 @@ async def client_upload(doc_id: str, body: DocUploadInput, user=Depends(require_
         raise HTTPException(status_code=400, detail="This line is managed by Byrd & CO and can't be uploaded to directly.")
     meta = await _append_file_to_doc(d, body.data_b64, body.filename, body.content_type,
                                      uploaded_by="client")
+    await audit_log(db, event_type="document.upload", request=request, user=user,
+                    resource_type="client_doc", resource_id=doc_id,
+                    resource_name=body.filename,
+                    metadata={"file_id": meta["file_id"], "doc_label": d.get("label"),
+                              "scenario_id": d.get("scenario_id"), "size_b64": len(body.data_b64 or "")})
     return {"ok": True, "file_id": meta["file_id"]}
 
 
 @api.delete("/client/docs/{doc_id}/files/{file_id}")
-async def client_delete_doc_file(doc_id: str, file_id: str, user=Depends(require_client)):
+async def client_delete_doc_file(doc_id: str, file_id: str, request: Request, user=Depends(require_client)):
     """Borrower removes one specific file from a doc line without wiping the whole line."""
     d = await _resolve_client_doc_for_user(doc_id, user)
     if d.get("system"):
         raise HTTPException(status_code=400, detail="This line is managed by Byrd & CO.")
+    # Grab filename for the audit log before deletion
+    file_meta = next((fm for fm in (d.get("files") or []) if fm.get("file_id") == file_id), None)
     updated = await _remove_file_from_doc(d, file_id)
     if updated:
         updated.pop("_id", None)
+    await audit_log(db, event_type="document.delete", request=request, user=user,
+                    resource_type="client_doc", resource_id=doc_id,
+                    resource_name=(file_meta or {}).get("filename"),
+                    metadata={"file_id": file_id, "doc_label": d.get("label"),
+                              "scenario_id": d.get("scenario_id")})
     return {"ok": True, "doc": updated}
 
 
 @api.get("/files/{file_id}")
-async def get_file(file_id: str, user=Depends(get_current_user)):
+async def get_file(file_id: str, request: Request, download: int = 0, user=Depends(get_current_user)):
     f = await db.client_files.find_one({"id": file_id})
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
@@ -1778,10 +1849,21 @@ async def get_file(file_id: str, user=Depends(get_current_user)):
     if user.get("role") != "admin" and f.get("client_id") != user["id"]:
         raise HTTPException(status_code=403, detail="Forbidden")
     raw = base64.b64decode(f["data_b64"])
+    is_download = bool(download)
+    await audit_log(
+        db,
+        event_type=("document.download" if is_download else "document.view"),
+        request=request, user=user,
+        resource_type="client_file", resource_id=file_id,
+        resource_name=f.get("filename"),
+        metadata={"scenario_id": f.get("scenario_id"), "doc_id": f.get("doc_id"),
+                  "content_type": f.get("content_type"), "size_bytes": len(raw)},
+    )
+    disposition = f'{"attachment" if is_download else "inline"}; filename="{f["filename"]}"'
     return Response(
         content=raw,
         media_type=f.get("content_type", "application/octet-stream"),
-        headers={"Content-Disposition": f'inline; filename="{f["filename"]}"'},
+        headers={"Content-Disposition": disposition},
     )
 
 
@@ -2731,7 +2813,7 @@ async def list_doc_templates(admin=Depends(require_admin)):
 
 
 @api.post("/admin/scenarios")
-async def create_scenario(body: ScenarioCreate, admin=Depends(require_admin)):
+async def create_scenario(body: ScenarioCreate, request: Request, admin=Depends(require_admin)):
     if body.client_id:
         client = await db.users.find_one({"id": body.client_id, "role": "client"})
         if not client:
@@ -2805,6 +2887,10 @@ async def create_scenario(body: ScenarioCreate, admin=Depends(require_admin)):
             "created_at": now,
             "updated_at": now,
         })
+    await audit_log(db, event_type="scenario.create", request=request, user=admin,
+                    resource_type="scenario", resource_id=sid,
+                    resource_name=doc.get("name"),
+                    metadata={"client_id": body.client_id, "template": template_key})
     return _clean_scenario(doc)
 
 
@@ -2844,7 +2930,7 @@ async def get_scenario(sid: str, admin=Depends(require_admin)):
 
 
 @api.patch("/admin/scenarios/{sid}")
-async def update_scenario(sid: str, body: ScenarioUpdate, admin=Depends(require_admin)):
+async def update_scenario(sid: str, body: ScenarioUpdate, request: Request, admin=Depends(require_admin)):
     update = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if not update:
         raise HTTPException(status_code=400, detail="Nothing to update")
@@ -2873,11 +2959,16 @@ async def update_scenario(sid: str, body: ScenarioUpdate, admin=Depends(require_
         raise HTTPException(status_code=404, detail="Not found")
     d = await db.scenarios.find_one({"id": sid}, {"_id": 0})
     d["metrics"] = compute_scenario_metrics(d)
+    await audit_log(db, event_type="scenario.update", request=request, user=admin,
+                    resource_type="scenario", resource_id=sid,
+                    resource_name=d.get("name"),
+                    metadata={"fields": sorted([k for k in update.keys() if k != "updated_at"])})
     return d
 
 
 @api.delete("/admin/scenarios/{sid}")
-async def delete_scenario(sid: str, admin=Depends(require_admin)):
+async def delete_scenario(sid: str, request: Request, admin=Depends(require_admin)):
+    scen_before = await db.scenarios.find_one({"id": sid}, {"_id": 0, "name": 1, "client_id": 1})
     res = await db.scenarios.delete_one({"id": sid})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Not found")
@@ -2897,6 +2988,10 @@ async def delete_scenario(sid: str, admin=Depends(require_admin)):
     await db.client_docs.delete_many({"scenario_id": sid})
     await db.scenario_shares.delete_many({"scenario_id": sid})
     await db.share_views.delete_many({"scenario_id": sid})
+    await audit_log(db, event_type="scenario.delete", request=request, user=admin,
+                    resource_type="scenario", resource_id=sid,
+                    resource_name=(scen_before or {}).get("name"),
+                    metadata={"cascaded_files": len(file_ids), "cascaded_docs": len(docs)})
     return {"ok": True}
 
 
@@ -2947,7 +3042,7 @@ async def scenario_update_doc(sid: str, doc_id: str, body: DocUpdate, admin=Depe
 
 
 @api.delete("/admin/scenarios/{sid}/docs/{doc_id}")
-async def scenario_delete_doc(sid: str, doc_id: str, admin=Depends(require_admin)):
+async def scenario_delete_doc(sid: str, doc_id: str, request: Request, admin=Depends(require_admin)):
     d = await db.client_docs.find_one({"id": doc_id, "scenario_id": sid})
     if not d:
         raise HTTPException(status_code=404, detail="Doc not found")
@@ -2963,12 +3058,16 @@ async def scenario_delete_doc(sid: str, doc_id: str, admin=Depends(require_admin
         {"scenario_id": sid},
         {"$unset": {f"doc_overrides.{doc_id}": ""}, "$pull": {"doc_grants": doc_id}},
     )
+    await audit_log(db, event_type="document.delete", request=request, user=admin,
+                    resource_type="client_doc", resource_id=doc_id,
+                    resource_name=d.get("label"),
+                    metadata={"scenario_id": sid, "file_ids": list(file_ids), "reason": "line_delete"})
     return {"ok": True}
 
 
 @api.post("/admin/scenarios/{sid}/docs/{doc_id}/upload")
 async def admin_upload_doc_file(sid: str, doc_id: str, body: DocUploadInput,
-                                admin=Depends(require_admin)):
+                                request: Request, admin=Depends(require_admin)):
     """Broker uploads a file into a borrower's doc line on their behalf.
     Common when borrowers email documents directly to the broker."""
     d = await db.client_docs.find_one({"id": doc_id, "scenario_id": sid})
@@ -2978,19 +3077,30 @@ async def admin_upload_doc_file(sid: str, doc_id: str, body: DocUploadInput,
         raise HTTPException(status_code=400, detail="This document line is system-managed.")
     meta = await _append_file_to_doc(d, body.data_b64, body.filename, body.content_type,
                                      uploaded_by="broker")
+    await audit_log(db, event_type="document.upload", request=request, user=admin,
+                    resource_type="client_doc", resource_id=doc_id,
+                    resource_name=body.filename,
+                    metadata={"file_id": meta["file_id"], "scenario_id": sid,
+                              "doc_label": d.get("label"), "uploaded_by": "broker"})
     return {"ok": True, "file_id": meta["file_id"]}
 
 
 @api.delete("/admin/scenarios/{sid}/docs/{doc_id}/files/{file_id}")
 async def admin_delete_doc_file(sid: str, doc_id: str, file_id: str,
-                                admin=Depends(require_admin)):
+                                request: Request, admin=Depends(require_admin)):
     """Broker removes one specific file from a doc line (e.g., borrower sent a wrong page)."""
     d = await db.client_docs.find_one({"id": doc_id, "scenario_id": sid})
     if not d:
         raise HTTPException(status_code=404, detail="Doc not found")
+    file_meta = next((fm for fm in (d.get("files") or []) if fm.get("file_id") == file_id), None)
     updated = await _remove_file_from_doc(d, file_id)
     if updated:
         updated.pop("_id", None)
+    await audit_log(db, event_type="document.delete", request=request, user=admin,
+                    resource_type="client_doc", resource_id=doc_id,
+                    resource_name=(file_meta or {}).get("filename"),
+                    metadata={"file_id": file_id, "scenario_id": sid,
+                              "doc_label": d.get("label"), "reason": "file_delete"})
     return {"ok": True, "doc": updated}
 
 
@@ -3157,6 +3267,91 @@ async def admin_list_backups(admin=Depends(require_admin), from_b2: bool = False
             raise HTTPException(status_code=502, detail=f"B2 list failed: {str(e)[:300]}")
     logs = await db.backup_log.find({}, {"_id": 0}).sort("started_at", -1).to_list(30)
     return {"source": "log", "backups": logs}
+
+
+# ================ Admin: Audit Log (compliance chain-of-custody) ================
+
+@api.get("/admin/audit-log/event-types")
+async def admin_audit_event_types(admin=Depends(require_admin)):
+    """Human-readable labels for every audit event type — powers the UI filter dropdown."""
+    return {"types": [{"key": k, "label": v} for k, v in audit_service.EVENT_TYPES.items()]}
+
+
+def _parse_iso_ts(s: Optional[str], end_of_day: bool = False) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        # Accept "2026-02-28", "2026-02-28T12:00:00Z", "2026-02-28T12:00:00+00:00"
+        raw = s
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        # If the user passed a bare YYYY-MM-DD, treat "to" bounds as end-of-day
+        # so filtering by "to = today" INCLUDES today's events.
+        if end_of_day and len(raw) == 10 and "T" not in raw:
+            dt = dt.replace(hour=23, minute=59, second=59, microsecond=999_000)
+        # Normalize naive -> UTC (BSON timestamps are stored as UTC-aware datetimes)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+@api.get("/admin/audit-log")
+async def admin_audit_log(
+    admin=Depends(require_admin),
+    event_type: Optional[str] = None,
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    ip: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    q: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
+):
+    """Filtered, paginated audit-log listing for admins."""
+    return await audit_service.query_events(
+        db,
+        event_type=event_type, user_id=user_id, user_email=user_email,
+        resource_id=resource_id, ip=ip,
+        date_from=_parse_iso_ts(date_from), date_to=_parse_iso_ts(date_to, end_of_day=True),
+        q=q, page=page, page_size=page_size,
+    )
+
+
+@api.get("/admin/audit-log/export.csv")
+async def admin_audit_log_export_csv(
+    admin=Depends(require_admin),
+    event_type: Optional[str] = None,
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    ip: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 10000,
+):
+    """CSV export of the same filtered query — capped at 50k rows to keep this cheap
+    and to force auditors to add date filters for larger pulls."""
+    limit = max(1, min(limit, 50000))
+    res = await audit_service.query_events(
+        db,
+        event_type=event_type, user_id=user_id, user_email=user_email,
+        resource_id=resource_id, ip=ip,
+        date_from=_parse_iso_ts(date_from), date_to=_parse_iso_ts(date_to, end_of_day=True),
+        q=q, page=1, page_size=limit, hard_cap=50000,
+    )
+    csv_bytes = audit_service.export_csv(res.get("events") or [])
+    filename = f"byrd-audit-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%SZ')}.csv"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ================ Financial Periods (multi-year NOI/DSCR calculator) ================
@@ -5848,7 +6043,7 @@ async def lender_list_term_sheets(user=Depends(require_lender)):
 
 @api.post("/lender/scenarios/{sid}/term-sheet/upload")
 async def lender_upload_term_sheet_doc(sid: str, body: DocUploadInput,
-                                       user=Depends(require_lender)):
+                                       request: Request, user=Depends(require_lender)):
     """Lender uploads their own term-sheet document (PDF / Word / etc.) in lieu of or
     alongside the structured form. Returns a file_id to pass to POST /term-sheet as pdf_file_id."""
     lender = await _resolve_lender_for_user(user)
@@ -5875,6 +6070,11 @@ async def lender_upload_term_sheet_doc(sid: str, body: DocUploadInput,
         "data_b64": body.data_b64,
         "uploaded_at": now,
     })
+    await audit_log(db, event_type="document.upload", request=request, user=user,
+                    resource_type="term_sheet_file", resource_id=file_id,
+                    resource_name=body.filename,
+                    metadata={"scenario_id": sid, "lender_id": lender["id"],
+                              "size_bytes": len(raw), "content_type": body.content_type})
     return {"ok": True, "file_id": file_id, "filename": body.filename, "size": len(raw)}
 
 
@@ -5977,7 +6177,8 @@ async def lender_parse_term_sheet_doc(sid: str, body: TermSheetParseBody,
 
 
 @api.get("/term-sheets/{ts_id}/document")
-async def download_term_sheet_document(ts_id: str, user=Depends(get_current_user)):
+async def download_term_sheet_document(ts_id: str, request: Request, download: int = 0,
+                                        user=Depends(get_current_user)):
     """Download the term-sheet attachment. Allowed for: (a) any admin, (b) the submitting
     lender / same-institution lender, (c) the borrower client(s) for the scenario."""
     ts = await db.term_sheets.find_one({"id": ts_id}, {"_id": 0})
@@ -6017,16 +6218,27 @@ async def download_term_sheet_document(ts_id: str, user=Depends(get_current_user
     if not f:
         raise HTTPException(status_code=404, detail="File missing")
     raw = base64.b64decode(f["data_b64"])
+    is_download = bool(download)
+    await audit_log(
+        db,
+        event_type=("document.download" if is_download else "term_sheet.view"),
+        request=request, user=user,
+        resource_type="term_sheet", resource_id=ts_id,
+        resource_name=f.get("filename"),
+        metadata={"scenario_id": ts.get("scenario_id"), "lender_id": ts.get("lender_id"),
+                  "size_bytes": len(raw)},
+    )
+    disposition = f'{"attachment" if is_download else "inline"}; filename="{f["filename"]}"'
     return Response(
         content=raw,
         media_type=f.get("content_type") or "application/octet-stream",
-        headers={"Content-Disposition": f'inline; filename="{f["filename"]}"'},
+        headers={"Content-Disposition": disposition},
     )
 
 
 @api.post("/lender/scenarios/{sid}/term-sheet")
 async def lender_submit_term_sheet(sid: str, body: TermSheetBody, background: BackgroundTasks,
-                                    user=Depends(require_lender)):
+                                    request: Request, user=Depends(require_lender)):
     lender = await _resolve_lender_for_user(user)
     # Must have a share for this scenario
     share = await db.scenario_shares.find_one({"scenario_id": sid, "lender_id": lender["id"]})
@@ -6104,6 +6316,14 @@ async def lender_submit_term_sheet(sid: str, body: TermSheetBody, background: Ba
             "created_at": now,
             "updated_at": now,
         })
+    await audit_log(db, event_type="term_sheet.submit", request=request, user=user,
+                    resource_type="term_sheet", resource_id=ts_id,
+                    resource_name=(lender or {}).get("name"),
+                    metadata={"scenario_id": sid, "scenario_name": scen.get("name"),
+                              "lender_id": lender["id"],
+                              "interest_rate_pct": doc.get("interest_rate_pct"),
+                              "loan_amount": doc.get("loan_amount"),
+                              "updated_existing": bool(existing)})
     return {"ok": True, "id": ts_id}
 
 
@@ -6113,7 +6333,7 @@ def _has_summary_pdf(ts: dict) -> bool:
 
 
 @api.delete("/lender/term-sheets/{tid}")
-async def lender_withdraw_term_sheet(tid: str, user=Depends(require_lender)):
+async def lender_withdraw_term_sheet(tid: str, request: Request, user=Depends(require_lender)):
     lender = await _resolve_lender_for_user(user)
     ts = await db.term_sheets.find_one({"id": tid, "lender_id": lender["id"]})
     if not ts:
@@ -6122,6 +6342,10 @@ async def lender_withdraw_term_sheet(tid: str, user=Depends(require_lender)):
         raise HTTPException(status_code=400, detail="Cannot withdraw an accepted term sheet — call your broker")
     await db.term_sheets.update_one({"id": tid},
                                     {"$set": {"status": "withdrawn", "updated_at": now_iso()}})
+    await audit_log(db, event_type="term_sheet.delete", request=request, user=user,
+                    resource_type="term_sheet", resource_id=tid,
+                    resource_name=lender.get("name"),
+                    metadata={"reason": "lender_withdraw", "scenario_id": ts.get("scenario_id")})
     return {"ok": True}
 
 
@@ -6155,7 +6379,7 @@ async def admin_list_term_sheets(sid: str, admin=Depends(require_admin)):
 
 
 @api.delete("/admin/term-sheets/{tid}")
-async def admin_delete_term_sheet(tid: str, admin=Depends(require_admin)):
+async def admin_delete_term_sheet(tid: str, request: Request, admin=Depends(require_admin)):
     """Hard-delete a term sheet + its attached file. Removes it from both admin and borrower views."""
     ts = await db.term_sheets.find_one({"id": tid}, {"_id": 0})
     if not ts:
@@ -6163,21 +6387,35 @@ async def admin_delete_term_sheet(tid: str, admin=Depends(require_admin)):
     if ts.get("pdf_file_id"):
         await db.term_sheet_files.delete_one({"id": ts["pdf_file_id"]})
     await db.term_sheets.delete_one({"id": tid})
+    await audit_log(db, event_type="term_sheet.delete", request=request, user=admin,
+                    resource_type="term_sheet", resource_id=tid,
+                    resource_name=ts.get("lender_name"),
+                    metadata={"reason": "admin_delete", "scenario_id": ts.get("scenario_id"),
+                              "lender_id": ts.get("lender_id")})
     return {"ok": True}
 
 
 @api.patch("/admin/term-sheets/{tid}")
 async def admin_set_term_sheet_status(tid: str, body: TermSheetStatusBody,
-                                       background: BackgroundTasks, admin=Depends(require_admin)):
+                                       background: BackgroundTasks, request: Request,
+                                       admin=Depends(require_admin)):
     ts = await db.term_sheets.find_one({"id": tid})
     if not ts:
         raise HTTPException(status_code=404, detail="Term sheet not found")
+    prev_status = ts.get("status")
     await db.term_sheets.update_one(
         {"id": tid},
         {"$set": {"status": body.status, "broker_note": body.broker_note,
                   "acted_by_admin_id": admin["id"], "acted_at": now_iso(),
                   "updated_at": now_iso()}},
     )
+    await audit_log(db, event_type="term_sheet.status_change", request=request, user=admin,
+                    resource_type="term_sheet", resource_id=tid,
+                    resource_name=ts.get("lender_name"),
+                    metadata={"from": prev_status, "to": body.status,
+                              "scenario_id": ts.get("scenario_id"),
+                              "lender_id": ts.get("lender_id"),
+                              "has_broker_note": bool(body.broker_note)})
     # Notify the lender's owner user
     lender = await db.lenders.find_one({"id": ts.get("lender_id")}, {"_id": 0})
     scen = await db.scenarios.find_one({"id": ts.get("scenario_id")}, {"_id": 0, "name": 1})
