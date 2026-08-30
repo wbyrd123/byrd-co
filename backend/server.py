@@ -799,6 +799,74 @@ async def contacts_delete(cid: str, admin=Depends(require_admin)):
     return {"ok": True}
 
 
+@api.post("/admin/contacts/{cid}/promote-to-client")
+async def contacts_promote_to_client(cid: str, request: Request, admin=Depends(require_admin)):
+    """Convert a Contact (CRM entry) into a Client user + generate a portal invite token.
+    Does NOT send the invite email — admin sends it manually later once fee agreement +
+    docs list are staged. Stamps client_user_id back on the contact so we can render a
+    `→ CLIENT` chip and prevent double-promotion."""
+    contact = await db.contacts.find_one({"id": cid}, {"_id": 0})
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    if contact.get("client_user_id"):
+        # Verify the linked user still exists; if it was deleted, allow re-promotion.
+        linked = await db.users.find_one({"id": contact["client_user_id"]}, {"_id": 0, "id": 1})
+        if linked:
+            raise HTTPException(status_code=400,
+                                detail="Contact is already linked to a client")
+    email = (contact.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400,
+                            detail="Contact needs an email address to become a client")
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400,
+                            detail="A user with this email already exists")
+
+    user_id = str(uuid.uuid4())
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    now = now_iso()
+    await db.users.insert_one({
+        "id": user_id,
+        "email": email,
+        "name": contact.get("name") or email,
+        "phone": contact.get("phone") or None,
+        "company": contact.get("company") or None,
+        "role": "client",
+        "password_hash": None,
+        "pending": True,
+        "created_by": admin["id"],
+        "created_at": now,
+        "promoted_from_contact_id": cid,
+    })
+    await db.invites.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "token": token,
+        "created_by": admin["id"],
+        "created_at": now,
+        "used_at": None,
+    })
+    await db.contacts.update_one(
+        {"id": cid},
+        {"$set": {"client_user_id": user_id, "promoted_at": now, "updated_at": now}},
+    )
+    await audit_log(db, event_type="admin.invite.sent", request=request, user=admin,
+                    resource_type="user", resource_id=user_id,
+                    resource_name=email,
+                    metadata={"invitee_name": contact.get("name"),
+                              "invitee_company": contact.get("company"),
+                              "promoted_from_contact_id": cid,
+                              "email_sent": False, "reason": "promote_from_contact"})
+    return {
+        "token": token,
+        "invite_url_path": f"/portal/invite/{token}",
+        "user": {
+            "id": user_id, "email": email, "name": contact.get("name") or email,
+            "company": contact.get("company"), "phone": contact.get("phone"),
+        },
+    }
+
+
 @api.post("/admin/contacts/import-csv")
 async def contacts_import_csv(body: ContactCSVImport, admin=Depends(require_admin)):
     """Import contacts from a CSV. Expected headers (any subset, any order):

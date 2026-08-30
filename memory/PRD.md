@@ -12,6 +12,21 @@
 - P3: Refactor `server.py` (~11k lines) into modular routes
 
 
+### Contact → Client Promotion — SHIPPED 2026-02
+Admins can convert any CRM contact into a client user in one click, without retyping their info. Invite email is NOT sent automatically — broker builds the doc list + fee agreement first, then triggers the invite manually.
+
+**Backend (`/app/backend/server.py`):**
+- `POST /api/admin/contacts/{cid}/promote-to-client` — creates pending client user from contact's name/email/phone, generates an unused invite token, stamps `client_user_id` + `promoted_at` back on the contact, emits `admin.invite.sent` audit event with `reason: promote_from_contact` and `email_sent: false`.
+- Guards: contact must have an email; email must not already belong to a user; single contact cannot be promoted twice (unless the linked client user was deleted).
+
+**Frontend:**
+- `/app/frontend/src/byrd/AdminClients.jsx` — new "New Client from Contact…" button opens a searchable picker dialog (`FromContactPicker`). Shows counts of eligible / missing-email / already-clients. Clicking a row promotes and offers a shortcut to open the new client page.
+- `/app/frontend/src/byrd/AdminContacts.jsx` — already-promoted contacts get a `→ CLIENT` chip that deep-links to their client page.
+
+**Tests:**
+- `/app/backend/tests/test_contact_promote.py` — 10 tests (happy path, contact row + user row + invite row + audit event stamping; 400 no-email; 400 email conflict; 400 double-promotion; re-promotion after user deletion; 404 unknown contact; RBAC 403/401; explicit assertion that no email is sent).
+
+
 ### Deal Notes V2 — Hide-from-Lender + Badges + Tests — SHIPPED 2026-02
 Admins can now selectively hide any note (client-authored or otherwise) from lender-facing views without deleting it. Badge counts propagate everywhere. Full pytest coverage added.
 

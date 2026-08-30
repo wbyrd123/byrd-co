@@ -4,8 +4,9 @@ import { api } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Contact as ContactIcon, Plus, Upload, Send, Trash2, Edit3, X, Mail, Phone,
-  MessageSquare, Tag, Search, Check, AlertCircle, FileText, Sparkles,
+  MessageSquare, Tag, Search, Check, AlertCircle, FileText, Sparkles, ArrowRight,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 
 const fmtRelative = (iso) => {
   if (!iso) return "Never";
@@ -156,11 +157,22 @@ export default function AdminContacts() {
                 <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSel(c.id)} data-testid={`contact-select-${c.id}`} />
                 <div className="min-w-0">
                   <div className="font-semibold text-sm truncate">{c.name}</div>
-                  <div className="flex items-center gap-1 mt-0.5">
+                  <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                     {(c.contact_type || []).includes("email") && <Mail size={10} className="text-[#6B6558]" />}
                     {(c.contact_type || []).includes("phone") && <Phone size={10} className="text-[#6B6558]" />}
                     {(c.contact_type || []).includes("text") && <MessageSquare size={10} className="text-[#6B6558]" />}
                     {c.unsubscribed && <span className="byrd-chip byrd-chip-red text-[9px]">Unsubscribed</span>}
+                    {c.client_user_id && (
+                      <Link
+                        to={`/admin/clients/${c.client_user_id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="byrd-chip byrd-chip-green text-[9px] inline-flex items-center gap-1 hover:brightness-95"
+                        data-testid={`contact-client-chip-${c.id}`}
+                        title="This contact is now a client. Open their client page."
+                      >
+                        <ArrowRight size={8} /> CLIENT
+                      </Link>
+                    )}
                   </div>
                 </div>
                 <div className="text-xs text-[#2A2A2A] truncate">{c.email || "—"}</div>

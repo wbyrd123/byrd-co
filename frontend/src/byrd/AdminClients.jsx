@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import React, { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { api, API_BASE } from "@/lib/api";
 import { toast } from "sonner";
-import { Copy, Plus, Users, X, Check, Send } from "lucide-react";
+import { Copy, Plus, Users, X, Check, Send, Contact as ContactIcon, Search, ArrowRight } from "lucide-react";
 
 const InviteDialog = ({ open, onClose, onCreated }) => {
   const [form, setForm] = useState({
@@ -143,6 +143,7 @@ const InviteDialog = ({ open, onClose, onCreated }) => {
 export default function AdminClients() {
   const [clients, setClients] = useState([]);
   const [open, setOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const load = () => api.get("/admin/clients").then((r) => setClients(r.data)).finally(() => setLoading(false));
@@ -155,9 +156,14 @@ export default function AdminClients() {
           <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Clients</div>
           <h1 className="font-serif text-4xl md:text-5xl font-bold mt-2">Client Roster.</h1>
         </div>
-        <button onClick={() => setOpen(true)} className="byrd-btn byrd-btn-dark" data-testid="new-invite-btn">
-          <Plus size={14} /> Add Client
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={() => setPickerOpen(true)} className="byrd-btn byrd-btn-outline" data-testid="from-contact-btn">
+            <ContactIcon size={14} /> New Client from Contact…
+          </button>
+          <button onClick={() => setOpen(true)} className="byrd-btn byrd-btn-dark" data-testid="new-invite-btn">
+            <Plus size={14} /> Add Client
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -217,6 +223,144 @@ export default function AdminClients() {
       )}
 
       <InviteDialog open={open} onClose={() => setOpen(false)} onCreated={load} />
+      <FromContactPicker open={pickerOpen} onClose={() => setPickerOpen(false)} onCreated={load} />
     </div>
   );
 }
+
+const FromContactPicker = ({ open, onClose, onCreated }) => {
+  const [contacts, setContacts] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [q, setQ] = useState("");
+  const [busyId, setBusyId] = useState(null);
+  const [result, setResult] = useState(null);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!open) { setQ(""); setResult(null); return; }
+    setLoading(true);
+    api.get("/admin/contacts")
+      .then((r) => setContacts(r.data || []))
+      .finally(() => setLoading(false));
+  }, [open]);
+
+  const eligible = useMemo(
+    () => contacts.filter((c) => c.email && !c.client_user_id),
+    [contacts],
+  );
+  const filtered = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    if (!term) return eligible;
+    return eligible.filter((c) =>
+      [c.name, c.email, c.phone, (c.tags || []).join(" ")].join(" ").toLowerCase().includes(term)
+    );
+  }, [eligible, q]);
+
+  if (!open) return null;
+
+  const promote = async (c) => {
+    setBusyId(c.id);
+    try {
+      const r = await api.post(`/admin/contacts/${c.id}/promote-to-client`);
+      setResult({ contact: c, ...r.data });
+      onCreated?.();
+      toast.success(`${c.name} is now a client — set up their scenarios next.`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't convert contact");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const skippedNoEmail = contacts.filter((c) => !c.email).length;
+  const alreadyClients = contacts.filter((c) => c.client_user_id).length;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-[#1A1A1A]/50 grid place-items-center p-4" onClick={onClose}>
+      <div className="byrd-card w-full max-w-2xl p-6 md:p-8 max-h-[92vh] flex flex-col"
+           onClick={(e) => e.stopPropagation()} data-testid="from-contact-dialog">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// New Client · From Contact</div>
+            <h2 className="font-serif text-2xl font-bold mt-1">Pick a contact.</h2>
+            <p className="text-xs text-[#6B6558] mt-2 max-w-md">
+              Convert someone in your rolodex into a client. We&apos;ll create their portal user with
+              the contact&apos;s info — no email goes out yet, so you can build the doc list first.
+            </p>
+          </div>
+          <button onClick={onClose} className="w-9 h-9 grid place-items-center rounded-md border border-[#E4DFD1]"
+                  data-testid="from-contact-close"><X size={16} /></button>
+        </div>
+
+        {!result ? (
+          <>
+            <div className="relative mt-5">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6B6558]" />
+              <input
+                autoFocus value={q} onChange={(e) => setQ(e.target.value)}
+                placeholder="Search by name, email, phone, tag…"
+                className="w-full h-10 pl-9 pr-3 rounded-md border border-[#E4DFD1] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434]"
+                data-testid="from-contact-search"
+              />
+            </div>
+            <div className="text-[11px] text-[#6B6558] mt-2 font-mono">
+              {loading ? "Loading contacts…" : `${filtered.length} eligible`}
+              {skippedNoEmail > 0 && ` · ${skippedNoEmail} missing email`}
+              {alreadyClients > 0 && ` · ${alreadyClients} already clients`}
+            </div>
+
+            <div className="mt-3 flex-1 overflow-y-auto border border-[#E4DFD1] rounded-md divide-y divide-[#E4DFD1]"
+                 data-testid="from-contact-list">
+              {!loading && filtered.length === 0 && (
+                <div className="p-6 text-center text-sm text-[#6B6558]">
+                  {q ? "No contacts match." : (eligible.length === 0 ? "No eligible contacts yet — add one on the Contacts page first." : "Try a different search.")}
+                </div>
+              )}
+              {filtered.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => promote(c)}
+                  disabled={busyId === c.id}
+                  className="w-full flex items-center gap-3 px-3 py-3 text-left hover:bg-[#FBF8F1] disabled:opacity-60 transition-colors"
+                  data-testid={`promote-contact-${c.id}`}
+                >
+                  <div className="w-9 h-9 rounded-full bg-[#F3EEE0] grid place-items-center text-[#7A5410] font-serif text-sm shrink-0">
+                    {(c.name || "?").slice(0, 1).toUpperCase()}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-semibold truncate">{c.name}</div>
+                    <div className="text-[11px] text-[#6B6558] truncate">{c.email}{c.phone ? ` · ${c.phone}` : ""}</div>
+                  </div>
+                  <ArrowRight size={14} className={busyId === c.id ? "text-[#C89434] animate-pulse" : "text-[#6B6558]"} />
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="mt-5 space-y-4" data-testid="from-contact-result">
+            <div className="byrd-chip byrd-chip-green"><Check size={12} /> {result.contact.name} is now a client</div>
+            <p className="text-sm text-[#2A2A2A]">
+              No invite email has been sent. Head to the client&apos;s page to build their scenario and
+              doc list, then send the portal invite when you&apos;re ready.
+            </p>
+            <div className="flex gap-3 pt-1">
+              <Link
+                to={`/admin/clients/${result.user.id}`}
+                onClick={onClose}
+                className="byrd-btn byrd-btn-primary flex-1"
+                data-testid="from-contact-open-client"
+              >
+                Open client & build scenario <ArrowRight size={13} />
+              </Link>
+              <button onClick={() => { setResult(null); setQ(""); }}
+                      className="byrd-btn byrd-btn-outline flex-1"
+                      data-testid="from-contact-convert-another">
+                Convert another
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
