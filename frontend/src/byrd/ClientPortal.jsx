@@ -7,6 +7,7 @@ import { StatusChip, readFileAsBase64, fmtSize } from "@/byrd/docHelpers";
 import { toast } from "sonner";
 import AdaChatPanel from "@/byrd/AdaChatPanel";
 import TwoFAHeaderLink from "@/byrd/TwoFAHeaderLink";
+import DealContactsPanel from "@/byrd/DealContactsPanel";
 import {
   LogOut, Upload, FileText, Download, Phone, Mail, CheckCircle2, Circle, CircleAlert,
   ChevronDown, ChevronRight, PenLine, Trash2,
@@ -219,7 +220,8 @@ export default function ClientPortal() {
                     </div>
 
                     {!isCollapsed && (
-                      <div className="mt-6 space-y-6">
+                      <div className="mt-6 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-6">
+                        <div className="space-y-6 min-w-0">
                         {total === 0 ? (
                           <div className="text-sm text-[#6B6558] py-6 text-center">
                             Nothing on this deal&apos;s checklist yet — your broker will add items shortly.
@@ -362,6 +364,10 @@ export default function ClientPortal() {
                           ))
                         )}
                         <ScenarioTermSheetsSection scenarioId={s.id} />
+                        </div>
+                        <aside className="space-y-4">
+                          <DealContactsPanel scenarioId={s.id} compact />
+                        </aside>
                       </div>
                     )}
                   </section>

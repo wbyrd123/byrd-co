@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { API_BASE, api } from "@/lib/api";
 import { LOGO_URL } from "@/byrd/data";
 import { fmtMoney, fmtPct, fmtNum } from "@/byrd/dealData";
+import DealContactsPanel from "@/byrd/DealContactsPanel";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -511,6 +512,12 @@ export default function LenderView() {
             <p className="text-sm whitespace-pre-wrap leading-relaxed">{pkg.notes}</p>
           </div>
         )}
+
+        {/* Deal Contacts (read-only, session-gated to match sibling lender-view endpoints) */}
+        <DealContactsPanel
+          fetchUrl={`/lender-view/${token}/deal-contacts?session_token=${encodeURIComponent(session)}`}
+          readOnly
+        />
 
         {/* Documents */}
         <div className="byrd-card p-6" data-testid="lender-docs">

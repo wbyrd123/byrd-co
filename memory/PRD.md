@@ -441,3 +441,43 @@ Complete self-registration + credit-box + term-sheet marketplace. New surfaces:
 - Optional: swap native date pickers for shadcn calendar to match rest of admin
 - Optional: fire audit inserts as BackgroundTasks to remove one Mongo round-trip from hot paths (login, file view)
 
+
+
+---
+
+## ✅ Deal Contacts — Per-Scenario Rolodex — 2026-02-28
+
+**Status:** Shipped. 13/13 pytest passes, frontend smoke-tested (custom-label toast fires, modal portal-rendered, docs column no longer squeezes).
+
+### What it captures
+Each scenario carries its own list of outside parties: **Title Company**, **Real Estate Broker**, **Mortgage Company**, **Insurance**, plus freeform **Custom** contacts with a user-provided type label (e.g., "Contractor", "Escrow Officer", "Environmental").
+
+**Fields per contact:** company_name, contact_person, email (lowercased), phone, notes. Plus **loan_number** only for `mortgage` type. Plus **custom_type** only for `custom`.
+
+### Access matrix
+| Role | View | Add / Edit / Delete |
+|---|---|---|
+| Admin (Wayne, Caleb) | ✅ | ✅ |
+| Owning client (primary or linked sponsor) | ✅ | ✅ |
+| Invited lender (authenticated) | ✅ | ❌ |
+| Lender-view token holder | ✅ (only after confidentiality gate) | ❌ |
+| Anyone else | ❌ | ❌ |
+
+### Backend (server.py ~lines 1780–2000)
+- Model: `scenarios.deal_contacts` embedded array
+- Endpoints: `GET/POST/PATCH/DELETE /api/scenarios/{sid}/deal-contacts[/{cid}]` (role-aware) + `GET /api/lender-view/{token}/deal-contacts?session_token=…` (gated + `_log_view` audited)
+- **Atomic writes**: PATCH uses `deal_contacts.$.*` positional operator, DELETE uses `$pull` — no read-modify-write race
+- Every mutation emits `scenario.update` audit event with `metadata.action` = contact_added / contact_updated / contact_removed
+- Invalid contact types return 400 (no silent coercion)
+
+### Frontend
+- `/app/frontend/src/byrd/DealContactsPanel.jsx` — reusable component. Accepts `scenarioId` OR `fetchUrl`, `readOnly`, `compact`. Modal rendered via `createPortal(document.body)`. Custom label uses JS validation with toast (not blocking HTML5 required).
+- Wired into: **ClientPortal** (right column of each expanded scenario at ≥xl, stacks below at lg), **AdminScenarioDetail** (new "Contacts" tab between Documents and Financials), **LenderView** (read-only, session-token gated, above Documents section).
+
+### Security fix applied post-test
+- Iteration 16 test found the token endpoint bypassed `_require_view_session` — PII leak risk. Fixed to require `session_token` like all sibling `/lender-view/*` endpoints and to emit a `view_deal_contacts` activity log entry.
+
+### Deferred (minor UX polish)
+- Wire the same read-only panel into the authenticated `LenderPortal` scenario list rows (backend already returns editable=false for lenders; UI not wired)
+- Optional: switch native `<select>` for contact type to a shadcn combobox with typeahead
+

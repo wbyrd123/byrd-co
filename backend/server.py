@@ -1803,6 +1803,207 @@ async def _resolve_client_doc_for_user(doc_id: str, user: dict) -> dict:
     return d
 
 
+# =========== Deal Contacts (title / RE broker / mortgage / insurance / custom) ===========
+# Small per-scenario rolodex of the outside parties on a deal. Editable by admin +
+# the borrowing client(s). Read-only for lenders. Embedded on the scenarios doc.
+
+DEAL_CONTACT_TYPES = {"title", "re_broker", "mortgage", "insurance", "custom"}
+
+
+class DealContactInput(BaseModel):
+    type: str = Field(default="custom")
+    custom_type: Optional[str] = None  # only used when type == "custom"
+    company_name: Optional[str] = ""
+    contact_person: Optional[str] = ""
+    email: Optional[str] = ""
+    phone: Optional[str] = ""
+    loan_number: Optional[str] = ""  # only meaningful when type == "mortgage"
+    notes: Optional[str] = ""
+
+
+async def _scenario_or_404(sid: str) -> dict:
+    scen = await db.scenarios.find_one({"id": sid})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    return scen
+
+
+def _client_can_access_scenario(scen: dict, user: dict) -> bool:
+    """A client can access a scenario if they are the primary client_id OR a linked sponsor."""
+    if scen.get("client_id") == user["id"]:
+        return True
+    for sp in (scen.get("sponsors") or []):
+        if sp.get("client_user_id") == user["id"]:
+            return True
+    return False
+
+
+async def _lender_can_access_scenario(sid: str, user: dict) -> bool:
+    """A lender has access if their institution has an active share for this scenario."""
+    try:
+        lender = await _resolve_lender_for_user(user)
+    except Exception:
+        return False
+    if not lender:
+        return False
+    share = await db.scenario_shares.find_one({"scenario_id": sid, "lender_id": lender["id"]})
+    return share is not None
+
+
+def _sanitize_contact(c: dict) -> dict:
+    """Strip internals + normalize keys for the API surface."""
+    return {
+        "id": c.get("id"),
+        "type": c.get("type", "custom"),
+        "custom_type": c.get("custom_type"),
+        "company_name": c.get("company_name") or "",
+        "contact_person": c.get("contact_person") or "",
+        "email": c.get("email") or "",
+        "phone": c.get("phone") or "",
+        "loan_number": c.get("loan_number") or "",
+        "notes": c.get("notes") or "",
+        "created_at": c.get("created_at"),
+        "updated_at": c.get("updated_at"),
+    }
+
+
+@api.get("/scenarios/{sid}/deal-contacts")
+async def list_deal_contacts(sid: str, user=Depends(get_current_user)):
+    """Return the deal contacts for a scenario. Admin + owning client + invited
+    lender can read. Everyone else 403."""
+    scen = await _scenario_or_404(sid)
+    role = user.get("role")
+    ok = (
+        role == "admin"
+        or (role == "client" and _client_can_access_scenario(scen, user))
+        or (role == "lender" and await _lender_can_access_scenario(sid, user))
+    )
+    if not ok:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return {
+        "scenario_id": sid,
+        "editable": role in ("admin", "client"),
+        "contacts": [_sanitize_contact(c) for c in (scen.get("deal_contacts") or [])],
+    }
+
+
+@api.post("/scenarios/{sid}/deal-contacts")
+async def create_deal_contact(sid: str, body: DealContactInput, request: Request,
+                              user=Depends(get_current_user)):
+    """Admin OR the owning client (primary/sponsor) can add a contact."""
+    scen = await _scenario_or_404(sid)
+    role = user.get("role")
+    if not (role == "admin" or (role == "client" and _client_can_access_scenario(scen, user))):
+        raise HTTPException(status_code=403, detail="Only admins and the borrower can add contacts")
+    if body.type not in DEAL_CONTACT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported contact type '{body.type}'")
+    ctype = body.type
+    if ctype == "custom" and not (body.custom_type or "").strip():
+        raise HTTPException(status_code=400, detail="Please provide a label for the custom contact type")
+    now = now_iso()
+    contact = {
+        "id": str(uuid.uuid4()),
+        "type": ctype,
+        "custom_type": (body.custom_type or "").strip() if ctype == "custom" else None,
+        "company_name": (body.company_name or "").strip(),
+        "contact_person": (body.contact_person or "").strip(),
+        "email": (body.email or "").strip().lower(),
+        "phone": (body.phone or "").strip(),
+        "loan_number": (body.loan_number or "").strip() if ctype == "mortgage" else "",
+        "notes": (body.notes or "").strip(),
+        "created_at": now,
+        "updated_at": now,
+        "created_by": user["id"],
+    }
+    await db.scenarios.update_one(
+        {"id": sid},
+        {"$push": {"deal_contacts": contact}, "$set": {"updated_at": now}},
+    )
+    await audit_log(db, event_type="scenario.update", request=request, user=user,
+                    resource_type="scenario", resource_id=sid,
+                    resource_name=scen.get("name"),
+                    metadata={"fields": ["deal_contacts"], "action": "contact_added",
+                              "contact_type": ctype, "contact_id": contact["id"]})
+    return _sanitize_contact(contact)
+
+
+@api.patch("/scenarios/{sid}/deal-contacts/{cid}")
+async def update_deal_contact(sid: str, cid: str, body: DealContactInput, request: Request,
+                              user=Depends(get_current_user)):
+    scen = await _scenario_or_404(sid)
+    role = user.get("role")
+    if not (role == "admin" or (role == "client" and _client_can_access_scenario(scen, user))):
+        raise HTTPException(status_code=403, detail="Only admins and the borrower can edit contacts")
+    if body.type not in DEAL_CONTACT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported contact type '{body.type}'")
+    ctype = body.type
+    if ctype == "custom" and not (body.custom_type or "").strip():
+        raise HTTPException(status_code=400, detail="Please provide a label for the custom contact type")
+    now = now_iso()
+    updates = {
+        "deal_contacts.$.type": ctype,
+        "deal_contacts.$.custom_type": (body.custom_type or "").strip() if ctype == "custom" else None,
+        "deal_contacts.$.company_name": (body.company_name or "").strip(),
+        "deal_contacts.$.contact_person": (body.contact_person or "").strip(),
+        "deal_contacts.$.email": (body.email or "").strip().lower(),
+        "deal_contacts.$.phone": (body.phone or "").strip(),
+        "deal_contacts.$.loan_number": (body.loan_number or "").strip() if ctype == "mortgage" else "",
+        "deal_contacts.$.notes": (body.notes or "").strip(),
+        "deal_contacts.$.updated_at": now,
+        "updated_at": now,
+    }
+    # Atomic positional update — no read-modify-write race window
+    res = await db.scenarios.update_one(
+        {"id": sid, "deal_contacts.id": cid},
+        {"$set": updates},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    scen_after = await db.scenarios.find_one({"id": sid}, {"_id": 0, "name": 1, "deal_contacts": 1})
+    updated = next((c for c in (scen_after.get("deal_contacts") or []) if c.get("id") == cid), None)
+    await audit_log(db, event_type="scenario.update", request=request, user=user,
+                    resource_type="scenario", resource_id=sid,
+                    resource_name=scen_after.get("name"),
+                    metadata={"fields": ["deal_contacts"], "action": "contact_updated",
+                              "contact_id": cid, "contact_type": ctype})
+    return _sanitize_contact(updated or {})
+
+
+@api.delete("/scenarios/{sid}/deal-contacts/{cid}")
+async def delete_deal_contact(sid: str, cid: str, request: Request,
+                              user=Depends(get_current_user)):
+    scen = await _scenario_or_404(sid)
+    role = user.get("role")
+    if not (role == "admin" or (role == "client" and _client_can_access_scenario(scen, user))):
+        raise HTTPException(status_code=403, detail="Only admins and the borrower can remove contacts")
+    # Atomic $pull — no read-modify-write race window
+    res = await db.scenarios.update_one(
+        {"id": sid, "deal_contacts.id": cid},
+        {"$pull": {"deal_contacts": {"id": cid}}, "$set": {"updated_at": now_iso()}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    await audit_log(db, event_type="scenario.update", request=request, user=user,
+                    resource_type="scenario", resource_id=sid,
+                    resource_name=scen.get("name"),
+                    metadata={"fields": ["deal_contacts"], "action": "contact_removed",
+                              "contact_id": cid})
+    return {"ok": True}
+
+
+# Token-gated Lender View exposure — read-only. Requires the same session gate
+# used by every other /lender-view endpoint so PII isn't leaked via link only.
+@api.get("/lender-view/{token}/deal-contacts")
+async def lender_view_deal_contacts(token: str, session_token: Optional[str] = None):
+    share, session = await _require_view_session(token, session_token)
+    scen = await db.scenarios.find_one({"id": share["scenario_id"]},
+                                       {"_id": 0, "deal_contacts": 1})
+    if not scen:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    await _log_view(share["scenario_id"], share["id"], session, "view_deal_contacts")
+    return {"contacts": [_sanitize_contact(c) for c in (scen.get("deal_contacts") or [])]}
+
+
 @api.post("/client/docs/{doc_id}/upload")
 async def client_upload(doc_id: str, body: DocUploadInput, request: Request, user=Depends(require_client)):
     """Append a new file to a doc line. A single line can hold many files

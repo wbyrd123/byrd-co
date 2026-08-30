@@ -1,0 +1,48 @@
+{
+  "summary": "Tested the new Deal Contacts feature end-to-end. Backend: new pytest suite /app/backend/tests/test_deal_contacts.py — 13/13 tests pass serially (admin CRUD, owning-client CRUD, RBAC for foreign client + lender read-only + unauthenticated, custom_type validation, field normalization/trim/lowercase/loan_number blanking, 404s on all 4 verbs and unknown cid, audit events via Mongo AND /api/admin/audit-log, public token-gated /api/lender-view/{token}/deal-contacts + 404 for unknown token). Frontend: verified Client Portal panel (add title contact, custom type with label, mortgage loan number, switch-type clears loan #, edit, delete with window.confirm, mailto/tel links, modal portal-rendered into document.body and in-viewport), Admin console 'Contacts' tab (add/edit/delete + persists across reload), and token-gated LenderView (read-only panel above Documents, no Add/edit/delete controls). All TEST_ data cleaned up (scenarios now have 0 deal_contacts).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/lender-view/{token}/deal-contacts", "issue": "Unlike every other /lender-view/{token}/* endpoint (which calls _require_view_session(token, session_token)), this endpoint requires no view session — anyone holding/guessing a share link can read all outside-party PII (company, contact person, email, phone, loan number, notes) WITHOUT accepting the confidentiality gate, and the read is never recorded via _log_view. Verified: plain GET with no auth/session returns 200 with full contact list.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "PATCH/DELETE /api/scenarios/{sid}/deal-contacts/{cid}", "issue": "Lost-update race: handlers read the whole deal_contacts array and $set it back. Reproduced under a concurrent (pytest-xdist) run — a PATCH returned 404 'Contact not found' because a concurrent write replaced the array. Use $pull for delete and positional/arrayFilters $set for update instead of rewriting the array."},
+      {"endpoint": "POST/PATCH /api/scenarios/{sid}/deal-contacts", "issue": "An invalid type (e.g. 'bogus_type') is silently coerced to 'custom' and then fails with 400 'Please provide a label for the custom contact type' — misleading. Prefer 422/400 'Unsupported contact type'."},
+      {"endpoint": "PATCH /api/scenarios/{sid}/deal-contacts/{cid}", "issue": "PATCH behaves as a full replace (any field omitted from the body is blanked). Acceptable for the current modal (always sends all fields) but semantically wrong for a PATCH and fragile for future API consumers."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ContactEditModal (custom type)", "issue": "Spec expects toast 'Give the custom contact a label…' on empty custom label, but the label input has HTML5 required=true so the browser blocks form submit and NO toast/inline message appears — the user just sees the modal do nothing (native tooltip only, and it is easy to miss). Either drop required and let the toast fire, or add a visible inline error.", "selector": "[data-testid=\"deal-contact-custom-type\"], [data-testid=\"deal-contact-save-btn\"]", "priority": "MEDIUM"},
+      {"component": "DealContactsPanel", "issue": "Empty catch block on reload() swallows errors (eslint no-empty error at line 54) — a failed reload after save/delete leaves stale data with no user feedback. Also an unused eslint-disable at line 43.", "selector": "n/a", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Authenticated LenderPortal read-only view", "issue": "GET /api/scenarios/{sid}/deal-contacts supports role=lender (editable=false, verified by pytest) but DealContactsPanel is only wired into ClientPortal, AdminScenarioDetail and LenderView — LenderPortal has no Deal Contacts panel, so that backend branch is unreachable from the UI.", "affected_selectors": ["[data-testid=\"deal-contacts-panel\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "Client Portal — expanded scenario", "issues": ["The new 2-col grid lg:grid-cols-[minmax(0,1fr)_320px] squeezes the docs column to ~420px while doc rows still use md:flex-row (viewport-based breakpoint), so doc labels/notes wrap one word per line at 1920px (e.g. 'Loan / Executive / Summary', 'Note / from / broker: / Auto- / generated…'). Either stack doc rows below a container width, move the panel full-width under the docs list at <xl, or apply the 2-col grid only at xl+."]},
+      {"screen": "Admin scenario -> Contacts tab", "issues": ["Duplicate heading: page section header 'Deal Contacts' immediately followed by the panel's own 'Deal Contacts' card header + subtitle."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_deal_contacts.py", "/app/test_reports/pytest/deal_contacts.xml"],
+  "action_items": [
+    "Gate GET /api/lender-view/{token}/deal-contacts behind _require_view_session (pass session_token from LenderView's fetchUrl) and log the view via _log_view.",
+    "Make PATCH/DELETE atomic on the embedded array ($pull / arrayFilters) to avoid lost updates.",
+    "Fix custom-label validation UX (remove required or show inline error so feedback is visible).",
+    "Fix client portal docs-column squeeze introduced by the new 2-col grid.",
+    "Return a clear error for unsupported contact types instead of coercing to custom.",
+    "Remove empty catch block / unused eslint-disable in DealContactsPanel.jsx."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1992 — new public token endpoint bypasses the confidentiality gate used by all sibling /lender-view endpoints; PII exposure + no audit trail.",
+    "server.py:1928-1988 — read-modify-write of scenarios.deal_contacts is not atomic (reproduced 404 under concurrency).",
+    "DealContactsPanel.jsx:46-55 — reload() swallows all errors silently."
+  ],
+  "updated_files": ["/app/backend/tests/test_deal_contacts.py"],
+  "success_rate": {"backend": "100% (13/13 serial; 1 flaky under parallel execution due to non-atomic array writes)", "frontend": "~90% (all flows work; custom-label empty-state toast does not fire, docs column layout squeeze)"},
+  "seed_data_creation": "Temporary contacts prefixed TEST_ on scenarios efd946c4… and c4d98f0b…; all removed (verified 0 deal_contacts remaining). No new users/scenarios created.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "Admin wayne@byrd-co.com/byrdco2026, client sample@example.com/sample123, lender contact@testfrost.example/testlender123 — all valid. Share token used for LenderView: d6cea477e8aa4dd0b29cbdd0eba4183d38df9e5eed974768b840151d2df827af (Frost Bank, scenario efd946c4-c0f9-49ae-8883-36c2c36c3307).",
+  "context_for_next_testing_agent": "pytest file /app/backend/tests/test_deal_contacts.py must be run serially (-p no:xdist) — parallel execution triggers the non-atomic array write race and fails TestAdminCrud. Client scenarios: efd946c4… (Sample MF Refi, has 2 share tokens) and c4d98f0b… (3-Sponsor). Client portal scenario sections must be expanded via [data-testid^=client-scenario-toggle-] before the panel exists; default expand state varies, so check for the panel before clicking. LenderView gate requires name/email/institution + checkbox then 'View Package'.",
+  "rca_of_the_issue": "Lender-view PII gap: the new endpoint queries scenario_shares by token only and returns contacts, skipping _require_view_session/_log_view that all other /lender-view/{token}/* handlers use. Concurrency 404: update/delete handlers snapshot scen['deal_contacts'] then $set the entire array, so a concurrent insert/delete between read and write is lost, causing subsequent operations on the lost contact to 404."
+}

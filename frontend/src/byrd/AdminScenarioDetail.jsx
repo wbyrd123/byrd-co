@@ -15,6 +15,7 @@ import ScenarioAIChat from "@/byrd/ScenarioAIChat";
 import ScenarioAIFab from "@/byrd/ScenarioAIFab";
 import BulkUploadZone from "@/byrd/BulkUploadZone";
 import AdminFinancialsTab from "@/byrd/AdminFinancialsTab";
+import DealContactsPanel from "@/byrd/DealContactsPanel";
 
 const useDebouncedSave = (fn, delay = 800) => {
   const [timer, setTimer] = useState(null);
@@ -78,6 +79,7 @@ const TABS = [
   { key: "overview", label: "Overview" },
   { key: "package", label: "Package" },
   { key: "docs", label: "Documents" },
+  { key: "contacts", label: "Contacts" },
   { key: "financials", label: "Financials" },
   { key: "lenders", label: "Lenders" },
   { key: "termsheets", label: "Term Sheets" },
@@ -378,6 +380,16 @@ export default function AdminScenarioDetail() {
           onCopyDocs={copyDocs}
           onReload={load}
         />
+      )}
+
+      {tab === "contacts" && (
+        <div className="max-w-3xl">
+          <p className="text-sm text-[#6B6558] mb-4 max-w-2xl">
+            Title company, real estate broker, mortgage company, insurance, and any other outside contacts.
+            The borrower can also add these from their portal. Invited lenders see this list read-only.
+          </p>
+          <DealContactsPanel scenarioId={id} />
+        </div>
       )}
 
       {tab === "financials" && (
