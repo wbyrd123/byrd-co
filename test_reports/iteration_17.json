@@ -1,0 +1,51 @@
+{
+  "summary": "Tested the Deal Notes refinements (note-count badges, admin hide/unhide from lender view, new test_notes.py) end-to-end on the preview URL. Backend: test_notes.py 14/14 PASS; wrote /app/backend/tests/test_notes_ui_followup.py (4/4 PASS) covering hide->lender-view filtering, unhide->note becomes visible to token lender + doc-counts, cleanup of UI-created notes, login-response shape, CORS preflight, and brute-force lockout (429 after 5 failures). Auth playbook: bcrypt hashes are $2b$12$ for all 3 test accounts, lockout works. Frontend: found and fixed a CRITICAL white-screen crash in NotesPanel (`canModifyAsAdmin is not defined`) that broke the whole Client Portal; after the fix all three roles verified — admin post/hide/unhide + badge + persistence across reload, borrower sees admin's hidden note and has no hide toggle (post/edit/delete works), token-gated lender view never receives the hidden note (no badge, read-only panel, no hide toggle), and after unhide the note appears to the lender. Also fixed a duplicate data-testid collision on admin doc rows. All TEST_ui data deleted (0 remaining).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "CORS middleware (server.py:9781-9786)", "issue": "allow_credentials=True combined with allow_origins default '*' (CORS_ORIGINS unset) is an invalid combination — browsers reject credentialed cross-origin requests. Low impact today because auth uses a Bearer token in the JSON body, but set explicit origins."},
+      {"endpoint": "pytest suites under enforced -n 2 --dist loadscope", "issue": "test_two_factor.py fails 14/40 in parallel ('module pytest has no attribute secret/wayne_token' + no 429 lockout) because state is stashed on the pytest module in one class and read in another class that loadscope assigns to the other worker. 40/40 pass with -n 0. test_deal_contacts.py::TestClientCrud::test_owning_client_crud also failed once in parallel (contacts list came back empty) — same non-atomic deal_contacts array read-modify-write race reported in iteration 16; passes serially. Neither is a notes regression, but the suites are not xdist-safe while pytest.ini forces -n 2."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "NotesPanel.jsx (line 139)", "issue": "FIXED BY TESTER — dead line `const modifiable = canModify(n) || (state.editable && canModifyAsAdmin && ... && false)` referenced an undefined variable. Any viewer who is NOT the note author (e.g. borrower reading an admin note) hit `ReferenceError: canModifyAsAdmin is not defined` inside NotesPanel render, producing a full white-screen 'Uncaught runtime errors' overlay on /portal (Client Portal completely unusable). Removed the unused line; please confirm no logic was intended there.", "selector": "[data-testid=\"general-notes-panel\"]", "priority": "CRITICAL"},
+      {"component": "AdminScenarioDetail.jsx ScenarioDocRow (line ~1444)", "issue": "FIXED BY TESTER — legacy client-facing note input used data-testid `doc-notes-<docId>`, colliding with the NotesPanel wrapper testid `doc-notes-<docId>` (strict-mode violation, 2 matching elements). Renamed the input to `doc-client-note-<docId>`.", "selector": "[data-testid^=\"doc-notes-\"]", "priority": "MEDIUM"},
+      {"component": "LenderView doc row DocNoteButton", "issue": "Read-only lender panel button is labelled 'Add Note' when a doc has 0 notes, but lenders cannot add notes (composer is hidden, panel is readOnly). Label should be 'Notes' / 'View Notes' for the read-only variant.", "selector": "[data-testid^=\"doc-note-btn-\"]", "priority": "LOW"},
+      {"component": "NotesPanel hidden chip", "issue": "The borrower also sees the amber 'HIDDEN' chip + gold row on notes the admin hid from lenders, with no explanation. From the borrower's perspective the note is NOT hidden, so the chip is confusing — either scope the chip to admins or label it 'Hidden from lender'.", "selector": "[data-testid^=\"note-hidden-chip-\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Client Portal /portal at 1920px", "issues": ["Deal Notes / Deal Contacts / doc cards render in a ~560px column with the entire right half of the viewport empty; the notes composer and doc rows feel cramped while huge whitespace sits beside them."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_notes.py",
+    "/app/backend/tests/test_notes_ui_followup.py",
+    "/app/test_reports/pytest/notes_results.xml"
+  ],
+  "action_items": [
+    "Review NotesPanel.jsx: the removed `modifiable` line was dead code referencing an undefined `canModifyAsAdmin` and crashed the Client Portal — confirm no admin-edit-others capability was intended (also remove the now-unused eslint-disable at NotesPanel.jsx:47).",
+    "Make test_two_factor.py xdist-safe (class/session-scoped fixtures instead of pytest.<attr> stashing) since pytest.ini forces -n 2 --dist loadscope.",
+    "Make deal_contacts PATCH/DELETE atomic ($pull / arrayFilters) — still flaky in parallel (carry-over from iteration 16).",
+    "Relabel the read-only lender note button ('Add Note' -> 'Notes') and clarify/scope the 'HIDDEN' chip for borrowers.",
+    "Set explicit CORS_ORIGINS instead of '*' with allow_credentials=True."
+  ],
+  "critical_code_review_comments": [
+    "NotesPanel.jsx:139 shipped an undefined identifier inside the notes .map() — this is a render-time crash reachable by every borrower/lender viewing someone else's note; lint/eslint no-undef would have caught it (frontend build tolerates it, runtime does not).",
+    "Duplicate data-testid values on the same admin doc row make automated tests ambiguous; keep testids globally unique.",
+    "server.py notes routes look correct: visibility toggle is admin-gated (403 for client/lender), lender GET + doc-counts filter hidden_from_lenders, lender-view token routes require session_token (401 without) — verified by tests."
+  ],
+  "updated_files": [
+    "/app/frontend/src/byrd/NotesPanel.jsx",
+    "/app/frontend/src/byrd/AdminScenarioDetail.jsx",
+    "/app/backend/tests/test_notes_ui_followup.py"
+  ],
+  "success_rate": {"backend": "100% (14/14 test_notes.py + 4/4 followup; 2FA & deal-contacts failures are pre-existing xdist test-design/race issues)", "frontend": "100% of notes flows after the NotesPanel crash fix (0% for Client Portal before the fix)"},
+  "seed_data_creation": "One admin note 'TEST_ui_admin_note visibility check' on doc 68ff7983-9cf1-4f14-98e5-436cbe80f7a6 of scenario c4d98f0b… (hidden/unhidden then deleted) and one client note 'TEST_ui_client_note' (edited then deleted). Verified 0 TEST_ui notes remain in Mongo. Used existing Frost Bank share token 6e455e255da149349dd4e7e21ac6b3678c048c7026554d60867e7f557e75abfd for the lender-view flow (no new shares created).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "admin wayne@byrd-co.com/byrdco2026, client sample@example.com/sample123, lender contact@testfrost.example/testlender123 — all valid; bcrypt $2b$12$; login lockout returns 429 after 5 bad passwords.",
+  "context_for_next_testing_agent": "Notes UI testids: doc-note-btn-<docId>, doc-note-badge-<docId>, doc-notes-<docId> (panel), doc-notes-input/submit-<docId>, general-notes-panel/input/submit, note-hide-toggle-<nid>, note-hidden-chip-<nid>, note-edit-btn/note-edit/note-save/note-delete-btn-<nid>. Admin legacy client-note input is now doc-client-note-<docId>. Token lender gate is POST /api/lender-view/{token}/gate with viewer_name/viewer_email/viewer_institution/acknowledged; the gate form inputs have no type attr for name/institution so select by index. Run test_two_factor.py and test_deal_contacts.py with -n 0 to avoid the known xdist state/race failures. Client Portal scenarios must be expanded via [data-testid^=client-scenario-toggle-].",
+  "rca_of_the_issue": "Client Portal white screen: NotesPanel computed an unused `modifiable` flag whose right-hand operand referenced the never-declared `canModifyAsAdmin`. JS short-circuiting hid it for note authors (admin viewing own note), so admin testing passed, but any non-author render (borrower reading the admin note, lender reading any note) evaluated the identifier and threw a ReferenceError during render, unmounting the page tree. Removing the dead assignment restored all three portals; hide/unhide propagation to the token lender view then verified via API and UI."
+}

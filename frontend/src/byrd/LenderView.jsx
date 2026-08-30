@@ -4,7 +4,7 @@ import { API_BASE, api } from "@/lib/api";
 import { LOGO_URL } from "@/byrd/data";
 import { fmtMoney, fmtPct, fmtNum } from "@/byrd/dealData";
 import DealContactsPanel from "@/byrd/DealContactsPanel";
-import NotesPanel from "@/byrd/NotesPanel";
+import NotesPanel, { DocNoteButton } from "@/byrd/NotesPanel";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -72,6 +72,9 @@ export default function LenderView() {
   const [terms, setTerms] = useState(null);
   const [myInvites, setMyInvites] = useState([]);  // For scenario switcher — logged-in lenders only
   const [requestedNow, setRequestedNow] = useState(false);
+  const [docNoteCounts, setDocNoteCounts] = useState({});
+  const [openDocNotes, setOpenDocNotes] = useState({});
+  const toggleDocNotes = (did) => setOpenDocNotes((m) => ({ ...m, [did]: !m[did] }));
 
   useEffect(() => {
     publicFetch(`/lender-view/${token}/preflight`)
@@ -93,6 +96,10 @@ export default function LenderView() {
     try {
       const data = await publicFetch(`/lender-view/${token}?session_token=${encodeURIComponent(sess)}`);
       setPkg(data);
+      try {
+        const counts = await publicFetch(`/lender-view/${token}/notes/doc-counts?session_token=${encodeURIComponent(sess)}`);
+        setDocNoteCounts(counts?.counts || {});
+      } catch { /* silent — badges just won't display */ }
     } catch (e) {
       // session expired
       clearStoredSession(token, user);
@@ -591,6 +598,13 @@ export default function LenderView() {
                               <Download size={12} /> View
                             </button>
                           )}
+                          <DocNoteButton
+                            scenarioId="lender-view"
+                            docId={d.id}
+                            count={docNoteCounts[d.id] || 0}
+                            open={!!openDocNotes[d.id]}
+                            onToggle={() => toggleDocNotes(d.id)}
+                          />
                         </div>
                       </div>
                       {multi && (
@@ -609,6 +623,18 @@ export default function LenderView() {
                             </li>
                           ))}
                         </ul>
+                      )}
+                      {openDocNotes[d.id] && (
+                        <div className="mt-3 border-t border-[#E4DFD1]/70 pt-3" data-testid={`lender-doc-notes-${d.id}`}>
+                          <NotesPanel
+                            scenarioId="lender-view"
+                            docId={d.id}
+                            fetchUrl={`/lender-view/${token}/notes?session_token=${encodeURIComponent(session)}&doc_id=${d.id}`}
+                            title={`Notes on ${d.label}`}
+                            compact
+                            readOnly
+                          />
+                        </div>
                       )}
                     </div>
                   );

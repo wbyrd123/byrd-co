@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
-import { MessageSquare, Plus, PenLine, Trash2, X, Send } from "lucide-react";
+import { MessageSquare, Plus, PenLine, Trash2, X, Send, EyeOff, Eye } from "lucide-react";
 
 /**
  * NotesPanel — shared conversation trail for a scenario or a specific document.
@@ -18,7 +18,7 @@ import { MessageSquare, Plus, PenLine, Trash2, X, Send } from "lucide-react";
  */
 export default function NotesPanel({
   scenarioId, docId, title = "Notes",
-  readOnly = false, compact = false, fetchUrl = null,
+  readOnly = false, compact = false, fetchUrl = null, onCountsChanged = null,
 }) {
   const [state, setState] = useState({ notes: [], editable: false, currentUserId: null, loading: true });
   const [draft, setDraft] = useState("");
@@ -35,6 +35,7 @@ export default function NotesPanel({
         notes: res.data.notes || [],
         editable: !!res.data.editable && !readOnly && !fetchUrl,
         currentUserId: res.data.current_user_id || null,
+        currentUserRole: res.data.current_user_role || null,
         loading: false,
       });
     } catch (e) {
@@ -53,6 +54,7 @@ export default function NotesPanel({
       await api.post(`/scenarios/${scenarioId}/notes`, { body, doc_id: docId || null });
       setDraft("");
       await load();
+      onCountsChanged && onCountsChanged();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Couldn't save note");
     } finally { setBusy(false); }
@@ -79,13 +81,27 @@ export default function NotesPanel({
     try {
       await api.delete(`/scenarios/${scenarioId}/notes/${n.id}`);
       await load();
+      onCountsChanged && onCountsChanged();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Couldn't delete note");
     }
   };
 
+  const toggleHidden = async (n) => {
+    const nextHidden = !n.hidden_from_lenders;
+    try {
+      await api.patch(`/scenarios/${scenarioId}/notes/${n.id}/visibility`,
+                      { hidden_from_lenders: nextHidden });
+      toast.success(nextHidden ? "Hidden from lender" : "Now visible to lender");
+      await load();
+      onCountsChanged && onCountsChanged();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't update visibility");
+    }
+  };
+
   const canModify = (n) => state.editable && n.author_id === state.currentUserId;
-  const canModifyAsAdmin = () => state.editable; // note: server also allows admin over any note
+  const isAdmin = state.currentUserRole === "admin";
 
   const roleBadge = (role) => {
     const map = { admin: ["Byrd & CO", "bg-[#1A1A1A] text-[#C89434]"],
@@ -120,12 +136,20 @@ export default function NotesPanel({
       <div className="space-y-2">
         {state.notes.map((n) => {
           const isEditing = editingId === n.id;
-          const modifiable = canModify(n) || (state.editable && canModifyAsAdmin && n.author_role !== "admin" && state.currentUserId && n.author_id !== state.currentUserId && false);
           return (
-            <div key={n.id} className="border border-[#E4DFD1] rounded-md p-2.5 bg-white" data-testid={`note-${n.id}`}>
+            <div key={n.id} className={`border rounded-md p-2.5 ${n.hidden_from_lenders ? "border-[#E5B968] bg-[#FBEFD3]/40" : "border-[#E4DFD1] bg-white"}`} data-testid={`note-${n.id}`}>
               <div className="flex items-center gap-2 mb-1">
                 {roleBadge(n.author_role)}
                 <span className="text-xs font-medium text-[#2A2A2A] truncate">{n.author_name || "—"}</span>
+                {n.hidden_from_lenders && (
+                  <span
+                    data-testid={`note-hidden-chip-${n.id}`}
+                    className="inline-flex items-center gap-1 rounded-md bg-[#7A5410] text-[#FBEFD3] px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-widest"
+                    title="Not visible to lenders"
+                  >
+                    <EyeOff size={9} /> Hidden
+                  </span>
+                )}
                 <span className="text-[10px] text-[#6B6558] ml-auto whitespace-nowrap">
                   {n.updated_at && n.updated_at !== n.created_at
                     ? `edited ${new Date(n.updated_at).toLocaleString()}`
@@ -152,10 +176,27 @@ export default function NotesPanel({
               ) : (
                 <>
                   <div className="text-sm text-[#2A2A2A] whitespace-pre-wrap leading-relaxed">{n.body}</div>
-                  {canModify(n) && !readOnly && (
+                  {!readOnly && (canModify(n) || isAdmin) && (
                     <div className="flex justify-end gap-1 mt-1">
-                      <button onClick={() => beginEdit(n)} data-testid={`note-edit-btn-${n.id}`} className="p-1 text-[#6B6558] hover:text-[#1A1A1A]" title="Edit"><PenLine size={11} /></button>
-                      <button onClick={() => remove(n)} data-testid={`note-delete-btn-${n.id}`} className="p-1 text-[#6B6558] hover:text-[#B23B3B]" title="Delete"><Trash2 size={11} /></button>
+                      {isAdmin && (
+                        <button
+                          onClick={() => toggleHidden(n)}
+                          data-testid={`note-hide-toggle-${n.id}`}
+                          className={`p-1 ${n.hidden_from_lenders ? "text-[#7A5410]" : "text-[#6B6558]"} hover:text-[#1A1A1A]`}
+                          title={n.hidden_from_lenders ? "Show to lenders" : "Hide from lenders"}
+                        >
+                          {n.hidden_from_lenders ? <Eye size={11} /> : <EyeOff size={11} />}
+                        </button>
+                      )}
+                      {canModify(n) && (
+                        <>
+                          <button onClick={() => beginEdit(n)} data-testid={`note-edit-btn-${n.id}`} className="p-1 text-[#6B6558] hover:text-[#1A1A1A]" title="Edit"><PenLine size={11} /></button>
+                          <button onClick={() => remove(n)} data-testid={`note-delete-btn-${n.id}`} className="p-1 text-[#6B6558] hover:text-[#B23B3B]" title="Delete"><Trash2 size={11} /></button>
+                        </>
+                      )}
+                      {isAdmin && !canModify(n) && (
+                        <button onClick={() => remove(n)} data-testid={`note-delete-btn-${n.id}`} className="p-1 text-[#6B6558] hover:text-[#B23B3B]" title="Delete (admin)"><Trash2 size={11} /></button>
+                      )}
                     </div>
                   )}
                 </>

@@ -8,7 +8,26 @@
 - P2: Rate-limit `/public/lender/apply` and `/public/password-reset/request` (basic per-IP throttle)
 - P2: Automated weekly Postmark lender-activity summary emails
 - P2: Postmark notification to borrower when broker uploads a doc on their behalf
-- P3: Refactor `server.py` (~7,700 lines) into modular routes
+- P3: Contacts on the Deal Package PDF (one printable page with everyone on the deal)
+- P3: Refactor `server.py` (~11k lines) into modular routes
+
+
+### Deal Notes V2 — Hide-from-Lender + Badges + Tests — SHIPPED 2026-02
+Admins can now selectively hide any note (client-authored or otherwise) from lender-facing views without deleting it. Badge counts propagate everywhere. Full pytest coverage added.
+
+**Backend (`/app/backend/server.py`):**
+- `PATCH /api/scenarios/{sid}/notes/{nid}/visibility` — admin-only, toggles `hidden_from_lenders`. Emits `note_visibility_changed` audit event.
+- `GET /api/scenarios/{sid}/notes` + `GET /api/lender-view/{token}/notes` filter out `hidden_from_lenders: true` for role=lender / anon-lender viewers. Client + admin always see full history.
+- `GET /api/scenarios/{sid}/notes/doc-counts` + `GET /api/lender-view/{token}/notes/doc-counts` exclude hidden notes from lender counts.
+
+**Frontend:**
+- `/app/frontend/src/byrd/NotesPanel.jsx` — Admin-only `note-hide-toggle-{nid}` (eye icon), `note-hidden-chip-{nid}` gold badge on hidden notes, `onCountsChanged` callback so badges refresh on CUD/visibility change.
+- `/app/frontend/src/byrd/AdminScenarioDetail.jsx` — DocsTab fetches `/notes/doc-counts` and passes per-row `noteCount` + open/toggle state; ScenarioDocRow renders `DocNoteButton` + inline `NotesPanel` under each doc.
+- `/app/frontend/src/byrd/LenderView.jsx` — loadPackage fetches token-gated `/notes/doc-counts`; renders `DocNoteButton` + inline read-only `NotesPanel` per document (fetchUrl variant, respects session_token).
+
+**Tests:**
+- `/app/backend/tests/test_notes.py` — 14 tests (CRUD, doc-scoping, RBAC 403/401/404, admin delete-any override, doc-count aggregation, admin visibility toggle, lender GET filtering, token-gated lender-view endpoint filtering, unknown-token 404, audit-log emission for add/update/remove/visibility). Parallel-worker safe via per-pid TAG prefix + autouse fixture that seeds a scenario_share for the test lender.
+- All 14 tests + regression suites (`test_deal_contacts.py`, `test_audit_log.py`) green.
 
 
 ### Security Hardening — Phase 2 (Backups) — INFRASTRUCTURE SHIPPED 2026-02

@@ -16,7 +16,7 @@ import ScenarioAIFab from "@/byrd/ScenarioAIFab";
 import BulkUploadZone from "@/byrd/BulkUploadZone";
 import AdminFinancialsTab from "@/byrd/AdminFinancialsTab";
 import DealContactsPanel from "@/byrd/DealContactsPanel";
-import NotesPanel from "@/byrd/NotesPanel";
+import NotesPanel, { DocNoteButton } from "@/byrd/NotesPanel";
 
 const useDebouncedSave = (fn, delay = 800) => {
   const [timer, setTimer] = useState(null);
@@ -1083,6 +1083,17 @@ function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility,
   const nonFeeDocs = allDocs.filter((d) => d.label !== "Signed Fee Agreement");
   const [copyOpen, setCopyOpen] = useState(false);
   const [sponsorFilter, setSponsorFilter] = useState("all");
+  // Per-doc notes: badge counts + inline expanded panels
+  const [docNoteCounts, setDocNoteCounts] = useState({});
+  const [openDocNotes, setOpenDocNotes] = useState({});
+  const toggleDocNotes = (did) => setOpenDocNotes((m) => ({ ...m, [did]: !m[did] }));
+  const refreshNoteCounts = React.useCallback(async () => {
+    try {
+      const r = await api.get(`/scenarios/${scen.id}/notes/doc-counts`);
+      setDocNoteCounts(r.data?.counts || {});
+    } catch { /* silent — badges just won't update */ }
+  }, [scen.id]);
+  useEffect(() => { refreshNoteCounts(); }, [refreshNoteCounts]);
   // Apply sponsor filter
   const docs = nonFeeDocs.filter((d) => {
     if (sponsorFilter === "all") return true;
@@ -1181,6 +1192,10 @@ function DocsTab({ scen, onAddDoc, onUpdateDoc, onRemoveDoc, onToggleVisibility,
             onRemove={() => onRemoveDoc(d.id, d.label)}
             onToggleVisibility={onToggleVisibility}
             onReload={onReload}
+            noteCount={docNoteCounts[d.id] || 0}
+            notesOpen={!!openDocNotes[d.id]}
+            onToggleNotes={() => toggleDocNotes(d.id)}
+            onNotesChanged={refreshNoteCounts}
           />
         ))}
       </div>
@@ -1267,7 +1282,7 @@ const DOC_STATUS_OPTIONS = [
   { v: "rejected", label: "Rejected" },
 ];
 
-function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, onUpdate, onRemove, onToggleVisibility, onReload }) {
+function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, onUpdate, onRemove, onToggleVisibility, onReload, noteCount = 0, notesOpen = false, onToggleNotes, onNotesChanged }) {
   const [notes, setNotes] = useState(doc.notes || "");
   const [status, setStatus] = useState(doc.status);
   const [dirty, setDirty] = useState(false);
@@ -1328,7 +1343,8 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
   const currentVis = doc.lender_visibility || "on_request";
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-[2fr_.9fr_1fr_1.4fr_1.2fr] border-b border-[#E4DFD1] last:border-b-0 items-center" data-testid={`scen-doc-${doc.id}`}>
+    <div className="border-b border-[#E4DFD1] last:border-b-0" data-testid={`scen-doc-${doc.id}`}>
+      <div className="grid grid-cols-1 md:grid-cols-[2fr_.9fr_1fr_1.4fr_1.2fr] items-center">
       <div className="px-4 py-3">
         <div className="font-semibold">{doc.label}</div>
         <div className="flex items-center gap-2 mt-0.5 flex-wrap">
@@ -1425,11 +1441,11 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
           onChange={(e) => { setNotes(e.target.value); setDirty(true); }}
           onBlur={() => dirty && save()}
           placeholder="Note (visible to client)"
-          data-testid={`doc-notes-${doc.id}`}
+          data-testid={`doc-client-note-${doc.id}`}
           className="mt-2 w-full h-8 px-2 rounded-md border border-[#E4DFD1] bg-white text-xs"
         />
       </div>
-      <div className="px-4 py-3 flex items-center gap-2">
+      <div className="px-4 py-3 flex items-center gap-2 flex-wrap">
         <div
           className="inline-flex rounded-md border border-[#E4DFD1] overflow-hidden text-[10px]"
           title="Default lender visibility for this document: Hidden = lenders never see it. On Request = lenders see the line title and can ask for it. Included = auto-shared with every lender who gets this deal package."
@@ -1453,6 +1469,13 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
             );
           })}
         </div>
+        <DocNoteButton
+          scenarioId={scenarioId}
+          docId={doc.id}
+          count={noteCount}
+          open={notesOpen}
+          onToggle={onToggleNotes}
+        />
         <button
           onClick={onRemove}
           data-testid={`doc-remove-${doc.id}`}
@@ -1462,6 +1485,18 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
           <Trash2 size={12} />
         </button>
       </div>
+      </div>
+      {notesOpen && (
+        <div className="px-4 pb-4 pt-1 bg-[#FBF8F1]/50" data-testid={`scen-doc-notes-wrap-${doc.id}`}>
+          <NotesPanel
+            scenarioId={scenarioId}
+            docId={doc.id}
+            title={`Notes on ${doc.label}`}
+            compact
+            onCountsChanged={onNotesChanged}
+          />
+        </div>
+      )}
     </div>
   );
 }

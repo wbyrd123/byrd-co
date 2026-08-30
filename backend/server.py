@@ -2047,6 +2047,7 @@ def _sanitize_note(n: dict) -> dict:
         "author_role": n.get("author_role"),
         "author_id": n.get("author_id"),
         "author_name": n.get("author_name"),
+        "hidden_from_lenders": bool(n.get("hidden_from_lenders")),
         "created_at": n.get("created_at"),
         "updated_at": n.get("updated_at"),
     }
@@ -2067,7 +2068,10 @@ async def _user_can_access_scenario_notes(scen: dict, user: dict) -> bool:
 async def list_scenario_notes(sid: str, doc_id: Optional[str] = None,
                               user=Depends(get_current_user)):
     """List notes for a scenario. `doc_id=null` (default) returns general notes; passing
-    `doc_id=<id>` returns notes for that document. `doc_id=all` returns everything."""
+    `doc_id=<id>` returns notes for that document. `doc_id=all` returns everything.
+
+    Lenders never see notes marked hidden_from_lenders — that's how admin can suppress
+    borrower notes from third-party underwriting eyes."""
     scen = await _scenario_or_404(sid)
     if not await _user_can_access_scenario_notes(scen, user):
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -2078,10 +2082,13 @@ async def list_scenario_notes(sid: str, doc_id: Optional[str] = None,
         q["doc_id"] = None
     else:
         q["doc_id"] = doc_id
+    if user.get("role") == "lender":
+        q["$or"] = [{"hidden_from_lenders": {"$exists": False}}, {"hidden_from_lenders": False}]
     rows = await db.scenario_notes.find(q, {"_id": 0}).sort("created_at", 1).to_list(500)
     return {
         "editable": user.get("role") in ("admin", "client", "lender"),
         "current_user_id": user["id"],
+        "current_user_role": user.get("role"),
         "notes": [_sanitize_note(n) for n in rows],
     }
 
@@ -2167,18 +2174,44 @@ async def delete_scenario_note(sid: str, nid: str, request: Request,
 
 @api.get("/scenarios/{sid}/notes/doc-counts")
 async def scenario_doc_note_counts(sid: str, user=Depends(get_current_user)):
-    """Return a map of {doc_id: count} for badge indicators on the docs list."""
+    """Return a map of {doc_id: count} for badge indicators on the docs list.
+    Lenders' counts exclude admin-hidden notes."""
     scen = await _scenario_or_404(sid)
     if not await _user_can_access_scenario_notes(scen, user):
         raise HTTPException(status_code=403, detail="Not authorized")
-    pipeline = [
-        {"$match": {"scenario_id": sid, "doc_id": {"$ne": None}}},
-        {"$group": {"_id": "$doc_id", "count": {"$sum": 1}}},
-    ]
+    match: dict = {"scenario_id": sid, "doc_id": {"$ne": None}}
+    if user.get("role") == "lender":
+        match["$or"] = [{"hidden_from_lenders": {"$exists": False}}, {"hidden_from_lenders": False}]
     counts = {}
-    async for row in db.scenario_notes.aggregate(pipeline):
+    async for row in db.scenario_notes.aggregate([
+        {"$match": match}, {"$group": {"_id": "$doc_id", "count": {"$sum": 1}}},
+    ]):
         counts[row["_id"]] = row["count"]
     return {"counts": counts}
+
+
+class NoteVisibilityBody(BaseModel):
+    hidden_from_lenders: bool
+
+
+@api.patch("/scenarios/{sid}/notes/{nid}/visibility")
+async def admin_toggle_note_visibility(sid: str, nid: str, body: NoteVisibilityBody,
+                                        request: Request, admin=Depends(require_admin)):
+    """Admin-only: hide a note from lender eyes (borrower privacy) or un-hide it.
+    Borrower + admin still see the note in their own portals."""
+    note = await db.scenario_notes.find_one({"id": nid, "scenario_id": sid})
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    await db.scenario_notes.update_one(
+        {"id": nid},
+        {"$set": {"hidden_from_lenders": bool(body.hidden_from_lenders), "updated_at": now_iso()}},
+    )
+    await audit_log(db, event_type="scenario.update", request=request, user=admin,
+                    resource_type="scenario", resource_id=sid,
+                    metadata={"fields": ["notes"], "action": "note_visibility_changed",
+                              "note_id": nid, "hidden_from_lenders": bool(body.hidden_from_lenders)})
+    updated = await db.scenario_notes.find_one({"id": nid}, {"_id": 0})
+    return _sanitize_note(updated)
 
 
 # Token-gated LenderView — read-only view of general + per-doc notes.
@@ -2186,7 +2219,8 @@ async def scenario_doc_note_counts(sid: str, user=Depends(get_current_user)):
 async def lender_view_notes(token: str, session_token: Optional[str] = None,
                             doc_id: Optional[str] = None):
     share, session = await _require_view_session(token, session_token)
-    q: dict = {"scenario_id": share["scenario_id"]}
+    q: dict = {"scenario_id": share["scenario_id"],
+               "$or": [{"hidden_from_lenders": {"$exists": False}}, {"hidden_from_lenders": False}]}
     if doc_id == "all":
         pass
     elif doc_id is None or doc_id == "":
@@ -2195,6 +2229,19 @@ async def lender_view_notes(token: str, session_token: Optional[str] = None,
         q["doc_id"] = doc_id
     rows = await db.scenario_notes.find(q, {"_id": 0}).sort("created_at", 1).to_list(500)
     return {"notes": [_sanitize_note(n) for n in rows]}
+
+
+@api.get("/lender-view/{token}/notes/doc-counts")
+async def lender_view_note_counts(token: str, session_token: Optional[str] = None):
+    share, session = await _require_view_session(token, session_token)
+    match = {"scenario_id": share["scenario_id"], "doc_id": {"$ne": None},
+             "$or": [{"hidden_from_lenders": {"$exists": False}}, {"hidden_from_lenders": False}]}
+    counts = {}
+    async for row in db.scenario_notes.aggregate([
+        {"$match": match}, {"$group": {"_id": "$doc_id", "count": {"$sum": 1}}},
+    ]):
+        counts[row["_id"]] = row["count"]
+    return {"counts": counts}
 
 
 @api.post("/client/docs/{doc_id}/upload")
