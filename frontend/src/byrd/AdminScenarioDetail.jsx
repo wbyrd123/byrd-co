@@ -3,7 +3,7 @@ import { useParams, useNavigate, Link } from "react-router-dom";
 import { api, API_BASE } from "@/lib/api";
 import { toast } from "sonner";
 import {
-  LOAN_TYPES, PROPERTY_TYPES, RECOURSE_OPTIONS, SCENARIO_STATUSES,
+  LOAN_TYPES, PROPERTY_TYPES, PROPERTY_SUBTYPES, RECOURSE_OPTIONS, SCENARIO_STATUSES,
   fmtMoney, fmtPct, fmtNum, scenarioStatusChip,
 } from "@/byrd/dealData";
 import {
@@ -476,10 +476,16 @@ function OverviewTab({ scen, m }) {
             {prop.address ? `${prop.address}, ` : ""}{[prop.city, prop.state, prop.zip].filter(Boolean).join(", ") || "Address TBD"}
           </h3>
           <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-            <div><span className="text-[#6B6558]">Type</span><br/><b>{prop.property_type || "—"}</b></div>
+            <div><span className="text-[#6B6558]">Type</span><br/><b>{prop.property_type || "—"}{prop.property_subtype ? <span className="block text-xs text-[#6B6558] font-normal mt-0.5">{prop.property_subtype}</span> : null}</b></div>
             <div><span className="text-[#6B6558]">Units</span><br/><b>{fmtNum(prop.units)}</b></div>
             <div><span className="text-[#6B6558]">Purchase Price</span><br/><b>{fmtMoney(prop.purchase_price)}</b></div>
             <div><span className="text-[#6B6558]">Value</span><br/><b>{fmtMoney(m.property_value)}</b></div>
+            {prop.leasehold != null && (
+              <div><span className="text-[#6B6558]">Leasehold</span><br/><b>{prop.leasehold ? "Yes" : "No"}</b></div>
+            )}
+            {prop.short_term_rental != null && (
+              <div><span className="text-[#6B6558]">Short-Term Rental</span><br/><b>{prop.short_term_rental ? "Yes" : "No"}</b></div>
+            )}
           </div>
         </div>
         <div className="byrd-card p-6">
@@ -703,11 +709,19 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Field label="Address" className="md:col-span-2"><Inp defaultValue={prop.address || ""} onBlur={prSet("address")} data-testid="pr-address" /></Field>
           <Field label="Property Type">
-            <Sel value={prop.property_type || ""} onChange={(e) => patchSection("property_info")({ property_type: e.target.value })} data-testid="pr-type">
+            <Sel value={prop.property_type || ""} onChange={(e) => patchSection("property_info")({ property_type: e.target.value, property_subtype: "" })} data-testid="pr-type">
               <option value="">Select…</option>
               {PROPERTY_TYPES.map((p) => <option key={p} value={p}>{p}</option>)}
             </Sel>
           </Field>
+          {PROPERTY_SUBTYPES[prop.property_type]?.length > 0 && (
+            <Field label="Property Sub-Type">
+              <Sel value={prop.property_subtype || ""} onChange={(e) => patchSection("property_info")({ property_subtype: e.target.value })} data-testid="pr-subtype">
+                <option value="">Select…</option>
+                {PROPERTY_SUBTYPES[prop.property_type].map((s) => <option key={s} value={s}>{s}</option>)}
+              </Sel>
+            </Field>
+          )}
           <Field label="City"><Inp defaultValue={prop.city || ""} onBlur={prSet("city")} /></Field>
           <Field label="State"><Inp defaultValue={prop.state || ""} onBlur={prSet("state")} placeholder="TX" /></Field>
           <Field label="ZIP"><Inp defaultValue={prop.zip || ""} onBlur={prSet("zip")} /></Field>
@@ -722,6 +736,24 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
               <option value="">Select…</option>
               <option value="owner_occupied">Owner-Occupied</option>
               <option value="non_owner_occupied">Non-Owner-Occupied</option>
+            </Sel>
+          </Field>
+          <Field label="Leasehold?">
+            <Sel value={prop.leasehold == null ? "" : (prop.leasehold ? "yes" : "no")}
+                 onChange={(e) => patchSection("property_info")({ leasehold: e.target.value === "" ? null : e.target.value === "yes" })}
+                 data-testid="pr-leasehold">
+              <option value="">Select…</option>
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
+            </Sel>
+          </Field>
+          <Field label="Short-Term Rental?">
+            <Sel value={prop.short_term_rental == null ? "" : (prop.short_term_rental ? "yes" : "no")}
+                 onChange={(e) => patchSection("property_info")({ short_term_rental: e.target.value === "" ? null : e.target.value === "yes" })}
+                 data-testid="pr-str">
+              <option value="">Select…</option>
+              <option value="yes">Yes</option>
+              <option value="no">No</option>
             </Sel>
           </Field>
         </div>

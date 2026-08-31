@@ -2,10 +2,91 @@
 export const LOAN_TYPES = ["Purchase", "Refinance", "Cash-Out", "Construction", "Bridge", "Portfolio"];
 
 export const PROPERTY_TYPES = [
-  "Multifamily", "Hotel", "Office", "Condo Project",
-  "Single-Family Residence", "Condo Unit", "1-4 Unit", "Portfolio",
-  "New Construction", "Other",
+  "Multifamily", "Hotel", "Office", "Retail", "Industrial", "Healthcare",
+  "Special Use", "Mobile Home Park", "Self Storage",
+  "Condo Project", "Single-Family Residence", "Condo Unit", "1-4 Unit",
+  "Portfolio", "New Construction", "Other",
 ];
+
+// Sub-type map for the Package screen. Keys must match PROPERTY_TYPES entries.
+// Sourced from CommLoan property-type flyer + broker additions.
+// Types not listed here (e.g. "Other", "1-4 Unit") intentionally have no sub-types.
+export const PROPERTY_SUBTYPES = {
+  Retail: [
+    "Factory Outlet",
+    "Mall Regional",
+    "Mall Super Regional",
+    "Neighborhood Center Grocery (Anchored)",
+    "Power Center",
+    "Retail Shadow Anchored",
+    "Retail Single Tenant",
+    "Unanchored Retail Strip",
+  ],
+  Multifamily: [
+    "Apartment Building CO-OP",
+    "Apartment Building Condo",
+    "Apartment Building Garden",
+    "Apartment Building Mid-High Rise",
+    "Apartment Building Townhomes",
+    "Mixed Use",
+    "Senior Housing / 55+ Community",
+    "Special Use — Military",
+    "Special Use — Student",
+  ],
+  Industrial: [
+    "Flex Space / R&D",
+    "Manufacturing Heavy Industrial",
+    "Manufacturing Light Industrial",
+    "Warehouse Bulk District",
+    "Warehouse Cold Storage",
+  ],
+  Office: [
+    "CBD Central Business District",
+    "Medical Office",
+    "Mixed Use (Office / Retail)",
+    "Office Single Tenant",
+    "Suburban Garden Office",
+    "Suburban High Rise",
+  ],
+  Healthcare: [
+    "Assisted Living Facility",
+    "Hospital",
+    "Inpatient Facility",
+    "Outpatient Facility",
+    "Skilled Nursing (Memory Care)",
+  ],
+  "Special Use": [
+    "Auto Body / Service and Repair",
+    "Auto Dealership",
+    "Bars / Nightclubs",
+    "Bowling Alley",
+    "C-Store",
+    "Campground",
+    "Car Wash",
+    "Daycare Facility",
+    "Franchise Restaurant",
+    "Non-Franchise Restaurant",
+    "Funeral Home",
+    "Gas / Fuel Station",
+    "Golf Course",
+    "Marina",
+    "Movie Theatre",
+    "Single Family Home Portfolio",
+  ],
+  Hotel: [
+    "Flagged / Unflagged Conversion",
+    "Flagged / Unflagged Full Service",
+    "Flagged / Unflagged Limited Service",
+    "Flagged / Unflagged Suite / Extended Stay",
+  ],
+  "Mobile Home Park": [
+    "1-Star",
+    "2-Star",
+    "3-Star",
+    "4-Star",
+    "5-Star",
+  ],
+};
 
 export const RECOURSE_OPTIONS = ["recourse", "non-recourse", "partial"];
 

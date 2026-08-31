@@ -2451,6 +2451,7 @@ class PropertyInfo(BaseModel):
     state: Optional[str] = ""
     zip: Optional[str] = ""
     property_type: Optional[str] = ""
+    property_subtype: Optional[str] = ""
     year_built: Optional[int] = None
     units: Optional[int] = None
     sqft: Optional[float] = None
@@ -2458,6 +2459,8 @@ class PropertyInfo(BaseModel):
     current_value: Optional[float] = None
     occupancy_pct: Optional[float] = None
     occupancy_type: Optional[Literal["owner_occupied", "non_owner_occupied"]] = None
+    leasehold: Optional[bool] = None
+    short_term_rental: Optional[bool] = None
 
 
 class LoanRequest(BaseModel):
