@@ -1287,11 +1287,26 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
   const [status, setStatus] = useState(doc.status);
   const [dirty, setDirty] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [labelEditing, setLabelEditing] = useState(false);
+  const [labelDraft, setLabelDraft] = useState(doc.label);
 
-  useEffect(() => { setNotes(doc.notes || ""); setStatus(doc.status); setDirty(false); }, [doc.id, doc.status, doc.notes]);
+  useEffect(() => { setNotes(doc.notes || ""); setStatus(doc.status); setLabelDraft(doc.label); setDirty(false); }, [doc.id, doc.status, doc.notes, doc.label]);
 
   const save = async () => { await onUpdate(doc.id, { status, notes }); setDirty(false); };
   const quickStatus = async (s) => { setStatus(s); await onUpdate(doc.id, { status: s, notes }); setDirty(false); };
+
+  const saveLabel = async () => {
+    const next = labelDraft.trim();
+    if (!next || next === doc.label) { setLabelDraft(doc.label); setLabelEditing(false); return; }
+    try {
+      await onUpdate(doc.id, { label: next });
+      setLabelEditing(false);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't rename document");
+      setLabelDraft(doc.label);
+      setLabelEditing(false);
+    }
+  };
 
   const downloadFile = async (fileId) => {
     const res = await api.get(`/files/${fileId}`, { responseType: "blob" });
@@ -1346,7 +1361,31 @@ function ScenarioDocRow({ doc, scenarioId, sponsors = [], sponsorLookup = {}, on
     <div className="border-b border-[#E4DFD1] last:border-b-0" data-testid={`scen-doc-${doc.id}`}>
       <div className="grid grid-cols-1 md:grid-cols-[2fr_.9fr_1fr_1.4fr_1.2fr] items-center">
       <div className="px-4 py-3">
-        <div className="font-semibold">{doc.label}</div>
+        {labelEditing ? (
+          <input
+            autoFocus
+            value={labelDraft}
+            onChange={(e) => setLabelDraft(e.target.value)}
+            onBlur={saveLabel}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); saveLabel(); }
+              if (e.key === "Escape") { setLabelDraft(doc.label); setLabelEditing(false); }
+            }}
+            data-testid={`doc-label-input-${doc.id}`}
+            className="w-full h-8 px-2 rounded-md border border-[#C89434] bg-white text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-[#C89434]/40"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => setLabelEditing(true)}
+            data-testid={`doc-label-edit-${doc.id}`}
+            className="group text-left w-full inline-flex items-center gap-1.5"
+            title="Click to rename"
+          >
+            <span className="font-semibold">{doc.label}</span>
+            <PenLine size={11} className="text-[#6B6558] opacity-0 group-hover:opacity-100 transition-opacity" />
+          </button>
+        )}
         <div className="flex items-center gap-2 mt-0.5 flex-wrap">
           {doc.required && <div className="text-[10px] font-mono uppercase text-[#C89434] tracking-widest">Required</div>}
           {sponsors.length > 0 && (
