@@ -41,6 +41,7 @@ from email_service import (
     tmpl_lender_application_received, tmpl_lender_approved, tmpl_lender_invite,
     tmpl_term_sheet_submitted, tmpl_term_sheet_status_change,
     tmpl_password_reset, tmpl_2fa_code, friendly_delivery_error,
+    tmpl_client_doc_upload,
 )
 import audit_service
 from audit_service import log_event as audit_log
@@ -2313,7 +2314,8 @@ async def lender_view_note_counts(token: str, session_token: Optional[str] = Non
 
 
 @api.post("/client/docs/{doc_id}/upload")
-async def client_upload(doc_id: str, body: DocUploadInput, request: Request, user=Depends(require_client)):
+async def client_upload(doc_id: str, body: DocUploadInput, request: Request,
+                        background: BackgroundTasks, user=Depends(require_client)):
     """Append a new file to a doc line. A single line can hold many files
     (e.g., 3 years of tax returns, multi-page entity docs). Marks status='uploaded'.
     Works for both the primary client and any linked sponsor on the scenario."""
@@ -2327,7 +2329,60 @@ async def client_upload(doc_id: str, body: DocUploadInput, request: Request, use
                     resource_name=body.filename,
                     metadata={"file_id": meta["file_id"], "doc_label": d.get("label"),
                               "scenario_id": d.get("scenario_id"), "size_b64": len(body.data_b64 or "")})
+    # Notify broker(s) that the borrower dropped a file. We don't want a bulk-upload of
+    # 20 files to spam the inbox 20 times, so we throttle in-process (see helper below).
+    try:
+        await _maybe_notify_broker_of_upload(user, d, body.filename, background)
+    except Exception:
+        logger.exception("client_upload notify failed doc=%s file=%s", doc_id, body.filename)
     return {"ok": True, "file_id": meta["file_id"]}
+
+
+# In-memory throttle table: key = (scenario_id, uploader_user_id) -> last-sent monotonic ts.
+# We coalesce burst uploads (drag-and-drop of many files) into ONE notification per bucket
+# within the throttle window. If a broker wants per-file granularity later, drop the window
+# to 0 in env. Cleared on server restart which is fine — worst case we send one extra email.
+_UPLOAD_NOTIFY_STATE: dict = {}
+
+
+async def _maybe_notify_broker_of_upload(user: dict, doc: dict, filename: str,
+                                          background: BackgroundTasks) -> None:
+    brokers = broker_emails()
+    if not brokers:
+        return
+    if str(os.environ.get("NOTIFY_BROKER_ON_UPLOAD", "true")).lower() in ("0", "false", "no", "off"):
+        return
+    try:
+        window = float(os.environ.get("UPLOAD_NOTIFY_WINDOW_SECONDS", "120"))
+    except (TypeError, ValueError):
+        window = 120.0
+    import time as _time
+    sid = doc.get("scenario_id")
+    key = (sid, user.get("id"))
+    now_ts = _time.monotonic()
+    last = _UPLOAD_NOTIFY_STATE.get(key)
+    if last is not None and (now_ts - last) < window:
+        # Within the coalesce window — skip. The doc list itself already reflects
+        # the new file; the broker can see everything on their next open.
+        return
+    _UPLOAD_NOTIFY_STATE[key] = now_ts
+    scen = await db.scenarios.find_one({"id": sid}, {"_id": 0, "name": 1, "client_id": 1})
+    client = None
+    if scen and scen.get("client_id"):
+        client = await db.users.find_one({"id": scen["client_id"]}, {"_id": 0, "name": 1, "email": 1})
+    files_on_line = len(doc.get("files") or []) + 1  # include the file we just appended
+    subj, html, text = tmpl_client_doc_upload(
+        uploader_name=user.get("name") or "",
+        uploader_email=user.get("email") or "",
+        client_name=(client or {}).get("name") or "",
+        scenario_name=(scen or {}).get("name") or "(untitled scenario)",
+        scenario_id=sid or "",
+        doc_label=doc.get("label") or "Untitled Doc",
+        filename=filename,
+        files_on_line=files_on_line,
+    )
+    for r in brokers:
+        background.add_task(send_email, r, subj, html, text, "client_upload")
 
 
 @api.delete("/client/docs/{doc_id}/files/{file_id}")

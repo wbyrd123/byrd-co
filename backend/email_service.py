@@ -452,3 +452,46 @@ def tmpl_2fa_code(name: str, code: str) -> tuple[str, str, str]:
     </div>
     """
     return subject, html, text
+
+
+
+def tmpl_client_doc_upload(*, uploader_name: str, uploader_email: str, client_name: str,
+                           scenario_name: str, scenario_id: str, doc_label: str,
+                           filename: str, files_on_line: int) -> tuple[str, str, str]:
+    """One-line-per-file notice to the broker when a borrower drops a doc into the portal."""
+    base = public_base_url()
+    scenario_link = f"{base}/admin/scenarios/{scenario_id}" if base else f"/admin/scenarios/{scenario_id}"
+    who = uploader_name or uploader_email or "The borrower"
+    subject = f"[Byrd Portal] {who} uploaded {filename} — {scenario_name}"
+    text = (
+        f"{who} just uploaded a file to their client portal.\n\n"
+        f"Client: {client_name or uploader_email or '—'}\n"
+        f"Scenario: {scenario_name}\n"
+        f"Doc Line: {doc_label}\n"
+        f"File: {filename}\n"
+        f"Files on this line: {files_on_line}\n\n"
+        f"Review it: {scenario_link}\n"
+    )
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:600px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">Client Doc Upload</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 6px;font-family:Georgia,serif;">{who}</h2>
+        <div style="font-family:Arial,sans-serif;font-size:13px;color:#6B6558;margin-bottom:16px;">just uploaded a file to their portal.</div>
+        <table style="width:100%;font-family:Arial,sans-serif;font-size:14px;border-collapse:collapse;">
+          <tr><td style="color:#6B6558;padding:4px 0;width:120px;">Scenario</td><td><b>{scenario_name}</b></td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">Client</td><td>{client_name or uploader_email or '—'}</td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">Doc Line</td><td>{doc_label}</td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">File</td><td style="word-break:break-all;">{filename}</td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">Files on Line</td><td>{files_on_line}</td></tr>
+        </table>
+        <div style="margin-top:20px;">
+          <a href="{scenario_link}" style="background:#C89434;color:#1A1A1A;padding:10px 18px;text-decoration:none;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;">Review in Admin</a>
+        </div>
+      </div>
+    </div>
+    """
+    return subject, html, text
