@@ -2611,6 +2611,7 @@ class LenderCreate(BaseModel):
     institution_type: Optional[str] = "bank"   # bank / credit_union / private / agency / bridge / hard_money / other
     contacts: List[LenderContact] = Field(default_factory=list)
     property_types: List[str] = Field(default_factory=list)
+    property_subtypes: List[str] = Field(default_factory=list)
     min_loan: Optional[float] = None
     max_loan: Optional[float] = None
     max_ltv: Optional[float] = None
@@ -2822,12 +2823,31 @@ def compute_scenario_metrics(scen: dict) -> dict:
     }
 
 
+# Lender-side vocabulary sometimes uses slightly different labels than the deal-side
+# (legacy: "Hospitality", "Self-storage", "Mixed-use"). Normalise before matching so we
+# don't drop a fit for a cosmetic label difference. Mirror `canonicalPropertyType` in
+# `/app/frontend/src/byrd/dealData.js`.
+_PROPERTY_TYPE_ALIASES = {
+    "hospitality": "hotel",
+    "self-storage": "self storage",
+    "mixed-use": "multifamily",
+    "mixed use": "multifamily",
+    "medical office": "office",
+}
+def _canon_ptype(raw: str) -> str:
+    if not raw:
+        return ""
+    key = raw.strip().lower()
+    return _PROPERTY_TYPE_ALIASES.get(key, key)
+
+
 def match_lenders(scen: dict, lenders: List[dict]) -> List[dict]:
     prop = scen.get("property_info") or {}
     loan = scen.get("loan_request") or {}
     metrics = compute_scenario_metrics(scen)
     loan_amount = float(loan.get("loan_amount") or 0) or None
-    ptype = (prop.get("property_type") or "").lower()
+    ptype = _canon_ptype(prop.get("property_type") or "")
+    psub = (prop.get("property_subtype") or "").lower()
     state = (prop.get("state") or "").upper()
     ltv = metrics.get("ltv_pct")
     dscr = metrics.get("dscr")
@@ -2838,12 +2858,21 @@ def match_lenders(scen: dict, lenders: List[dict]) -> List[dict]:
         reasons_fit = []
         reasons_miss = []
         # property type
-        pt_list = [p.lower() for p in (l.get("property_types") or [])]
+        pt_list = [_canon_ptype(p) for p in (l.get("property_types") or [])]
+        sub_list = [s.lower() for s in (l.get("property_subtypes") or [])]
         if pt_list and ptype:
             if ptype in pt_list or "other" in pt_list:
-                reasons_fit.append(f"lends on {ptype}")
+                reasons_fit.append(f"lends on {prop.get('property_type')}")
+                # Refine on sub-type when both sides have declared one — a specialist
+                # gets an EXTRA "specializes in" fit so they outrank a generic top-level
+                # lender for the same deal.
+                if psub and sub_list:
+                    if psub in sub_list:
+                        reasons_fit.append(f"specializes in {prop.get('property_subtype')}")
+                    else:
+                        reasons_miss.append(f"doesn't specialize in {prop.get('property_subtype')}")
             else:
-                reasons_miss.append(f"doesn't lend on {ptype}")
+                reasons_miss.append(f"doesn't lend on {prop.get('property_type')}")
         # size
         if loan_amount:
             mn, mx = l.get("min_loan"), l.get("max_loan")
@@ -6185,6 +6214,10 @@ class LenderApplyBody(BaseModel):
     website: str = Field(default="", max_length=200)
     # Credit box (all optional at apply time)
     property_types: List[str] = Field(default_factory=list)
+    # Optional specialties within a top-level property type (e.g. Industrial ->
+    # ["Manufacturing Heavy Industrial", "Warehouse Cold Storage"]). When empty for a
+    # given top-level, the lender is treated as "open to all sub-types" of that type.
+    property_subtypes: List[str] = Field(default_factory=list)
     geography: List[str] = Field(default_factory=list)
     min_loan: Optional[float] = None
     max_loan: Optional[float] = None
@@ -6218,6 +6251,7 @@ class CreditBoxUpdate(BaseModel):
     lender_name: Optional[str] = None
     institution_type: Optional[str] = None
     property_types: Optional[List[str]] = None
+    property_subtypes: Optional[List[str]] = None
     geography: Optional[List[str]] = None
     min_loan: Optional[float] = None
     max_loan: Optional[float] = None
@@ -6343,6 +6377,7 @@ async def lender_apply(body: LenderApplyBody, background: BackgroundTasks, reque
             "phone": body.contact_phone, "email": email,
         }],
         "property_types": body.property_types,
+        "property_subtypes": body.property_subtypes,
         "geography": [g.upper() for g in body.geography if g],
         "min_loan": body.min_loan, "max_loan": body.max_loan,
         "max_ltv": body.max_ltv, "max_ltc": body.max_ltc,
@@ -7065,6 +7100,7 @@ def _lender_summary_for_ai(l: dict) -> dict:
         "name": l.get("name"),
         "type": l.get("institution_type"),
         "property_types": l.get("property_types") or [],
+        "property_subtypes": l.get("property_subtypes") or [],
         "min_loan": l.get("min_loan"),
         "max_loan": l.get("max_loan"),
         "max_ltv": l.get("max_ltv"),

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Building2, Check } from "lucide-react";
+import LenderSubtypePicker from "@/byrd/LenderSubtypePicker";
 
 const INSTITUTION_TYPES = [
   { value: "bank", label: "Bank" },
@@ -46,7 +47,7 @@ export default function LendersApplyPage() {
     lender_name: "", institution_type: "bank",
     contact_name: "", contact_title: "", contact_email: "", contact_phone: "",
     website: "",
-    property_types: [], geography: [],
+    property_types: [], property_subtypes: [], geography: [],
     min_loan: "", max_loan: "", max_ltv: "", max_ltc: "",
     min_dscr: "", min_debt_yield: "", rate_min: "", rate_max: "",
     typical_term_months: "", recourse_preference: "",
@@ -76,6 +77,7 @@ export default function LendersApplyPage() {
         contact_phone: f.contact_phone.trim(),
         website: f.website.trim(),
         property_types: f.property_types,
+        property_subtypes: f.property_subtypes,
         geography: [...new Set(geo)],
         min_loan: num(f.min_loan), max_loan: num(f.max_loan),
         max_ltv: num(f.max_ltv), max_ltc: num(f.max_ltc),
@@ -196,6 +198,16 @@ export default function LendersApplyPage() {
                 })}
               </div>
             </Field>
+            <div className="mt-4">
+              <Field label="Sub-Type Specialties (optional)" hint="Narrow the property types above with the specific sub-types you specialize in. Leave empty if you're open to all sub-types.">
+                <LenderSubtypePicker
+                  propertyTypes={f.property_types}
+                  value={f.property_subtypes}
+                  onChange={(v) => setF({ ...f, property_subtypes: v })}
+                  testIdPrefix="apply-subtype"
+                />
+              </Field>
+            </div>
             <div className="mt-4">
               <Field label="Geography" hint="Comma-separated 2-letter states (e.g. TX, LA, OK). Use 'NATIONWIDE' for national coverage.">
                 <Input

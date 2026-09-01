@@ -8,6 +8,7 @@ import {
   Send, Edit3, ExternalLink, Upload, Paperclip, Download,
 } from "lucide-react";
 import TwoFAHeaderLink from "@/byrd/TwoFAHeaderLink";
+import LenderSubtypePicker from "@/byrd/LenderSubtypePicker";
 
 const PROPERTY_TYPES = [
   "Multifamily", "Office", "Retail", "Industrial", "Hospitality",
@@ -584,6 +585,7 @@ function CreditBoxTab({ me, onSaved }) {
     lender_name: me.name || "",
     institution_type: me.institution_type || "bank",
     property_types: me.property_types || [],
+    property_subtypes: me.property_subtypes || [],
     geography: (me.geography || []).join(", "),
     min_loan: me.min_loan ?? "",
     max_loan: me.max_loan ?? "",
@@ -613,6 +615,7 @@ function CreditBoxTab({ me, onSaved }) {
         lender_name: f.lender_name,
         institution_type: f.institution_type,
         property_types: f.property_types,
+        property_subtypes: f.property_subtypes,
         geography: geo,
         min_loan: num(f.min_loan), max_loan: num(f.max_loan),
         max_ltv: num(f.max_ltv), max_ltc: num(f.max_ltc),
@@ -650,6 +653,14 @@ function CreditBoxTab({ me, onSaved }) {
             );
           })}
         </div>
+      </Field>
+      <Field label="Sub-Type Specialties (optional)" hint="Narrow the top-level types above. Leaving this empty means you're open to all sub-types.">
+        <LenderSubtypePicker
+          propertyTypes={f.property_types}
+          value={f.property_subtypes}
+          onChange={(v) => setF({ ...f, property_subtypes: v })}
+          testIdPrefix="cb-subtype"
+        />
       </Field>
       <Field label="Geography (comma-separated states, or NATIONWIDE)">
         <Input value={f.geography} onChange={set("geography")} data-testid="cb-geo" />

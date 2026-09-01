@@ -5,12 +5,14 @@ import {
   INSTITUTION_TYPES, PROPERTY_TYPES, LENDER_STATUSES, lenderStatusChip, fmtMoney, fmtPct,
 } from "@/byrd/dealData";
 import { Plus, Trash2, X, Save, Building2, Phone, Mail, Check, XCircle, Inbox } from "lucide-react";
+import LenderSubtypePicker from "@/byrd/LenderSubtypePicker";
 
 const emptyLender = () => ({
   name: "",
   institution_type: "bank",
   contacts: [{ name: "", title: "", phone: "", email: "" }],
   property_types: [],
+  property_subtypes: [],
   min_loan: null, max_loan: null,
   max_ltv: null, max_ltc: null, min_dscr: null, min_debt_yield: null,
   geography: [],
@@ -172,6 +174,15 @@ function LenderEditor({ open, initial, onClose, onSaved }) {
                 );
               })}
             </div>
+            <div className="mt-4">
+              <h4 className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] mb-2">Sub-Type Specialties (optional)</h4>
+              <LenderSubtypePicker
+                propertyTypes={form.property_types || []}
+                value={form.property_subtypes || []}
+                onChange={(v) => set("property_subtypes", v)}
+                testIdPrefix="l-subtype"
+              />
+            </div>
           </section>
 
           <section>
@@ -329,6 +340,14 @@ export default function AdminLenders() {
                       {(l.property_types || []).slice(0, 5).map((p) => <span key={p} className="byrd-chip">{p}</span>)}
                       {l.property_types?.length > 5 && <span className="byrd-chip">+{l.property_types.length - 5}</span>}
                     </div>
+                    {l.property_subtypes?.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1" data-testid={`lender-subtypes-${l.id}`}>
+                        {l.property_subtypes.slice(0, 4).map((s) => (
+                          <span key={s} className="byrd-chip byrd-chip-gold text-[10px]">{s}</span>
+                        ))}
+                        {l.property_subtypes.length > 4 && <span className="byrd-chip text-[10px]">+{l.property_subtypes.length - 4}</span>}
+                      </div>
+                    )}
                     <div className="mt-3 grid grid-cols-2 gap-y-1 text-xs text-[#2A2A2A]">
                       <div><span className="text-[#6B6558]">Size:</span> {fmtMoney(l.min_loan)} – {fmtMoney(l.max_loan)}</div>
                       <div><span className="text-[#6B6558]">Max LTV:</span> {fmtPct(l.max_ltv, 1)}</div>

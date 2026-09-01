@@ -12,6 +12,23 @@
 - P3: Refactor `server.py` (~11k lines) into modular routes
 
 
+### Lender Matching — Sub-Type Awareness — SHIPPED 2026-02
+Lender matching now considers property sub-types so specialists (e.g. Manufacturing Heavy Industrial) outrank generalists on deals in their niche.
+
+**Backend (`/app/backend/server.py`):**
+- `LenderCreate` / `LenderUpdate` / `LenderApplyBody` / `CreditBoxUpdate` all accept `property_subtypes: List[str]`.
+- `match_lenders()` now: (1) canonicalises both sides through a small alias map (`hospitality` → `hotel`, `self-storage` → `self storage`, `mixed-use` → `multifamily`, `medical office` → `office`) so legacy vocabulary keeps matching; (2) scores a subtype-specialist +1 fit above a top-level-only lender for the same deal ("specializes in ..."); (3) flags mismatched specialists as a miss ("doesn't specialize in ...").
+- Empty `property_subtypes` = "open to all sub-types" (top-level match only, no specialty bonus, no miss).
+
+**Frontend:**
+- New shared component `/app/frontend/src/byrd/LenderSubtypePicker.jsx` — renders chip picker of subtypes grouped by parent, plus a red "no longer covered" strikethrough section for orphaned specialties when a lender de-selects a top-level.
+- Wired into `LenderPortal.jsx` (self-serve credit box), `LendersApplyPage.jsx` (public apply form), and `AdminLenders.jsx` (admin create/edit modal).
+- `AdminLenders.jsx` roster cards now show up to 4 gold specialty chips under the top-level chips.
+
+**Tests:**
+- `/app/backend/tests/test_lender_matching_subtypes.py` — 5 tests: (a) specialist beats generic; (b) top-level-only still fits when deal has no subtype; (c) legacy alias `Hospitality`→`Hotel` still matches; (d) public apply persists `property_subtypes`; (e) admin create/patch persists `property_subtypes`.
+
+
 ### Contact → Client Promotion — SHIPPED 2026-02
 Admins can convert any CRM contact into a client user in one click, without retyping their info. Invite email is NOT sent automatically — broker builds the doc list + fee agreement first, then triggers the invite manually.
 

@@ -88,6 +88,44 @@ export const PROPERTY_SUBTYPES = {
   ],
 };
 
+// Lender application forms use a slightly different vocabulary (legacy: "Hospitality",
+// "Self-storage", "Mixed-use"). This map lets us reuse PROPERTY_SUBTYPES + match_lenders
+// without breaking older lender records.
+export const PROPERTY_TYPE_ALIASES = {
+  "hospitality": "Hotel",
+  "hotel": "Hotel",
+  "self-storage": "Self Storage",
+  "self storage": "Self Storage",
+  "mixed-use": "Multifamily",       // Mixed-use is a subtype of Multifamily on the deal side
+  "mixed use": "Multifamily",
+  "medical office": "Office",        // Medical Office is a subtype of Office on the deal side
+};
+
+// Return the canonical PROPERTY_TYPES entry for a lender-declared type string.
+export const canonicalPropertyType = (raw) => {
+  if (!raw) return "";
+  const key = String(raw).trim().toLowerCase();
+  if (PROPERTY_TYPE_ALIASES[key]) return PROPERTY_TYPE_ALIASES[key];
+  // exact-match search
+  const hit = PROPERTY_TYPES.find((p) => p.toLowerCase() === key);
+  return hit || raw;
+};
+
+// Given a lender's selected top-level property_types, return the flat, deduped
+// list of sub-types they could specialize in.
+export const subtypesForLenderTypes = (lenderTypes = []) => {
+  const seen = new Set();
+  const out = [];
+  for (const raw of lenderTypes) {
+    const canon = canonicalPropertyType(raw);
+    const subs = PROPERTY_SUBTYPES[canon] || [];
+    for (const s of subs) {
+      if (!seen.has(s)) { seen.add(s); out.push({ subtype: s, parent: canon }); }
+    }
+  }
+  return out;
+};
+
 export const RECOURSE_OPTIONS = ["recourse", "non-recourse", "partial"];
 
 export const INSTITUTION_TYPES = [
