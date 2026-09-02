@@ -127,11 +127,20 @@ export default function AdminScenarioDetail() {
   const patchSection = (section) => (partial) =>
     patch({ [section]: { ...(scen[section] || {}), ...partial } });
 
-  const runMatch = async () => {
+  const runMatch = async ({ silent } = {}) => {
     const r = await api.get(`/admin/scenarios/${id}/match`);
     setMatches(r.data);
-    toast.success(`${r.data.length} lenders scored`);
+    if (!silent) toast.success(`${r.data.length} lenders scored`);
   };
+
+  // Auto-run match the first time the user lands on the Lenders tab so the reasons
+  // are visible without a manual click. Silent (no toast) since it's implicit.
+  useEffect(() => {
+    if (tab === "lenders" && matches.length === 0) {
+      runMatch({ silent: true }).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   const createShare = async (lenderId, docOverrides) => {
     try {
@@ -1704,7 +1713,33 @@ function CopyDocsDialog({ scenarioId, onClose, onCopy }) {
 }
 
 // --------------- LENDERS TAB ---------------
+function MatchReasonChips({ fits = [], misses = [], testId }) {
+  const hasAny = (fits.length + misses.length) > 0;
+  if (!hasAny) {
+    return <div className="text-[11px] text-[#6B6558] italic mt-1">No credit-box data on this lender yet — add property types, geography, and size on their profile to score them.</div>;
+  }
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5" data-testid={testId}>
+      {fits.map((f, i) => (
+        <span key={`f${i}`}
+              className="inline-flex items-center gap-1 rounded-full border border-[#B8D3B8] bg-[#EFF6EF] text-[#245C25] px-2 py-0.5 text-[10px] font-medium"
+              data-testid={testId ? `${testId}-fit-${i}` : undefined}>
+          <Check size={9} strokeWidth={3} /> {f}
+        </span>
+      ))}
+      {misses.map((m, i) => (
+        <span key={`m${i}`}
+              className="inline-flex items-center gap-1 rounded-full border border-[#E38380] bg-[#FADCDA] text-[#8A1F1A] px-2 py-0.5 text-[10px] font-medium"
+              data-testid={testId ? `${testId}-miss-${i}` : undefined}>
+          <X size={9} strokeWidth={3} /> {m}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function LendersTab({ scen, lenders, matches, suggestions, shareActivity = {}, onReloadActivity, onInviteSelfReg, runMatch, onOpenSendDialog, onRevoke, onOpenEditVisibility, shareLenderId, setShareLenderId }) {
+  const [onlyFits, setOnlyFits] = useState(false);
   const scenDocs = scen.docs || scen.client_docs || [];
   const clientDocMap = {};
   scenDocs.forEach((d) => { clientDocMap[d.id] = d; });
@@ -1767,10 +1802,7 @@ function LendersTab({ scen, lenders, matches, suggestions, shareActivity = {}, o
                     <span className={m.verdict === "fit" ? "byrd-chip byrd-chip-green" : "byrd-chip byrd-chip-gold"}>{m.verdict}</span>
                     <span className="byrd-chip">Marketplace</span>
                   </div>
-                  <div className="text-xs text-[#6B6558] mt-1">
-                    {m.fits.length > 0 && <div>✓ {m.fits.join(" · ")}</div>}
-                    {m.misses.length > 0 && <div className="text-[#8A1F1A]">✗ {m.misses.join(" · ")}</div>}
-                  </div>
+                  <MatchReasonChips fits={m.fits} misses={m.misses} testId={`suggest-reasons-${m.lender.id}`} />
                 </div>
                 <button
                   onClick={() => onInviteSelfReg([m.lender.id])}
@@ -1791,28 +1823,48 @@ function LendersTab({ scen, lenders, matches, suggestions, shareActivity = {}, o
           <div>
             <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Match Engine</div>
             <h3 className="font-serif text-xl font-bold">Lenders that fit this deal</h3>
+            <p className="text-[11px] text-[#6B6558] mt-1">Green chips = why it fits. Red chips = why it doesn't. Score = fits &minus; 2× misses.</p>
           </div>
-          <button onClick={runMatch} className="byrd-btn byrd-btn-outline" data-testid="run-match-btn">
-            <RefreshCw size={14} /> Run Match
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setOnlyFits((v) => !v)}
+              data-testid="match-toggle-fits"
+              className={`inline-flex items-center gap-1 rounded-md border px-2 h-8 text-[11px] font-mono uppercase tracking-widest ${
+                onlyFits ? "bg-[#245C25] text-white border-[#245C25]" : "border-[#E4DFD1] bg-white text-[#2A2A2A] hover:bg-[#F3EEE0]"
+              }`}
+            >
+              <Check size={10} /> Fits only
+            </button>
+            <button onClick={() => runMatch()} className="byrd-btn byrd-btn-outline" data-testid="run-match-btn">
+              <RefreshCw size={14} /> Re-run Match
+            </button>
+          </div>
         </div>
         {matches.length === 0 ? (
-          <div className="text-sm text-[#6B6558] mt-4">Click &quot;Run Match&quot; to score your lender directory against this scenario.</div>
+          <div className="text-sm text-[#6B6558] mt-4" data-testid="match-empty">
+            Click &quot;Re-run Match&quot; to score your lender directory against this scenario.
+            {(!scen.property_info?.property_type || !scen.property_info?.state) && (
+              <div className="mt-2 text-[#8A1F1A]">
+                Tip: add a <b>property type</b> and <b>state</b> on the Package tab so the engine has something to score against.
+              </div>
+            )}
+          </div>
         ) : (
           <div className="mt-4 space-y-3">
-            {matches.slice(0, 10).map((m) => (
-              <div key={m.lender.id} className="border border-[#E4DFD1] rounded-md p-4 flex items-start justify-between gap-3">
+            {(onlyFits ? matches.filter((m) => m.verdict === "fit" || m.verdict === "partial") : matches).slice(0, 20).map((m) => (
+              <div key={m.lender.id} className="border border-[#E4DFD1] rounded-md p-4 flex items-start justify-between gap-3" data-testid={`match-${m.lender.id}`}>
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <div className="font-semibold">{m.lender.name}</div>
                     <span className={m.verdict === "fit" ? "byrd-chip byrd-chip-green" : m.verdict === "partial" ? "byrd-chip byrd-chip-gold" : "byrd-chip byrd-chip-red"}>
                       {m.verdict}
                     </span>
+                    {(m.lender.property_subtypes?.length > 0) && (
+                      <span className="byrd-chip text-[10px]">specialist</span>
+                    )}
                   </div>
-                  <div className="text-xs text-[#6B6558] mt-1">
-                    {m.fits.length > 0 && <div>✓ {m.fits.join(" · ")}</div>}
-                    {m.misses.length > 0 && <div className="text-[#8A1F1A]">✗ {m.misses.join(" · ")}</div>}
-                  </div>
+                  <MatchReasonChips fits={m.fits} misses={m.misses} testId={`match-reasons-${m.lender.id}`} />
                 </div>
                 <button onClick={() => onOpenSendDialog(m.lender.id)} className="byrd-btn byrd-btn-dark h-9 px-3 text-xs shrink-0" data-testid={`match-share-${m.lender.id}`}>
                   <Share2 size={12} /> Send Package
