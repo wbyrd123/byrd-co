@@ -12,6 +12,41 @@
 - P3: Refactor `server.py` (~11k lines) into modular routes
 
 
+### Loan Quote Studio — Agent Access + Watermark + PDF CTA + Lender Alert — SHIPPED 2026-02
+
+Massive quality-of-life pack across the quote / lender pipeline:
+
+**1. Broker Alert on Lender Applications**
+- `POST /api/public/lender/apply` now emails every `BROKER_EMAILS` address a branded "New lender application" alert with the credit-box highlights + one-click "Review + Approve" button.
+- Applicant confirmation still fires. `NOTIFY_BROKER_ON_LENDER_APPLY=false` kill-switch.
+- `/admin/lenders` now shows an always-visible "Marketplace applications (N)" card with an explicit empty state so brokers know where new submissions land. Sidebar badge on "Lenders" when N > 0 (polls every 60s).
+
+**2. Loan Quote Studio Access for Listing Agents**
+- New `quote_studio_access: bool` flag on user model, exposed via `/auth/me`.
+- `PATCH /api/admin/clients/{id}/quote-studio-access` — admin-only toggle with audit event.
+- New `require_studio_user` dep — admin OR client-with-flag. Rewired 12 studio endpoints (chat / propose / preview / generate / list / search / get / patch / delete / pdf / email / agent-lookup) to use it.
+- Ownership scoping: agents only see + touch their own quotes (`created_by_user_id == me`). Admin sees everything.
+- Quote records now stamp `created_by_user_id`, `created_by_role`, `created_by_name`. Admin library shows a "Created By" column with an AGENT / ADMIN chip.
+- New route `/client/quote-studio` (`ClientLoanQuoteStudio.jsx`) — reuses the shared Studio component, adds a lightweight header + "My Documents" back link.
+- Client portal header shows a "Loan Quote Studio" button only when `me.quote_studio_access === true`.
+- Admin client-detail page has a prominent enable/disable card ("Give this client the Studio").
+
+**3. Watermark + Footer Stamp on Debt-Quote PDF**
+- `_byrd_watermark` tiles "BYRD & CO" across every page at 13% opacity, 30° rotation, 5x5 grid — cropping the footer still leaves the brand visible in the content area.
+- Small "Byrd & CO · Commercial Real Estate Lending · byrd-co.com" footer stamp anchors every page.
+
+**4. "Request a Live Quote" CTA embedded in the PDF**
+- Bottom of the last page: hyperlinked gold button pointing to `/quote/{qid}/request` (when `PUBLIC_BASE_URL` is set).
+- Public routes: `GET /api/public/quote/{qid}` (metadata snippet only, no PDF/options leakage) + `POST /api/public/quote/{qid}/request-callback` (creates a `loan_quote_leads` row, emails all brokers with the PDF re-attached, audit event `quote.public_request`).
+- New public React page `/quote/:qid/request` (`QuoteRequestPage.jsx`) — Byrd-branded form with name/email/phone/best-time/message.
+
+**Tests (26 new pytest cases, all green):**
+- `test_lender_apply_notify.py` — 5 tests (2 HTTP live, 3 in-process notifier RBAC/kill-switch/no-brokers).
+- `test_quote_request_public.py` — 6 tests (watermark tile count via pypdf, public metadata scrubs sensitive fields, lead + audit trail, 404s, validation).
+- `test_quote_studio_agent_access.py` — 7 tests (toggle grant/revoke/audit, access gate, generate stamps ownership, agent list/get/patch/delete scoped, search scoped, admin sees all).
+- Full regression run: 54/54 green across notes + contacts + subtypes + upload notify + all new suites.
+
+
 ### Broker Notified on Client Doc Upload — SHIPPED 2026-02
 Every time a borrower or a linked sponsor drops a file into the client portal, all `BROKER_EMAILS` are notified via Postmark with the scenario name, doc line, filename, and a one-click deep-link to the admin scenario page.
 

@@ -265,18 +265,31 @@ export default function AdminLenders() {
         <button onClick={() => setEditing({})} className="byrd-btn byrd-btn-dark" data-testid="new-lender-btn"><Plus size={14} /> Add Lender</button>
       </div>
 
-      {/* Marketplace pending applications */}
-      {pending.length > 0 && (
-        <div className="byrd-card p-6 border-l-4 border-[#C89434]" data-testid="pending-applications-card">
-          <div className="flex items-center gap-2 mb-3">
-            <Inbox size={16} className="text-[#C89434]" />
-            <h2 className="font-serif text-xl font-bold">Marketplace applications ({pending.length})</h2>
-          </div>
-          <p className="text-xs text-[#6B6558] mb-4">
-            Lenders who applied through <code className="bg-[#F3EEE0] px-1">/lenders/apply</code>. Approve to send them
-            an activation email; the activated portal lets them update their credit box and submit term sheets.
+      {/* Marketplace pending applications — always visible so the broker knows where new ones will appear */}
+      <div
+        className={`byrd-card p-6 border-l-4 ${pending.length > 0 ? "border-[#C89434]" : "border-[#E4DFD1]"}`}
+        data-testid="pending-applications-card"
+      >
+        <div className="flex items-center gap-2 mb-3">
+          <Inbox size={16} className={pending.length > 0 ? "text-[#C89434]" : "text-[#6B6558]"} />
+          <h2 className="font-serif text-xl font-bold">
+            Marketplace applications
+            {pending.length > 0 ? ` (${pending.length})` : ""}
+          </h2>
+        </div>
+        {pending.length === 0 ? (
+          <p className="text-sm text-[#6B6558]" data-testid="pending-applications-empty">
+            No pending applications. New submissions from{" "}
+            <code className="bg-[#F3EEE0] px-1">/lenders/apply</code> will show up here — you'll
+            also get an email in your inbox.
           </p>
-          <div className="space-y-3">
+        ) : (
+          <>
+            <p className="text-xs text-[#6B6558] mb-4">
+              Lenders who applied through <code className="bg-[#F3EEE0] px-1">/lenders/apply</code>. Approve to send them
+              an activation email; the activated portal lets them update their credit box and submit term sheets.
+            </p>
+            <div className="space-y-3">
             {pending.map((l) => (
               <div key={l.id} className="border border-[#E4DFD1] rounded-md p-4 bg-white" data-testid={`pending-${l.id}`}>
                 <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -311,8 +324,9 @@ export default function AdminLenders() {
               </div>
             ))}
           </div>
-        </div>
-      )}
+          </>
+        )}
+      </div>
 
       {loading ? (
         <div className="text-sm text-[#6B6558]">Loading…</div>

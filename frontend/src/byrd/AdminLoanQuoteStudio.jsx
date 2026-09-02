@@ -477,6 +477,7 @@ export default function AdminLoanQuoteStudio() {
                   <tr className="text-left border-b border-[#E4DFD1] text-[10px] uppercase tracking-widest text-[#6B6558]">
                     <th className="p-2">Property</th>
                     <th className="p-2">Listing Agent</th>
+                    <th className="p-2">Created By</th>
                     <th className="p-2">Value</th>
                     <th className="p-2">Created</th>
                     <th className="p-2 text-right">Actions</th>
@@ -494,6 +495,12 @@ export default function AdminLoanQuoteStudio() {
                       <td className="p-2">
                         <div>{q.listing_agent?.name || "—"}</div>
                         <div className="text-[11px] text-[#6B6558]">{q.listing_agent?.email || ""}</div>
+                      </td>
+                      <td className="p-2" data-testid={`lq-createdby-${q.id}`}>
+                        <div className="text-xs">{q.created_by_name || "Byrd & CO"}</div>
+                        <span className={`byrd-chip text-[9px] mt-0.5 ${q.created_by_role === "client" ? "byrd-chip-gold" : ""}`}>
+                          {q.created_by_role === "client" ? "AGENT" : "ADMIN"}
+                        </span>
                       </td>
                       <td className="p-2">{fmtMoney(q.property_info?.estimated_value)}</td>
                       <td className="p-2 text-[11px] text-[#6B6558]">{new Date(q.created_at).toLocaleString()}</td>

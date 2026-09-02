@@ -41,7 +41,7 @@ from email_service import (
     tmpl_lender_application_received, tmpl_lender_approved, tmpl_lender_invite,
     tmpl_term_sheet_submitted, tmpl_term_sheet_status_change,
     tmpl_password_reset, tmpl_2fa_code, friendly_delivery_error,
-    tmpl_client_doc_upload,
+    tmpl_client_doc_upload, tmpl_lender_application_broker_alert,
 )
 import audit_service
 from audit_service import log_event as audit_log
@@ -142,6 +142,18 @@ async def require_lender(user=Depends(get_current_user)):
     return user
 
 
+async def require_studio_user(user=Depends(get_current_user)):
+    """Admin OR a client-role user who has been explicitly granted Loan Quote
+    Studio access. Used by all endpoints under /admin/marketing/quote* so listing
+    agents can build quotes for their own listings."""
+    role = user.get("role")
+    if role == "admin":
+        return user
+    if role == "client" and user.get("quote_studio_access") is True:
+        return user
+    raise HTTPException(status_code=403, detail="No Loan Quote Studio access")
+
+
 def sanitize_user(u: dict) -> dict:
     return {
         "id": u["id"],
@@ -152,6 +164,7 @@ def sanitize_user(u: dict) -> dict:
         "company": u.get("company"),
         "totp_enabled": bool(u.get("totp_enabled")),
         "two_fa_method": u.get("two_fa_method") or ("totp" if u.get("totp_enabled") else None),
+        "quote_studio_access": bool(u.get("quote_studio_access")),
     }
 
 
@@ -1690,6 +1703,30 @@ async def admin_delete_client(client_id: str, admin=Depends(require_admin)):
     await db.invites.delete_many({"user_id": client_id})
     await db.users.delete_one({"id": client_id})
     return {"ok": True}
+
+
+class QuoteStudioAccessBody(BaseModel):
+    enabled: bool
+
+
+@api.patch("/admin/clients/{client_id}/quote-studio-access")
+async def admin_toggle_quote_studio_access(client_id: str, body: QuoteStudioAccessBody,
+                                            request: Request, admin=Depends(require_admin)):
+    """Grant or revoke Loan Quote Studio access on a client user. Enables the
+    /client/quote-studio route and unlocks the studio API endpoints for that user.
+    Admin-only. Emits an audit event so the toggle history is traceable."""
+    u = await db.users.find_one({"id": client_id, "role": "client"})
+    if not u:
+        raise HTTPException(status_code=404, detail="Client not found")
+    await db.users.update_one(
+        {"id": client_id},
+        {"$set": {"quote_studio_access": bool(body.enabled), "updated_at": now_iso()}},
+    )
+    await audit_log(db, event_type="admin.quote_studio_access", request=request, user=admin,
+                    resource_type="user", resource_id=client_id,
+                    resource_name=u.get("email") or "",
+                    metadata={"enabled": bool(body.enabled)})
+    return {"ok": True, "quote_studio_access": bool(body.enabled)}
 
 
 
@@ -6455,6 +6492,24 @@ async def lender_apply(body: LenderApplyBody, background: BackgroundTasks, reque
     await db.lenders.insert_one(doc)
     subj, html, text = tmpl_lender_application_received(body.lender_name, email)
     background.add_task(send_email, email, subj, html, text, "lender_application")
+    # Also notify all brokers so they can triage from the inbox — same pattern as
+    # client-upload alerts (opt-out via NOTIFY_BROKER_ON_LENDER_APPLY=false).
+    brokers = broker_emails()
+    if brokers and str(os.environ.get("NOTIFY_BROKER_ON_LENDER_APPLY", "true")).lower() not in ("0", "false", "no", "off"):
+        b_subj, b_html, b_text = tmpl_lender_application_broker_alert(
+            lender_name=body.lender_name,
+            contact_name=body.contact_name,
+            contact_email=email,
+            contact_phone=body.contact_phone or "",
+            institution_type=body.institution_type or "",
+            property_types=body.property_types or [],
+            property_subtypes=body.property_subtypes or [],
+            geography=[g.upper() for g in (body.geography or []) if g],
+            min_loan=body.min_loan, max_loan=body.max_loan,
+            notes=body.notes or "",
+        )
+        for r in brokers:
+            background.add_task(send_email, r, b_subj, b_html, b_text, "lender_application_alert")
     return {"ok": True, "id": lender_id}
 
 
@@ -9151,7 +9206,7 @@ class LoanQuoteAgentLookupBody(BaseModel):
 
 
 @api.post("/admin/marketing/agent-lookup")
-async def admin_agent_lookup(body: LoanQuoteAgentLookupBody, admin=Depends(require_admin)):
+async def admin_agent_lookup(body: LoanQuoteAgentLookupBody, user=Depends(require_studio_user)):
     """Perplexity search for a commercial listing agent's publicly-listed email + phone.
     Only returns hits that appear in official brokerage websites or licensing directories."""
     if not PERPLEXITY_API_KEY:
@@ -9191,7 +9246,7 @@ async def admin_agent_lookup(body: LoanQuoteAgentLookupBody, admin=Depends(requi
 
 
 @api.post("/admin/marketing/quote/chat")
-async def admin_loanquote_chat(body: LoanQuoteChatBody, admin=Depends(require_admin)):
+async def admin_loanquote_chat(body: LoanQuoteChatBody, admin=Depends(require_studio_user)):
     """Turn-by-turn Ada conversation. Broker asks; Ada fills in the state via natural dialogue."""
     # Auto-fill cap_rate <-> NOI when possible (idempotent)
     prop = _cap_rate_math(body.state.property_info.model_dump())
@@ -9234,7 +9289,7 @@ async def admin_loanquote_chat(body: LoanQuoteChatBody, admin=Depends(require_ad
 
 
 @api.post("/admin/marketing/quote/propose-options")
-async def admin_loanquote_propose(body: LoanQuoteResearchBody, admin=Depends(require_admin)):
+async def admin_loanquote_propose(body: LoanQuoteResearchBody, admin=Depends(require_studio_user)):
     """Perplexity → Claude synthesis → 3 financing option columns. Admin-only."""
     prop = _cap_rate_math(body.state.property_info.model_dump())
     if not prop.get("estimated_value"):
@@ -9284,8 +9339,42 @@ async def admin_loanquote_propose(body: LoanQuoteResearchBody, admin=Depends(req
     }
 
 
-def render_loan_quote_pdf(state: dict) -> bytes:
-    """Byrd-branded 1-page Loan Quote PDF for a commercial listing agent."""
+def _byrd_watermark(canvas, doc):
+    """Diagonal light-gray 'BYRD & CO' repeated across the page. Rendered UNDER the
+    content so the type stays readable but a screenshot / crop that removes the
+    footer still visibly retains Byrd branding.
+
+    Also stamps a small footer link on every page ("Byrd & CO · byrd-co.com") that
+    the request-a-quote button reinforces on the last page."""
+    canvas.saveState()
+    page_w, page_h = letter
+    canvas.setFont("Helvetica-Bold", 44)
+    canvas.setFillColorRGB(0.78, 0.78, 0.78)
+    try:
+        canvas.setFillAlpha(0.13)
+    except Exception:
+        pass
+    canvas.translate(page_w / 2, page_h / 2)
+    canvas.rotate(30)
+    # Tile the text along a diagonal so any cropped section still shows the brand.
+    for row in range(-2, 3):
+        for col in range(-2, 3):
+            canvas.drawCentredString(col * 260, row * 130, "BYRD & CO")
+    canvas.restoreState()
+    # Tiny persistent footer stamp on every page — very subtle, greyed
+    canvas.saveState()
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColorRGB(0.55, 0.53, 0.47)
+    canvas.drawRightString(page_w - 0.35 * inch, 0.28 * inch,
+                           "Byrd & CO · Commercial Real Estate Lending · byrd-co.com")
+    canvas.restoreState()
+
+
+def render_loan_quote_pdf(state: dict, quote_id: str = None,
+                           request_url: str = None) -> bytes:
+    """Byrd-branded 1-page Loan Quote PDF for a commercial listing agent.
+    * quote_id / request_url — when provided, embeds a "Request a Live Quote" button
+      at the bottom of the PDF that links to a public form."""
     from reportlab.platypus import Image as RImage
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter,
@@ -9450,19 +9539,45 @@ def render_loan_quote_pdf(state: dict) -> bytes:
     ]))
     els.append(contact)
 
-    doc.build(els)
+    # Optional live "Request a Quote" CTA — always render when we know the public URL,
+    # so any recipient (agent, listing agent's client, cold PDF forward) can convert.
+    if request_url:
+        els.append(Spacer(1, 12))
+        cta = Table([[Paragraph(
+            f'<font color="#1A1A1A"><b>Interested in this financing?</b></font><br/>'
+            f'<font color="#6B6558" size="8">Tap to send your info to Byrd &amp; CO — '
+            f'we\'ll follow up with live terms.</font>',
+            body,
+        ), Paragraph(
+            f'<link href="{request_url}"><font color="#1A1A1A" size="11"><b>Request a Live Quote &#8594;</b></font></link>',
+            ParagraphStyle("cta_btn", parent=body, alignment=2),  # right-aligned
+        )]], colWidths=[4.6 * inch, 2.7 * inch])
+        cta.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#C89434")),
+            ("BOX", (0, 0), (-1, -1), 0.5, BYRD_INK),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 14),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+            ("TOPPADDING", (0, 0), (-1, -1), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ]))
+        els.append(cta)
+
+    doc.build(els, onFirstPage=_byrd_watermark, onLaterPages=_byrd_watermark)
     return buf.getvalue()
 
 
 @api.post("/admin/marketing/quote/generate")
-async def admin_loanquote_generate(body: LoanQuoteGenerateBody, admin=Depends(require_admin)):
+async def admin_loanquote_generate(body: LoanQuoteGenerateBody, user=Depends(require_studio_user)):
     """Render PDF, persist quote + PDF, optionally add listing agent to CRM."""
     state = body.state.model_dump()
     state["property_info"] = _cap_rate_math(state.get("property_info") or {})
     if not (state.get("options") and len(state["options"]) >= 1):
         raise HTTPException(status_code=400, detail="Propose financing options before generating the PDF")
-    pdf_bytes = render_loan_quote_pdf(state)
     qid = str(uuid.uuid4())
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    request_url = f"{base}/quote/{qid}/request" if base else None
+    pdf_bytes = render_loan_quote_pdf(state, quote_id=qid, request_url=request_url)
     now = now_iso()
     fname = f"byrd-loan-quote-{(state.get('property_info', {}).get('name') or 'quote').replace(' ', '-').lower()[:40]}.pdf"
     contact_id = None
@@ -9485,10 +9600,14 @@ async def admin_loanquote_generate(body: LoanQuoteGenerateBody, admin=Depends(re
                 "id": contact_id, "name": la["name"], "email": la["email"].lower(),
                 "phone": la.get("phone") or "", "company": la.get("brokerage") or "",
                 "tags": ["Listing Agent"], "notes": f"Auto-added from Loan Quote for {state.get('property_info', {}).get('name') or 'property'}.",
-                "created_at": now, "updated_at": now, "created_by": admin["id"],
+                "created_at": now, "updated_at": now, "created_by": user["id"],
             })
     await db.loan_quotes.insert_one({
-        "id": qid, "created_at": now, "created_by": admin["id"],
+        "id": qid, "created_at": now,
+        "created_by": user["id"],
+        "created_by_user_id": user["id"],
+        "created_by_role": user.get("role"),
+        "created_by_name": user.get("name") or user.get("email") or "",
         "property_info": state.get("property_info"),
         "listing_agent": la,
         "options": state.get("options"),
@@ -9501,48 +9620,64 @@ async def admin_loanquote_generate(body: LoanQuoteGenerateBody, admin=Depends(re
     return {"ok": True, "id": qid, "filename": fname, "contact_id": contact_id}
 
 
+def _quote_owner_filter(user: dict) -> dict:
+    """When the caller is NOT admin, restrict quote reads/writes to their own rows.
+    Legacy admin-generated rows have no `created_by_user_id`; those stay admin-only."""
+    if user.get("role") == "admin":
+        return {}
+    return {"created_by_user_id": user["id"]}
+
+
 @api.get("/admin/marketing/quotes")
-async def admin_list_loanquotes(admin=Depends(require_admin)):
-    docs = await db.loan_quotes.find({}, {"_id": 0, "pdf_b64": 0}).sort("created_at", -1).to_list(200)
+async def admin_list_loanquotes(user=Depends(require_studio_user)):
+    docs = await db.loan_quotes.find(
+        _quote_owner_filter(user), {"_id": 0, "pdf_b64": 0}
+    ).sort("created_at", -1).to_list(200)
     return docs
 
 
 @api.get("/admin/marketing/quotes/search")
-async def admin_search_loanquotes(q: str, admin=Depends(require_admin)):
+async def admin_search_loanquotes(q: str, user=Depends(require_studio_user)):
     """Case-insensitive search on property name / address / city for the Ada 'load quote' flow."""
     if not q or len(q.strip()) < 2:
         return []
     needle = q.strip()
     regex = {"$regex": needle.replace("\\", "\\\\").replace(".", "\\."), "$options": "i"}
-    docs = await db.loan_quotes.find({
+    query = {
         "$or": [
             {"property_info.name": regex},
             {"property_info.address": regex},
             {"property_info.city": regex},
         ]
-    }, {"_id": 0, "pdf_b64": 0}).sort("created_at", -1).to_list(20)
+    }
+    owner = _quote_owner_filter(user)
+    if owner:
+        query = {"$and": [owner, query]}
+    docs = await db.loan_quotes.find(query, {"_id": 0, "pdf_b64": 0}).sort("created_at", -1).to_list(20)
     return docs
 
 
 @api.get("/admin/marketing/quotes/{qid}")
-async def admin_get_loanquote(qid: str, admin=Depends(require_admin)):
-    q = await db.loan_quotes.find_one({"id": qid}, {"_id": 0, "pdf_b64": 0})
+async def admin_get_loanquote(qid: str, user=Depends(require_studio_user)):
+    q = await db.loan_quotes.find_one({"id": qid, **_quote_owner_filter(user)}, {"_id": 0, "pdf_b64": 0})
     if not q:
         raise HTTPException(status_code=404, detail="Quote not found")
     return q
 
 
 @api.patch("/admin/marketing/quotes/{qid}")
-async def admin_update_loanquote(qid: str, body: LoanQuoteGenerateBody, admin=Depends(require_admin)):
+async def admin_update_loanquote(qid: str, body: LoanQuoteGenerateBody, user=Depends(require_studio_user)):
     """Overwrite an existing saved quote — re-renders the PDF and replaces stored payload."""
-    q = await db.loan_quotes.find_one({"id": qid})
+    q = await db.loan_quotes.find_one({"id": qid, **_quote_owner_filter(user)})
     if not q:
         raise HTTPException(status_code=404, detail="Quote not found")
     state = body.state.model_dump()
     state["property_info"] = _cap_rate_math(state.get("property_info") or {})
     if not (state.get("options") and len(state["options"]) >= 1):
         raise HTTPException(status_code=400, detail="Financing options are required")
-    pdf_bytes = render_loan_quote_pdf(state)
+    base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    request_url = f"{base}/quote/{qid}/request" if base else None
+    pdf_bytes = render_loan_quote_pdf(state, quote_id=qid, request_url=request_url)
     now = now_iso()
     fname = (q.get("filename")
              or f"byrd-loan-quote-{(state.get('property_info', {}).get('name') or 'quote').replace(' ', '-').lower()[:40]}.pdf")
@@ -9563,7 +9698,7 @@ async def admin_update_loanquote(qid: str, body: LoanQuoteGenerateBody, admin=De
                 "phone": la.get("phone") or "", "company": la.get("brokerage") or "",
                 "tags": ["Listing Agent"],
                 "notes": f"Auto-added from Loan Quote for {state.get('property_info', {}).get('name') or 'property'}.",
-                "created_at": now, "updated_at": now, "created_by": admin["id"],
+                "created_at": now, "updated_at": now, "created_by": user["id"],
             })
     await db.loan_quotes.update_one(
         {"id": qid},
@@ -9583,8 +9718,8 @@ async def admin_update_loanquote(qid: str, body: LoanQuoteGenerateBody, admin=De
 
 
 @api.get("/admin/marketing/quotes/{qid}/pdf")
-async def admin_download_loanquote(qid: str, admin=Depends(require_admin)):
-    q = await db.loan_quotes.find_one({"id": qid})
+async def admin_download_loanquote(qid: str, user=Depends(require_studio_user)):
+    q = await db.loan_quotes.find_one({"id": qid, **_quote_owner_filter(user)})
     if not q:
         raise HTTPException(status_code=404, detail="Quote not found")
     return Response(
@@ -9595,11 +9730,126 @@ async def admin_download_loanquote(qid: str, admin=Depends(require_admin)):
 
 
 @api.delete("/admin/marketing/quotes/{qid}")
-async def admin_delete_loanquote(qid: str, admin=Depends(require_admin)):
-    res = await db.loan_quotes.delete_one({"id": qid})
+async def admin_delete_loanquote(qid: str, user=Depends(require_studio_user)):
+    res = await db.loan_quotes.delete_one({"id": qid, **_quote_owner_filter(user)})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Quote not found")
     return {"ok": True}
+
+
+# ---------------- Public "Request a Live Quote" (from PDF CTA) ----------------
+
+class QuoteRequestPublicBody(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    email: EmailStr
+    phone: str = Field(default="", max_length=40)
+    best_time: str = Field(default="", max_length=80)
+    message: str = Field(default="", max_length=4000)
+
+
+@api.get("/public/quote/{qid}")
+async def public_quote_meta(qid: str):
+    """Minimal public snapshot for the Request-a-Quote landing page — never returns
+    the PDF or full options, just enough to confirm the quote exists + let the
+    landing page show a headline (property name / address) for context."""
+    q = await db.loan_quotes.find_one({"id": qid},
+                                       {"_id": 0, "id": 1, "property_info": 1, "created_at": 1})
+    if not q:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    prop = q.get("property_info") or {}
+    return {
+        "id": q["id"],
+        "property_name": prop.get("name") or "",
+        "property_type": prop.get("property_type") or "",
+        "address": prop.get("address") or "",
+        "city": prop.get("city") or "",
+        "state": prop.get("state") or "",
+    }
+
+
+@api.post("/public/quote/{qid}/request-callback")
+async def public_quote_request_callback(qid: str, body: QuoteRequestPublicBody,
+                                         background: BackgroundTasks, request: Request):
+    """A prospect on the PDF clicked 'Request a Live Quote'. Persist the lead + email
+    all BROKER_EMAILS with the quote PDF re-attached for a one-tap follow-up."""
+    q = await db.loan_quotes.find_one({"id": qid})
+    if not q:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    lead_id = str(uuid.uuid4())
+    now = now_iso()
+    lead = {
+        "id": lead_id,
+        "quote_id": qid,
+        "name": body.name.strip(),
+        "email": body.email.lower(),
+        "phone": body.phone.strip(),
+        "best_time": body.best_time.strip(),
+        "message": body.message.strip(),
+        "ip": (request.client.host if request.client else None),
+        "user_agent": request.headers.get("user-agent", "")[:400],
+        "created_at": now,
+    }
+    await db.loan_quote_leads.insert_one(lead)
+    await audit_log(db, event_type="quote.public_request", request=request, user=None,
+                    resource_type="loan_quote", resource_id=qid,
+                    resource_name=q.get("filename") or "loan-quote.pdf",
+                    metadata={"lead_id": lead_id, "email": body.email.lower(),
+                              "phone": body.phone or "", "quote_id": qid})
+    # Fire an email to every broker with lead details + the PDF attached.
+    brokers = broker_emails()
+    if brokers:
+        prop = q.get("property_info") or {}
+        subj = f"[Byrd] Live quote request — {body.name} on {prop.get('name') or prop.get('address') or 'a loan quote'}"
+        base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+        review_link = f"{base}/admin/marketing/loan-quote?load={qid}" if base else "/admin/marketing/loan-quote"
+        text = (
+            f"A prospect just clicked 'Request a Live Quote' on a Byrd & Co PDF.\n\n"
+            f"Name: {body.name}\n"
+            f"Email: {body.email}\n"
+            f"Phone: {body.phone or '—'}\n"
+            f"Best time: {body.best_time or '—'}\n\n"
+            f"Property on the PDF: {prop.get('name') or '—'} · {prop.get('address') or ''}, "
+            f"{prop.get('city') or ''} {prop.get('state') or ''}\n\n"
+            f"Message:\n{body.message or '(no message)'}\n\n"
+            f"Open the original quote: {review_link}\n"
+        )
+        html = f"""
+        <div style="font-family:Georgia,serif;max-width:640px;margin:auto;">
+          <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+            <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+            <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">Live Quote Request</div>
+          </div>
+          <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+            <h2 style="margin:0 0 4px;font-family:Georgia,serif;">{body.name}</h2>
+            <div style="font-family:Arial,sans-serif;font-size:13px;color:#6B6558;">wants to talk about a Byrd &amp; CO loan quote.</div>
+            <table style="width:100%;font-family:Arial,sans-serif;font-size:14px;border-collapse:collapse;margin-top:16px;">
+              <tr><td style="color:#6B6558;padding:4px 0;width:130px;">Email</td><td><a href="mailto:{body.email}">{body.email}</a></td></tr>
+              <tr><td style="color:#6B6558;padding:4px 0;">Phone</td><td>{body.phone or '—'}</td></tr>
+              <tr><td style="color:#6B6558;padding:4px 0;">Best time</td><td>{body.best_time or '—'}</td></tr>
+              <tr><td style="color:#6B6558;padding:4px 0;">Property</td><td>{(prop.get('name') or '—')}<br/><span style="color:#6B6558;font-size:12px;">{prop.get('address') or ''}, {prop.get('city') or ''} {prop.get('state') or ''}</span></td></tr>
+            </table>
+            {f'<div style="margin-top:16px;padding:12px;background:#fff;border:1px solid #E4DFD1;font-family:Arial,sans-serif;font-size:13px;white-space:pre-wrap;">{body.message}</div>' if body.message else ''}
+            <div style="margin-top:22px;">
+              <a href="{review_link}" style="background:#C89434;color:#1A1A1A;padding:10px 18px;text-decoration:none;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;">Open Quote in Admin</a>
+            </div>
+            <div style="margin-top:16px;font-family:Arial,sans-serif;font-size:12px;color:#6B6558;">The original Loan Quote PDF is attached to this email.</div>
+          </div>
+        </div>
+        """
+        # Re-attach the PDF so brokers can forward without opening the console.
+        attachment = None
+        if q.get("pdf_b64"):
+            attachment = {
+                "Name": q.get("filename") or "byrd-loan-quote.pdf",
+                "Content": q["pdf_b64"],
+                "ContentType": "application/pdf",
+            }
+        for r in brokers:
+            background.add_task(send_email, r, subj, html, text,
+                                "quote_public_request",
+                                None, None, body.email,
+                                [attachment] if attachment else None)
+    return {"ok": True, "id": lead_id}
 
 
 class LoanQuoteEmailBody(BaseModel):

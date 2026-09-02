@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { NavLink, Outlet, Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
+import { api } from "@/lib/api";
 import { LOGO_URL } from "@/byrd/data";
 import {
   LayoutDashboard, Users, Inbox, Sparkles, LogOut, FileText, Building2, BookOpen, MessageSquareQuote,
@@ -24,6 +25,21 @@ const NAV = [
 export default function AdminLayout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
+  const [pendingLenders, setPendingLenders] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      api.get("/admin/marketplace/pending-lenders")
+        .then((r) => { if (!cancelled) setPendingLenders((r.data || []).length); })
+        .catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 60_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  const badgeFor = (to) => (to === "/admin/lenders" && pendingLenders > 0 ? pendingLenders : 0);
 
   return (
     <div className="min-h-screen bg-[#FBF8F1] flex">
@@ -38,23 +54,36 @@ export default function AdminLayout() {
           </Link>
         </div>
         <nav className="p-3 space-y-1 flex-1">
-          {NAV.map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.end}
-              data-testid={n.testId}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2.5 rounded-md text-sm transition-colors ${
-                  isActive
-                    ? "bg-[#1A1A1A] text-white"
-                    : "text-[#2A2A2A] hover:bg-[#F3EEE0]"
-                }`
-              }
-            >
-              <n.icon size={16} /> {n.label}
-            </NavLink>
-          ))}
+          {NAV.map((n) => {
+            const badge = badgeFor(n.to);
+            return (
+              <NavLink
+                key={n.to}
+                to={n.to}
+                end={n.end}
+                data-testid={n.testId}
+                className={({ isActive }) =>
+                  `flex items-center gap-3 px-3 py-2.5 rounded-md text-sm transition-colors ${
+                    isActive
+                      ? "bg-[#1A1A1A] text-white"
+                      : "text-[#2A2A2A] hover:bg-[#F3EEE0]"
+                  }`
+                }
+              >
+                <n.icon size={16} />
+                <span className="flex-1">{n.label}</span>
+                {badge > 0 && (
+                  <span
+                    data-testid={`${n.testId}-badge`}
+                    className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full bg-[#C89434] text-[#1A1A1A] text-[10px] font-bold font-mono"
+                    title={`${badge} pending`}
+                  >
+                    {badge}
+                  </span>
+                )}
+              </NavLink>
+            );
+          })}
           <div className="pt-4 mt-4 border-t border-[#E4DFD1]">
             <div className="px-3 pb-2 font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">
               // Marketing

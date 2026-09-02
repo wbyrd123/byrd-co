@@ -117,6 +117,16 @@ export default function ClientPortal() {
               <div className="text-xs text-[#6B6558]">{user?.email}</div>
             </div>
             <TwoFAHeaderLink enabled={user?.totp_enabled} />
+            {user?.quote_studio_access && (
+              <Link
+                to="/client/quote-studio"
+                className="byrd-btn byrd-btn-outline h-10 px-3 hidden md:inline-flex"
+                data-testid="open-quote-studio"
+                title="Build a loan quote for a listing"
+              >
+                Loan Quote Studio
+              </Link>
+            )}
             <button
               onClick={() => { logout(); nav("/"); }}
               data-testid="client-logout"

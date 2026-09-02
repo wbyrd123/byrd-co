@@ -47,6 +47,17 @@ export default function AdminClientDetail() {
   const inviteActivated = invite && invite.used_at;
   const canDelete = scenarios.length === 0;
 
+  const toggleQuoteStudio = async () => {
+    const next = !client.quote_studio_access;
+    try {
+      await api.patch(`/admin/clients/${id}/quote-studio-access`, { enabled: next });
+      toast.success(next ? "Loan Quote Studio access granted" : "Loan Quote Studio access revoked");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't update access");
+    }
+  };
+
   return (
     <div className="space-y-8" data-testid="admin-client-detail">
       <button onClick={() => nav("/admin/clients")} className="text-sm text-[#6B6558] hover:text-[#1A1A1A] inline-flex items-center gap-2">
@@ -110,6 +121,38 @@ export default function AdminClientDetail() {
         scenarios={scenarios}
         onCreate={() => setNewScenarioOpen(true)}
       />
+
+      {/* Loan Quote Studio access toggle — for listing-agent-type clients */}
+      <div className="byrd-card p-6" data-testid="quote-studio-access-card">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 shrink-0 rounded-md bg-[#F3EEE0] border border-[#E4DFD1] grid place-items-center text-[#C89434]">
+              <FileText size={16} />
+            </div>
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Loan Quote Studio</div>
+              <div className="font-serif text-lg font-bold mt-0.5">Give this client the Studio.</div>
+              <p className="text-sm text-[#6B6558] mt-1 max-w-2xl">
+                For listing agents &amp; RE brokers who want to build Byrd-branded quotes for their
+                listings. They&apos;ll see the Studio in their portal, only their own quotes, and every
+                PDF still carries our watermark + &quot;Request a Live Quote&quot; button.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={toggleQuoteStudio}
+            data-testid="toggle-quote-studio-access"
+            className={`inline-flex items-center gap-2 h-9 px-4 rounded-full text-xs font-mono uppercase tracking-widest transition-colors ${
+              client.quote_studio_access
+                ? "bg-[#C89434] text-[#1A1A1A] hover:brightness-95"
+                : "bg-white border border-[#E4DFD1] text-[#2A2A2A] hover:bg-[#F3EEE0]"
+            }`}
+          >
+            <span className={`inline-block w-2 h-2 rounded-full ${client.quote_studio_access ? "bg-[#1A1A1A]" : "bg-[#C7C0AC]"}`} />
+            {client.quote_studio_access ? "Access on" : "Enable access"}
+          </button>
+        </div>
+      </div>
 
       {/* Explainer replacing the removed doc checklist */}
       <div className="byrd-card p-6" data-testid="docs-moved-notice">

@@ -22,6 +22,7 @@ import AdminTestimonials from "@/byrd/AdminTestimonials";
 import AdminAssistant from "@/byrd/AdminAssistant";
 import AdminContacts from "@/byrd/AdminContacts";
 import AdminLoanQuoteStudio from "@/byrd/AdminLoanQuoteStudio";
+import ClientLoanQuoteStudio from "@/byrd/ClientLoanQuoteStudio";
 import SecuritySettings from "@/byrd/SecuritySettings";
 import AdminAuditLog from "@/byrd/AdminAuditLog";
 import PortalSecurityPage from "@/byrd/PortalSecurityPage";
@@ -29,6 +30,7 @@ import Unsubscribe from "@/byrd/Unsubscribe";
 import FeeAgreementSign from "@/byrd/FeeAgreementSign";
 import LenderView from "@/byrd/LenderView";
 import LendersApplyPage from "@/byrd/LendersApplyPage";
+import QuoteRequestPage from "@/byrd/QuoteRequestPage";
 import LendersTermsPage from "@/byrd/LendersTermsPage";
 import LenderActivate from "@/byrd/LenderActivate";
 import LenderPortal from "@/byrd/LenderPortal";
@@ -90,6 +92,7 @@ function App() {
             {/* Public lender view (token-gated) */}
             <Route path="/lender/scenario/:token" element={<LenderView />} />
             <Route path="/lenders/apply" element={<LendersApplyPage />} />
+            <Route path="/quote/:qid/request" element={<QuoteRequestPage />} />
             <Route path="/lenders/terms" element={<LendersTermsPage />} />
             <Route path="/lender/activate/:token" element={<LenderActivate />} />
             <Route path="/unsubscribe" element={<Unsubscribe />} />
@@ -129,6 +132,14 @@ function App() {
               element={
                 <RequireAuth role="client">
                   <PortalSecurityPage backPath="/portal" label="Client Portal" />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/client/quote-studio"
+              element={
+                <RequireAuth role="client">
+                  <ClientLoanQuoteStudio />
                 </RequireAuth>
               }
             />

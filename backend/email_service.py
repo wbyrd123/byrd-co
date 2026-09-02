@@ -258,6 +258,58 @@ def tmpl_lender_application_received(lender_name: str, contact_email: str) -> tu
     return subject, html, text
 
 
+def tmpl_lender_application_broker_alert(*, lender_name: str, contact_name: str,
+                                         contact_email: str, contact_phone: str,
+                                         institution_type: str, property_types: list,
+                                         property_subtypes: list, geography: list,
+                                         min_loan, max_loan, notes: str) -> tuple[str, str, str]:
+    """Broker-facing notification when a new lender application lands. Includes the
+    highlights of the credit box so the broker can triage from the inbox without
+    logging in."""
+    base = public_base_url()
+    review_link = f"{base}/admin/lenders" if base else "/admin/lenders"
+    fmt_money = lambda v: (f"${int(v):,}" if v not in (None, "") else "—")
+    fmt_list = lambda xs: ", ".join(xs) if xs else "—"
+    subject = f"[Byrd] New lender application — {lender_name}"
+    text = (
+        f"New lender application on the marketplace form.\n\n"
+        f"Lender: {lender_name}\n"
+        f"Institution: {institution_type or '—'}\n"
+        f"Contact: {contact_name} <{contact_email}>{(' · ' + contact_phone) if contact_phone else ''}\n"
+        f"Property types: {fmt_list(property_types)}\n"
+        f"Sub-type specialties: {fmt_list(property_subtypes)}\n"
+        f"Geography: {fmt_list(geography)}\n"
+        f"Size: {fmt_money(min_loan)} – {fmt_money(max_loan)}\n\n"
+        f"Notes:\n{notes or '(none)'}\n\n"
+        f"Review + approve: {review_link}\n"
+    )
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:640px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">New Lender Application</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 4px;font-family:Georgia,serif;">{lender_name}</h2>
+        <div style="font-family:Arial,sans-serif;font-size:12px;color:#6B6558;text-transform:capitalize;">{(institution_type or '').replace('_', ' ')}</div>
+        <table style="width:100%;font-family:Arial,sans-serif;font-size:14px;border-collapse:collapse;margin-top:16px;">
+          <tr><td style="color:#6B6558;padding:4px 0;width:150px;">Contact</td><td>{contact_name} &lt;<a href="mailto:{contact_email}">{contact_email}</a>&gt;{(' · ' + contact_phone) if contact_phone else ''}</td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">Property Types</td><td>{fmt_list(property_types)}</td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">Specialties</td><td>{fmt_list(property_subtypes)}</td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">Geography</td><td>{fmt_list(geography)}</td></tr>
+          <tr><td style="color:#6B6558;padding:4px 0;">Loan Size</td><td>{fmt_money(min_loan)} &ndash; {fmt_money(max_loan)}</td></tr>
+        </table>
+        {f'<div style="margin-top:16px;padding:12px;background:#fff;border:1px solid #E4DFD1;font-family:Arial,sans-serif;font-size:13px;white-space:pre-wrap;">{notes}</div>' if notes else ''}
+        <div style="margin-top:22px;">
+          <a href="{review_link}" style="background:#C89434;color:#1A1A1A;padding:10px 18px;text-decoration:none;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;">Review + Approve</a>
+        </div>
+      </div>
+    </div>
+    """
+    return subject, html, text
+
+
+
 def tmpl_lender_approved(lender_name: str, activate_url: str) -> tuple[str, str, str]:
     subject = "You're approved — activate your Byrd & CO lender portal"
     text = (
