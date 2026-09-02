@@ -12,6 +12,21 @@
 - P3: Refactor `server.py` (~11k lines) into modular routes
 
 
+### Broker Notified on Client Doc Upload — SHIPPED 2026-02
+Every time a borrower or a linked sponsor drops a file into the client portal, all `BROKER_EMAILS` are notified via Postmark with the scenario name, doc line, filename, and a one-click deep-link to the admin scenario page.
+
+**Backend (`/app/backend/server.py` + `email_service.py`):**
+- New template `tmpl_client_doc_upload(...)` — branded Byrd & CO email with borrower name, scenario, doc line, file, files-on-line count, and CTA button.
+- `client_upload` route now calls `_maybe_notify_broker_of_upload(user, doc, filename, background)` after the file is persisted. Background task, so the upload response stays fast.
+- **Coalescing:** in-process throttle keyed on `(scenario_id, user_id)`. When a borrower drags 20 files at once, only the first hits the inbox; the rest are suppressed for `UPLOAD_NOTIFY_WINDOW_SECONDS` (default 120 s).
+- **Off-switches:** `NOTIFY_BROKER_ON_UPLOAD=false` env-flag disables entirely. Empty `BROKER_EMAILS` is a no-op.
+- Never breaks the upload — any notifier exception is caught + logged.
+
+**Tests:**
+- `/app/backend/tests/test_client_upload_notify.py` — 7 tests: HTTP happy-path, one email per broker, coalesce window, `window=0` never coalesces, `NOTIFY_BROKER_ON_UPLOAD=false` short-circuit, empty broker list no-op, scenario+client metadata pulled from Mongo.
+- Live smoke: real Postmark send fired to Wayne + Caleb during the test run (visible in backend logs as `tag=client_upload`).
+
+
 ### Lender Matching — Sub-Type Awareness — SHIPPED 2026-02
 Lender matching now considers property sub-types so specialists (e.g. Manufacturing Heavy Industrial) outrank generalists on deals in their niche.
 
