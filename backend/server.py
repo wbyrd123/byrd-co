@@ -9078,16 +9078,29 @@ def _cap_rate_math(prop: dict) -> dict:
 
 LOAN_QUOTE_CHAT_SYSTEM = """You are Ada, a warm and efficient senior commercial real estate broker assistant at Byrd & Co. You help brokers build a 1-page Loan Quote for a commercial listing agent to share with a prospective buyer.
 
-You gather:
-1) Property info: name, property_type (Multifamily / Office / Retail / Industrial / Hotel / Mixed-Use / Self-Storage / Medical Office / Special Purpose), address, city, state, estimated_value, noi OR cap_rate_pct (either — the app auto-calculates the other), occupancy_type ("owner_occupied" | "non_owner_occupied")
-2) Listing agent: name, email, phone, brokerage
+You gather two groups of info, IN THIS ORDER:
+
+GROUP A — Property info (ask first):
+- name (optional — if the broker doesn't have a distinct property/deal name, reuse the street address as the name)
+- property_type (Multifamily / Office / Retail / Industrial / Hotel / Mixed-Use / Self-Storage / Medical Office / Special Purpose)
+- address, city, state
+- estimated_value
+- noi OR cap_rate_pct (either — the app auto-calculates the other)
+- occupancy_type ("owner_occupied" | "non_owner_occupied")
+
+GROUP B — Listing agent (ask AFTER property info is complete, BEFORE proposing rates):
+- name, email, phone, brokerage
 
 Behavior:
 - Ask ONE or TWO fields at a time in a friendly conversation. Never bulk-request 8 fields.
 - Confirm as you go ("Got it — $3M value.")
+- If the broker's first message looks like a street address (contains a number + street word like St/Ave/Blvd/Rd, OR a comma-separated "street, city, ST"), extract it as `address` AND set `name` to the same value unless a separate name is obviously being given. Then ask for `property_type` next — DO NOT re-ask for the property name.
+- Try to parse `city` and `state` out of any comma-separated address the broker gives (e.g., "2290 North St, Beaumont, TX" → address="2290 North St", city="Beaumont", state="TX"). Don't ask for city/state again if you already parsed them.
 - If broker gives NOI or cap rate but not both, don't ask for the other.
-- When property info is complete enough (name, property_type, address, city, state, estimated_value, noi OR cap_rate), prompt: "Ready for me to research current market rates and propose 3 financing options?"
-- If broker agrees, set ready_for_rates=true in your response.
+- Once Group A is complete, transition with something like: "Great — I have the property. Now who's the listing agent? What's their name?" Then walk through agent name → brokerage → email → phone.
+- If the broker asks you to look up the agent's contact info online (email/phone), set `lookup_agent: true` (see CRITICAL below).
+- ONLY after BOTH Group A is complete AND you have at minimum the agent's name + email, prompt: "Ready for me to research current market rates and propose 3 financing options?" — and set `ready_for_rates: true` when the broker agrees.
+- NEVER set `ready_for_rates: true` if the listing agent's name or email is still blank.
 
 Return ONLY valid JSON in this exact schema:
 {
@@ -9316,8 +9329,20 @@ async def admin_loanquote_chat(body: LoanQuoteChatBody, admin=Depends(require_st
             new_state[section][k] = v
     # Re-run cap-rate math after updates in case value/NOI/cap arrived this turn
     new_state["property_info"] = _cap_rate_math(new_state["property_info"])
+    # Hard guardrail: never allow ready_for_rates to fire without the listing agent's
+    # name + email. Ada's system prompt covers this, but LLM outputs drift; we enforce
+    # it deterministically so the frontend can't auto-launch rate research early.
+    _agent = new_state.get("listing_agent") or {}
+    _ready = bool(parsed.get("ready_for_rates"))
+    if _ready and (not (_agent.get("name") or "").strip()
+                   or not (_agent.get("email") or "").strip()):
+        _ready = False
+        # Nudge the reply if Ada tried to skip the agent step
+        if reply_text and "listing agent" not in reply_text.lower():
+            reply_text += ("\n\nBefore I research rates — who's the listing agent? "
+                           "I need at minimum their name and email.")
     return {"session_id": sid, "reply": reply_text,
-            "ready_for_rates": bool(parsed.get("ready_for_rates")),
+            "ready_for_rates": _ready,
             "lookup_agent": bool(parsed.get("lookup_agent")),
             "state": new_state}
 

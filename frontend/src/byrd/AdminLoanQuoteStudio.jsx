@@ -57,7 +57,7 @@ export default function AdminLoanQuoteStudio() {
   const [editingId, setEditingId] = useState(null);  // when set, save() PATCHes existing quote
   const [messages, setMessages] = useState([{
     role: "ada",
-    text: "Hi — I'm Ada. Let's build a Loan Quote. What's the property name?\n\nTip: you can also click Edit on any saved quote below to modify it.",
+    text: "Hi — I'm Ada. Let's build a Loan Quote. What's the property address?\n\nTip: you can also click Edit on any saved quote below to modify it.",
   }]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -264,7 +264,7 @@ export default function AdminLoanQuoteStudio() {
     setPreviewUrl((p) => { if (p) URL.revokeObjectURL(p); return null; });
     setMessages([{
       role: "ada",
-      text: "Fresh start. What's the property name?",
+      text: "Fresh start. What's the property address?",
     }]);
   };
 
