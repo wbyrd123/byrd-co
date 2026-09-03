@@ -9128,6 +9128,7 @@ GROUP A — Property info (ask first, in this order):
 
 GROUP B — Listing agent (ask AFTER property info is complete, BEFORE proposing rates):
 - name, email, phone, brokerage
+- IMPORTANT: If ANY of `listing_agent.name`, `listing_agent.email`, `listing_agent.phone`, `listing_agent.brokerage` are already populated in CURRENT_STATE (non-empty), that means the user has a saved agent profile — DO NOT ask for those fields again. Only ask for the specific fields that are still blank. If ALL FOUR agent fields are already filled, skip Group B entirely and move straight to the "Ready to research rates?" prompt.
 
 Behavior:
 - Ask ONE or TWO fields at a time in a friendly conversation. Never bulk-request 8 fields.
@@ -9722,6 +9723,72 @@ def _quote_owner_filter(user: dict) -> dict:
     if user.get("role") == "admin":
         return {}
     return {"created_by_user_id": user["id"]}
+
+
+# ---- Listing Agent Profile (client-studio users only) ----
+# Persisted on the user document under `agent_profile` so an agent's photo /
+# phone / brokerage / name carry over to every new quote they build. Admin users
+# skip this entirely (they're building for different agents each time).
+
+class AgentProfileBody(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=200)
+    email: Optional[str] = Field(default=None, max_length=200)
+    phone: Optional[str] = Field(default=None, max_length=60)
+    brokerage: Optional[str] = Field(default=None, max_length=200)
+    photo_b64: Optional[str] = None
+    photo_content_type: Optional[str] = Field(default=None, max_length=60)
+
+
+def _sanitize_agent_profile(p: Optional[dict]) -> dict:
+    p = p or {}
+    return {
+        "name": p.get("name") or "",
+        "email": p.get("email") or "",
+        "phone": p.get("phone") or "",
+        "brokerage": p.get("brokerage") or "",
+        "photo_b64": p.get("photo_b64"),
+        "photo_content_type": p.get("photo_content_type"),
+        "updated_at": p.get("updated_at"),
+    }
+
+
+@api.get("/client/quote-studio/profile")
+async def get_agent_profile(user=Depends(require_studio_user)):
+    """Return the saved listing-agent profile for the current user.
+
+    Admins get an empty profile (they build quotes for different agents each time).
+    Clients get their persisted profile, falling back to their user record's
+    name/email if the profile has never been saved."""
+    if user.get("role") == "admin":
+        return _sanitize_agent_profile(None)
+    profile = user.get("agent_profile") or {}
+    # First-visit prefill: seed name+email from the user account so the panel
+    # isn't empty on their very first quote.
+    if not profile.get("name"):
+        profile["name"] = user.get("name") or ""
+    if not profile.get("email"):
+        profile["email"] = user.get("email") or ""
+    return _sanitize_agent_profile(profile)
+
+
+@api.put("/client/quote-studio/profile")
+async def put_agent_profile(body: AgentProfileBody, user=Depends(require_studio_user)):
+    """Save/update the current user's listing-agent profile. Admin users are
+    rejected because their agent panel changes per quote."""
+    if user.get("role") == "admin":
+        raise HTTPException(status_code=400,
+                            detail="Admin users do not have a personal agent profile")
+    profile = {
+        "name": (body.name or "").strip() or None,
+        "email": (body.email or "").strip() or None,
+        "phone": (body.phone or "").strip() or None,
+        "brokerage": (body.brokerage or "").strip() or None,
+        "photo_b64": body.photo_b64 or None,
+        "photo_content_type": body.photo_content_type or None,
+        "updated_at": now_iso(),
+    }
+    await db.users.update_one({"id": user["id"]}, {"$set": {"agent_profile": profile}})
+    return _sanitize_agent_profile(profile)
 
 
 @api.get("/admin/marketing/quotes")

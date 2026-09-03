@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
-import { Send, Sparkles, Trash2, Download, FileText, Wand2, Loader2, Save, User, Home, Upload, X, Edit3, Mail, RefreshCw } from "lucide-react";
+import { Send, Sparkles, Trash2, Download, FileText, Wand2, Loader2, Save, User, Home, Upload, X, Edit3, Mail, RefreshCw, IdCard } from "lucide-react";
 
 const PROPERTY_TYPES = [
   "Multifamily", "Office", "Retail", "Industrial", "Hotel",
@@ -52,6 +53,10 @@ async function openAuthedPdf(url, filename = "document.pdf") {
 }
 
 export default function AdminLoanQuoteStudio() {
+  const { user } = useAuth();
+  const isClientAgent = user?.role === "client";
+  const [agentProfile, setAgentProfile] = useState(null);   // last saved profile
+  const [savingProfile, setSavingProfile] = useState(false);
   const [state, setState] = useState(emptyState());
   const [sessionId, setSessionId] = useState(null);
   const [editingId, setEditingId] = useState(null);  // when set, save() PATCHes existing quote
@@ -70,6 +75,28 @@ export default function AdminLoanQuoteStudio() {
 
   const loadLibrary = () => api.get("/admin/marketing/quotes").then((r) => setLibrary(r.data || []));
   useEffect(() => { loadLibrary(); }, []);
+
+  // Client-only: load the persisted listing-agent profile and hydrate the form once.
+  // Admins fill the agent panel per quote, so we skip this for them.
+  useEffect(() => {
+    if (!isClientAgent) return;
+    api.get("/client/quote-studio/profile").then((r) => {
+      const p = r.data || {};
+      setAgentProfile(p);
+      // Only hydrate on the very first mount, and only if the form hasn't been touched.
+      setState((s) => (s.listing_agent?.name || s.listing_agent?.email ? s : ({
+        ...s,
+        listing_agent: {
+          name: p.name || "",
+          email: p.email || "",
+          phone: p.phone || "",
+          brokerage: p.brokerage || "",
+          photo_b64: p.photo_b64 || null,
+          photo_content_type: p.photo_content_type || null,
+        },
+      })));
+    }).catch(() => { /* profile is optional */ });
+  }, [isClientAgent]);
   useEffect(() => {
     // Scroll only the chat's own container to its bottom — DO NOT scroll the whole page.
     const el = chatScrollRef.current;
@@ -256,9 +283,22 @@ export default function AdminLoanQuoteStudio() {
     // Only confirm if there's actual work in progress
     const hasWork = !!(state.property_info.name || state.property_info.address
       || state.property_info.estimated_value || state.options.length
-      || state.listing_agent.name || messages.length > 1);
+      || messages.length > 1);
     if (hasWork && !window.confirm("Discard current quote and start a new one?")) return;
-    setState(emptyState());
+    const fresh = emptyState();
+    // Client agents get their saved profile carried into the new quote so they
+    // don't retype name/email/phone/brokerage/photo every time.
+    if (isClientAgent && agentProfile) {
+      fresh.listing_agent = {
+        name: agentProfile.name || "",
+        email: agentProfile.email || "",
+        phone: agentProfile.phone || "",
+        brokerage: agentProfile.brokerage || "",
+        photo_b64: agentProfile.photo_b64 || null,
+        photo_content_type: agentProfile.photo_content_type || null,
+      };
+    }
+    setState(fresh);
     setSessionId(null);
     setEditingId(null);
     setPreviewUrl((p) => { if (p) URL.revokeObjectURL(p); return null; });
@@ -266,6 +306,29 @@ export default function AdminLoanQuoteStudio() {
       role: "ada",
       text: "Fresh start. What's the property name?",
     }]);
+  };
+
+  // Client-only: persist the current listing-agent fields so they carry to future quotes.
+  const saveAgentProfile = async () => {
+    if (!isClientAgent) return;
+    setSavingProfile(true);
+    try {
+      const a = state.listing_agent || {};
+      const r = await api.put("/client/quote-studio/profile", {
+        name: a.name || null,
+        email: a.email || null,
+        phone: a.phone || null,
+        brokerage: a.brokerage || null,
+        photo_b64: a.photo_b64 || null,
+        photo_content_type: a.photo_content_type || null,
+      });
+      setAgentProfile(r.data);
+      toast.success("Agent profile saved — this carries to every new quote.");
+    } catch (e) {
+      toast.error(errMsg(e, "Couldn't save profile"));
+    } finally {
+      setSavingProfile(false);
+    }
   };
 
   // ---- Manual field edits (all fields can be edited inline in the preview panel) ----
@@ -416,7 +479,10 @@ export default function AdminLoanQuoteStudio() {
 
           {/* Preview / manual edit pane */}
           <div className="space-y-4">
-            <QuoteFieldsPanel state={state} setProp={setProp} setAgent={setAgent} setOption={setOption} />
+            <QuoteFieldsPanel state={state} setProp={setProp} setAgent={setAgent} setOption={setOption}
+              showAgentProfileSave={isClientAgent}
+              onSaveAgentProfile={saveAgentProfile}
+              savingAgentProfile={savingProfile} />
 
             {previewUrl ? (
               <div className="byrd-card p-2">
@@ -542,7 +608,9 @@ export default function AdminLoanQuoteStudio() {
   );
 }
 
-function QuoteFieldsPanel({ state, setProp, setAgent, setOption }) {
+function QuoteFieldsPanel({ state, setProp, setAgent, setOption,
+                            showAgentProfileSave = false, onSaveAgentProfile,
+                            savingAgentProfile = false }) {
   const p = state.property_info || {};
   const a = state.listing_agent || {};
   return (
@@ -575,6 +643,18 @@ function QuoteFieldsPanel({ state, setProp, setAgent, setOption }) {
       <div className="flex items-center gap-2 mt-4 mb-2">
         <User size={14} className="text-[#C89434]" />
         <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558]">// Listing Agent</div>
+        {showAgentProfileSave && (
+          <button
+            type="button"
+            onClick={onSaveAgentProfile}
+            disabled={savingAgentProfile}
+            className="ml-auto text-[10px] font-mono uppercase tracking-widest text-[#C89434] hover:text-[#8A6821] flex items-center gap-1 disabled:opacity-40"
+            data-testid="save-agent-profile"
+            title="Save name, email, phone, brokerage, and photo so it carries to every new quote"
+          >
+            {savingAgentProfile ? (<><Loader2 size={11} className="animate-spin" /> Saving…</>) : (<><IdCard size={11} /> Save my agent profile</>)}
+          </button>
+        )}
       </div>
       <div className="flex gap-3 items-start">
         <AgentPhotoBox
