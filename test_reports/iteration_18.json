@@ -1,0 +1,28 @@
+{
+  "summary": "Frontend-only verification of the STATES dropdown fix on /admin/marketplace/prospects (Outreach). Logged in as wayne@byrd-co.com (no 2FA prompt), navigated to Outreach, and validated all three state dropdowns plus regression add/filter/delete flows. All 6 requested checks PASS, zero console errors.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "STATES constant is duplicated in usage only (single source) — OK. Note discoverState/AddDialog defaults are still hardcoded 'TX'; consider STATES[0] or a named DEFAULT_STATE to avoid drift if the list changes again."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested", "frontend": "100%"},
+  "seed_data_creation": "Created TEST_OH_Bank_QA (state OH) and TEST_AL_Bank_QA (state AL) prospects via the Add dialog; both deleted via the row trash icon at the end (0 TEST rows remaining).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Login: /portal/login with [data-testid=login-email/login-password/login-submit]; wayne@byrd-co.com currently has no 2FA challenge and lands on /admin. Outreach page testids: admin-prospects (root), discover-state, filter-state, filter-status, prospect-add-btn, add-prospect-dialog, ap-institution, ap-state, ap-save, delete-<id>. Delete uses window.confirm so register page.on('dialog', accept) before clicking. Verified dropdown values: discover-state/ap-state = [AL,AR,FL,GA,LA,MS,NC,OH,OK,TN,TX]; filter-state = ['' (All states)] + same 11.",
+  "detailed_results": {
+    "discover-state options": "PASS - exactly 11 options, order AL,AR,FL,GA,LA,MS,NC,OH,OK,TN,TX (AL and OH present)",
+    "filter-state options": "PASS - 'All states' first (value ''), then same 11 in same order",
+    "ap-state options (Add dialog)": "PASS - same 11 alphabetical codes",
+    "add prospect state=OH": "PASS - POST succeeded, row rendered with state OH / SOURCED chip",
+    "add prospect state=AL": "PASS - row rendered with state AL / SOURCED chip",
+    "filter-state=OH": "PASS - only OH row shown, AL row filtered out; reset to All states restored both",
+    "console errors": "PASS - none captured during full flow",
+    "cleanup": "PASS - both TEST rows deleted"
+  },
+  "test_credentials": "wayne@byrd-co.com / byrdco2026 (admin) - works, no 2FA step",
+  "rca_of_the_issue": "N/A - original bug (AL missing, OH absent) is resolved; STATES constant in /app/frontend/src/byrd/AdminLenderProspects.jsx line 8 now holds the 11 alphabetically sorted codes and is the single source for all three selects."
+}

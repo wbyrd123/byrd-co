@@ -5,7 +5,7 @@ import {
   Sparkles, Search, Plus, Upload, Trash2, Send, Check, X, Mail, RefreshCw, ShieldOff,
 } from "lucide-react";
 
-const STATES = ["TX", "LA", "OK", "AR", "MS", "AL", "TN", "FL", "GA", "NC"];
+const STATES = ["AL", "AR", "FL", "GA", "LA", "MS", "NC", "OH", "OK", "TN", "TX"];
 const STATUSES = [
   { v: "sourced", label: "Sourced", color: "bg-[#F3EEE0] text-[#6B6558]" },
   { v: "queued", label: "Queued", color: "bg-[#E5F1E5] text-[#245C25]" },
