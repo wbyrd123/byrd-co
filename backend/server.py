@@ -42,6 +42,7 @@ from email_service import (
     tmpl_term_sheet_submitted, tmpl_term_sheet_status_change,
     tmpl_password_reset, tmpl_2fa_code, friendly_delivery_error,
     tmpl_client_doc_upload, tmpl_lender_application_broker_alert,
+    tmpl_scenario_note_to_client,
 )
 import audit_service
 from audit_service import log_event as audit_log
@@ -2159,6 +2160,36 @@ def _sanitize_note(n: dict) -> dict:
     }
 
 
+async def _maybe_notify_client_of_note(*, scen: dict, note: dict,
+                                       background: BackgroundTasks) -> None:
+    """Email the borrower a copy of a broker's Deal Note. No-op if the scenario has
+    no linked client, the client user has no email, or notifications are disabled."""
+    if str(os.environ.get("NOTIFY_CLIENT_ON_NOTE", "true")).lower() in ("0", "false", "no", "off"):
+        return
+    client_id = scen.get("client_id")
+    if not client_id:
+        return
+    client = await db.users.find_one({"id": client_id, "role": "client"},
+                                     {"_id": 0, "name": 1, "email": 1})
+    if not client or not client.get("email"):
+        return
+    doc_label = None
+    if note.get("doc_id"):
+        doc = await db.client_docs.find_one({"id": note["doc_id"]},
+                                            {"_id": 0, "label": 1})
+        doc_label = (doc or {}).get("label")
+    subj, html, text = tmpl_scenario_note_to_client(
+        author_name=note.get("author_name") or "",
+        client_name=client.get("name") or "",
+        scenario_name=scen.get("name") or "(untitled scenario)",
+        note_body=note.get("body") or "",
+        doc_label=doc_label,
+    )
+    background.add_task(send_email, client["email"], subj, html, text, "deal_note_to_client")
+
+
+
+
 async def _user_can_access_scenario_notes(scen: dict, user: dict) -> bool:
     role = user.get("role")
     if role == "admin":
@@ -2201,6 +2232,7 @@ async def list_scenario_notes(sid: str, doc_id: Optional[str] = None,
 
 @api.post("/scenarios/{sid}/notes")
 async def create_scenario_note(sid: str, body: NoteInput, request: Request,
+                               background: BackgroundTasks,
                                user=Depends(get_current_user)):
     scen = await _scenario_or_404(sid)
     if not await _user_can_access_scenario_notes(scen, user):
@@ -2229,6 +2261,11 @@ async def create_scenario_note(sid: str, body: NoteInput, request: Request,
                     resource_name=scen.get("name"),
                     metadata={"fields": ["notes"], "action": "note_added",
                               "note_id": note["id"], "doc_id": body.doc_id or None})
+    # When a broker leaves a Deal Note, ping the client so they don't have to poll
+    # the portal. Skips if the note was authored by the client or a lender, or if
+    # the scenario has no linked client user.
+    if user.get("role") == "admin":
+        await _maybe_notify_client_of_note(scen=scen, note=note, background=background)
     return _sanitize_note(note)
 
 

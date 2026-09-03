@@ -547,3 +547,53 @@ def tmpl_client_doc_upload(*, uploader_name: str, uploader_email: str, client_na
     </div>
     """
     return subject, html, text
+
+
+def tmpl_scenario_note_to_client(*, author_name: str, client_name: str,
+                                 scenario_name: str, note_body: str,
+                                 doc_label: Optional[str] = None) -> tuple[str, str, str]:
+    """Notify the borrower that their Byrd & CO broker just left a Deal Note in the portal.
+    Includes the full note text and a link back to the client portal."""
+    base = public_base_url()
+    portal_link = f"{base}/portal" if base else "/portal"
+    who = author_name or "Byrd & CO"
+    greeting_name = (client_name or "").split(" ")[0] if client_name else ""
+    subject = f"[Byrd Portal] New note from {who} — {scenario_name}"
+    # Escape < > in note body for HTML safety while preserving line breaks
+    import html as _html
+    safe_note = _html.escape(note_body).replace("\n", "<br>")
+    doc_line = (f'<tr><td style="color:#6B6558;padding:4px 0;width:120px;">Document</td>'
+                f'<td>{_html.escape(doc_label)}</td></tr>') if doc_label else ""
+    text = (
+        f"Hi{(' ' + greeting_name) if greeting_name else ''},\n\n"
+        f"{who} just left a note for you on your Byrd & CO deal ({scenario_name})"
+        f"{(' — regarding: ' + doc_label) if doc_label else ''}.\n\n"
+        f"— — —\n{note_body}\n— — —\n\n"
+        f"Open your client portal to reply or review documents: {portal_link}\n\n"
+        f"— Byrd & CO"
+    )
+    html = f"""
+    <div style="font-family:Georgia,serif;max-width:600px;margin:auto;">
+      <div style="background:#1A1A1A;color:#C89434;padding:20px;text-align:center;">
+        <div style="font-size:20px;font-weight:bold;letter-spacing:0.1em;">BYRD &amp; CO</div>
+        <div style="font-size:10px;color:#C9C1AF;text-transform:uppercase;letter-spacing:0.2em;">New Deal Note</div>
+      </div>
+      <div style="padding:24px;background:#FBF8F1;color:#1A1A1A;">
+        <h2 style="margin:0 0 6px;font-family:Georgia,serif;">Note from {_html.escape(who)}</h2>
+        <div style="font-family:Arial,sans-serif;font-size:13px;color:#6B6558;margin-bottom:16px;">
+          on your deal <b>{_html.escape(scenario_name)}</b>{(' &middot; regarding <b>' + _html.escape(doc_label) + '</b>') if doc_label else ''}
+        </div>
+        <div style="background:#FFFFFF;border-left:3px solid #C89434;padding:14px 16px;font-family:Arial,sans-serif;font-size:14px;line-height:1.55;color:#1A1A1A;white-space:pre-wrap;">
+          {safe_note}
+        </div>
+        <div style="margin-top:20px;">
+          <a href="{portal_link}" style="background:#C89434;color:#1A1A1A;padding:10px 18px;text-decoration:none;font-family:Arial,sans-serif;font-size:13px;font-weight:bold;">Open Client Portal</a>
+        </div>
+        <div style="margin-top:20px;font-family:Arial,sans-serif;font-size:11px;color:#6B6558;">
+          You're receiving this because a Byrd &amp; CO broker left a note on your deal. Reply here or in the portal to keep the thread with your broker.
+        </div>
+      </div>
+    </div>
+    """
+    return subject, html, text
+
