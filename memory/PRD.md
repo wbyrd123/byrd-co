@@ -16,6 +16,26 @@
 
 Ada-powered automated lender sourcing + Draft & Approve outreach pipeline. Phase 1 lands the entire prospect lifecycle EXCEPT actual sending — waiting on user's Instantly.ai signup + subdomain warmup.
 
+**Enrichment (upgraded 2026-02-04):**
+- Ada's Perplexity enrich prompt now researches across the bank website, LinkedIn public profiles, PR Newswire/BusinessWire press releases, CRE deal announcements (Commercial Observer, GlobeSt, Bisnow), conference speaker bios, NMLS Consumer Access, and public directory snippets.
+- **Email derivation** — Ada finds ANY employee email at the bank, extracts the pattern (e.g., `j.smith@bank.com`), and applies it to the target with a source note documenting the pattern.
+- **Phone search** — direct dial preferred; falls back to main branch.
+- **Confidence rubric** — high (name + email both published), medium (name confirmed + email pattern-derived), low (best-guess).
+- **Backup contacts** — up to 2 alternates per bank with a "Use as primary" swap button in the expanded row.
+- New fields on `lender_prospects`: `email_source_note`, `phone_source_note`, `enrichment_confidence`, `enrichment_alternates[]`.
+- Perplexity `max_tokens` raised to 1800 for the more thorough response.
+
+**Frontend:**
+- Contact column now shows email + phone as click-to-open links (`mailto:` / `tel:`), each with an italic **↳ source note** underneath.
+- Confidence chip (green/gold/red) next to the source-URL link.
+- Expanded row (Mail icon) shows backup contacts with **"Use as primary"** button that PATCHes the swap and re-queues the row for drafting.
+
+**Tests (updated):**
+- 13 pytest cases (was 11) — added `TestEnrichmentSchema` (round-trip source_note/confidence/alternates via mongo write + list read) and `test_promote_alternate_to_primary_via_patch` (swap flow the UI uses).
+
+
+### Loan Quote Studio — Agent Access + Watermark + PDF CTA + Lender Alert — SHIPPED 2026-02
+
 **Backend (`/app/backend/server.py`):**
 - New `lender_prospects` collection. Pipeline: `sourced → queued → drafted → approved → sent → replied → converted / opted_out / bounced`.
 - Discovery: `POST /admin/marketplace/prospects/discover` uses existing Perplexity Sonar key to seed banks by US state (strict-JSON prompt, 8-12 banks per call, dedupes on (institution, state)).

@@ -9910,24 +9910,56 @@ Rules:
 - Skip anything you're not confident is real."""
 
 
-_PROSPECT_ENRICH_PROMPT = """You are a commercial real estate intelligence analyst.
-For this bank: {institution} in {state}, find the head or senior officer of \
-commercial real estate lending (or commercial lending / middle-market CRE / \
-CRE portfolio lending) whose contact info is PUBLICLY listed on the bank's \
-website, LinkedIn public profile, or in press releases.
+_PROSPECT_ENRICH_PROMPT = """You are a top-tier commercial real estate business-development \
+researcher with access to real-time web search. Find the best commercial real estate \
+lending contact at {institution} in {state}.
+
+RESEARCH LIKE A PRO — don't stop at page one. Search across:
+- The bank's own website (About / Team / CRE / Commercial Lending pages)
+- LinkedIn public profiles (job titles like "VP Commercial Real Estate", "SVP CRE Lending", "Director of Commercial Banking")
+- Recent press releases and PR Newswire / BusinessWire posts naming a CRE hire
+- Conference speaker pages (MBA CREF, ICSC, NMHC, local CRE conferences)
+- CRE deal announcements in Commercial Observer, GlobeSt, REBusinessOnline, Bisnow, local business journals
+- NMLS Consumer Access (nmlsconsumeraccess.org)
+- Company directories (RocketReach public-tier, ZoomInfo public snippets, LinkedIn Sales Navigator snippets)
+
+EMAIL DERIVATION (this is how you find emails that aren't published):
+Step 1: Find ANY employee email address anywhere on the bank's website or in press releases.
+Step 2: Extract the pattern (e.g., "jsmith@bank.com" → `{{firstinitial}}{{lastname}}`, or "john.smith@bank.com" → `{{first}}.{{last}}`).
+Step 3: Apply that pattern to the target person's name. That's your candidate email.
+Report the pattern + source in `email_source_note` so the user can verify.
+
+PHONE:
+- Look on their LinkedIn contact info, the bank's team page, press releases, and conference speaker bios.
+- If only a main branch line is available, use that and mark confidence "low" for phone.
+
+BACKUP CONTACTS:
+Return up to 2 additional CRE / commercial lending officers at the same bank as fallbacks.
 
 Return STRICT JSON, no prose, no code fences:
 
-{{"contact_name":"Full Name","contact_title":"Head of Commercial Real Estate",
-  "contact_email":"person@bank.com or empty string if none published",
-  "contact_phone":"formatted number or empty string",
-  "source_url":"the URL where you found this",
-  "confidence":"high|medium|low"}}
+{{
+  "contact_name": "Full Name",
+  "contact_title": "Head of Commercial Real Estate",
+  "contact_email": "person@bank.com",
+  "email_source_note": "found on About page | derived from pattern j.smith@bank.com published in 2024 press release | direct listing on LinkedIn",
+  "contact_phone": "formatted number (direct if possible, main branch OK)",
+  "phone_source_note": "direct dial from LinkedIn | main line from website | conference bio",
+  "source_url": "the best URL where you found the primary evidence",
+  "confidence": "high | medium | low",
+  "alternates": [
+    {{"contact_name": "Second Person", "contact_title": "Title", "contact_email": "…", "contact_phone": "…", "source_url": "…"}}
+  ]
+}}
 
-Rules:
-- Only return a person you can back with a public source.
-- If you can't find ANYONE, return all fields empty and confidence="low".
-- Never fabricate an email address. If you can't find one, leave it empty."""
+CONFIDENCE RUBRIC:
+- "high"    → name + email BOTH found on a publicly-published page you can cite
+- "medium"  → name confirmed on 2+ sources, email derived from an observed company pattern
+- "low"     → name found but email is a best-guess against the pattern, OR only a main branch phone
+
+Never invent a name. If you cannot find any CRE contact at the bank, return every field \
+empty and confidence "low". A derived-from-pattern email is NOT invention if you can point \
+to another employee at the same domain as evidence of the pattern."""
 
 
 def _sanitize_prospect(p: dict) -> dict:
@@ -10025,7 +10057,7 @@ async def prospects_enrich(pid: str, admin=Depends(require_admin)):
     if not p:
         raise HTTPException(status_code=404, detail="Prospect not found")
     prompt = _PROSPECT_ENRICH_PROMPT.format(institution=p["institution"], state=p["state"])
-    res = await _perplexity_query(prompt, max_tokens=800)
+    res = await _perplexity_query(prompt, max_tokens=1800)
     if not res:
         raise HTTPException(status_code=502, detail="Perplexity query failed")
     parsed = _parse_llm_json(res["content"]) or {}
@@ -10035,13 +10067,29 @@ async def prospects_enrich(pid: str, admin=Depends(require_admin)):
         "contact_email": (parsed.get("contact_email") or "").strip().lower(),
         "contact_phone": (parsed.get("contact_phone") or "").strip(),
     }
+    alternates = []
+    for a in (parsed.get("alternates") or [])[:2]:
+        if not isinstance(a, dict):
+            continue
+        if not (a.get("contact_name") or "").strip():
+            continue
+        alternates.append({
+            "contact_name": (a.get("contact_name") or "").strip(),
+            "contact_title": (a.get("contact_title") or "").strip(),
+            "contact_email": (a.get("contact_email") or "").strip().lower(),
+            "contact_phone": (a.get("contact_phone") or "").strip(),
+            "source_url": (a.get("source_url") or "").strip(),
+        })
     # Auto-advance to `queued` when we have an email; otherwise `sourced` remains.
     next_status = "queued" if contact["contact_email"] else p.get("status", "sourced")
     updates = {
         **contact,
+        "email_source_note": (parsed.get("email_source_note") or "").strip(),
+        "phone_source_note": (parsed.get("phone_source_note") or "").strip(),
         "enrichment_source_url": (parsed.get("source_url") or "").strip(),
         "enrichment_confidence": (parsed.get("confidence") or "").lower(),
         "enrichment_citations": res.get("citations") or [],
+        "enrichment_alternates": alternates,
         "enriched_at": now_iso(),
         "status": next_status,
         "updated_at": now_iso(),

@@ -261,3 +261,62 @@ class TestDraftApproveGuards:
         r = requests.post(f"{API}/admin/marketplace/prospects/nope-id/approve",
                           headers=auth(admin_tok), timeout=30)
         assert r.status_code == 404
+
+
+class TestEnrichmentSchema:
+    """Validate the enrichment response contract without hitting Perplexity — the enrich
+    handler writes a richer set than PATCH exposes (source notes, confidence, alternates).
+    Assert those round-trip so the UI can trust them."""
+
+    def test_all_enrichment_fields_persist(self, admin_tok):
+        r = requests.post(f"{API}/admin/marketplace/prospects",
+                          json={"institution": f"{TAG}EnrichRT", "state": "MS"},
+                          headers=auth(admin_tok), timeout=30)
+        pid = r.json()["id"]
+        mdb.lender_prospects.update_one({"id": pid}, {"$set": {
+            "contact_name": "Jane Sample",
+            "contact_title": "SVP CRE",
+            "contact_email": f"{TAG.lower()}enrich@example.com",
+            "contact_phone": "555-0100",
+            "email_source_note": "derived from j.doe@bank.com pattern in 2024 press release",
+            "phone_source_note": "direct dial from LinkedIn",
+            "enrichment_source_url": "https://example.com/team",
+            "enrichment_confidence": "medium",
+            "enrichment_alternates": [
+                {"contact_name": "Backup One", "contact_title": "VP",
+                 "contact_email": f"{TAG.lower()}alt1@example.com",
+                 "contact_phone": "555-0111", "source_url": "https://example.com/a"},
+            ],
+            "status": "queued",
+        }})
+        got = requests.get(f"{API}/admin/marketplace/prospects",
+                           params={"state": "MS"},
+                           headers=auth(admin_tok), timeout=30).json()
+        row = next(x for x in got if x["id"] == pid)
+        assert row["email_source_note"].startswith("derived from")
+        assert row["phone_source_note"] == "direct dial from LinkedIn"
+        assert row["enrichment_confidence"] == "medium"
+        assert len(row["enrichment_alternates"]) == 1
+        assert row["enrichment_alternates"][0]["contact_name"] == "Backup One"
+
+    def test_promote_alternate_to_primary_via_patch(self, admin_tok):
+        """The UI's 'Use as primary' button PATCHes name/email/phone/title in one shot.
+        Verify the PATCH schema accepts it and the row re-queues."""
+        r = requests.post(f"{API}/admin/marketplace/prospects",
+                          json={"institution": f"{TAG}AltSwap", "state": "AL",
+                                "contact_name": "Old Primary",
+                                "contact_email": f"{TAG.lower()}old@example.com"},
+                          headers=auth(admin_tok), timeout=30)
+        pid = r.json()["id"]
+        p = requests.patch(f"{API}/admin/marketplace/prospects/{pid}",
+                           json={"contact_name": "Swapped Backup",
+                                 "contact_title": "VP CRE",
+                                 "contact_email": f"{TAG.lower()}swap@example.com",
+                                 "contact_phone": "555-0333",
+                                 "status": "queued"},
+                           headers=auth(admin_tok), timeout=30)
+        assert p.status_code == 200
+        assert p.json()["contact_name"] == "Swapped Backup"
+        assert p.json()["contact_email"] == f"{TAG.lower()}swap@example.com"
+        assert p.json()["status"] == "queued"
+

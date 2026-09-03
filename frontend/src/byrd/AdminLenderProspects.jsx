@@ -249,7 +249,47 @@ export default function AdminLenderProspects() {
                           <>
                             <div className="font-medium">{p.contact_name}</div>
                             <div className="text-[11px] text-[#6B6558]">{p.contact_title}</div>
-                            {p.contact_email && <div className="text-[11px] text-[#1A1A1A]">{p.contact_email}</div>}
+                            {p.contact_email && (
+                              <div className="text-[11px] text-[#1A1A1A] mt-0.5">
+                                <a href={`mailto:${p.contact_email}`} className="hover:underline">{p.contact_email}</a>
+                                {p.email_source_note && (
+                                  <div className="text-[10px] text-[#6B6558] italic" title="How Ada found this">
+                                    ↳ {p.email_source_note}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            {p.contact_phone && (
+                              <div className="text-[11px] text-[#2A2A2A] mt-0.5">
+                                <a href={`tel:${p.contact_phone.replace(/[^0-9+]/g, "")}`} className="hover:underline">{p.contact_phone}</a>
+                                {p.phone_source_note && (
+                                  <div className="text-[10px] text-[#6B6558] italic">↳ {p.phone_source_note}</div>
+                                )}
+                              </div>
+                            )}
+                            <div className="mt-1 flex items-center gap-1 flex-wrap">
+                              {p.enrichment_confidence && (
+                                <span
+                                  data-testid={`confidence-${p.id}`}
+                                  className={`inline-flex px-1.5 py-0.5 rounded-full text-[9px] font-mono uppercase tracking-widest ${
+                                    p.enrichment_confidence === "high" ? "bg-[#E5F1E5] text-[#245C25]" :
+                                    p.enrichment_confidence === "medium" ? "bg-[#FBEFD3] text-[#7A5410]" :
+                                    "bg-[#FADCDA] text-[#8A1F1A]"
+                                  }`}
+                                  title="Ada's confidence in this contact"
+                                >
+                                  {p.enrichment_confidence}
+                                </span>
+                              )}
+                              {p.enrichment_source_url && (
+                                <a href={p.enrichment_source_url} target="_blank" rel="noreferrer"
+                                   className="text-[10px] text-[#C89434] hover:underline"
+                                   data-testid={`source-${p.id}`}>source ↗</a>
+                              )}
+                              {(p.enrichment_alternates?.length > 0) && (
+                                <span className="text-[10px] text-[#6B6558]">· {p.enrichment_alternates.length} backup</span>
+                              )}
+                            </div>
                           </>
                         ) : (
                           <span className="text-[11px] text-[#6B6558] italic">Not enriched</span>
@@ -284,10 +324,11 @@ export default function AdminLenderProspects() {
                             <Check size={11} /> Approve
                           </button>
                         )}
-                        {p.draft_body && (
+                        {(p.draft_body || p.enrichment_alternates?.length > 0) && (
                           <button onClick={() => setExpanded((s) => ({ ...s, [p.id]: !s[p.id] }))}
                                   className="byrd-btn byrd-btn-outline h-8 px-2 text-xs ml-1"
-                                  data-testid={`toggle-${p.id}`}>
+                                  data-testid={`toggle-${p.id}`}
+                                  title={p.draft_body ? "Show/hide draft" : "Show backup contacts"}>
                             {expanded[p.id] ? <X size={11} /> : <Mail size={11} />}
                           </button>
                         )}
@@ -305,12 +346,58 @@ export default function AdminLenderProspects() {
                         </button>
                       </td>
                     </tr>
-                    {expanded[p.id] && p.draft_body && (
+                    {expanded[p.id] && (p.draft_body || p.enrichment_alternates?.length > 0) && (
                       <tr className="bg-[#FBF8F1]">
-                        <td colSpan={5} className="p-4">
-                          <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558] mb-1">// Ada's draft</div>
-                          <div className="text-sm font-semibold mb-1">Subject: {p.draft_subject}</div>
-                          <pre className="text-sm text-[#2A2A2A] whitespace-pre-wrap font-sans border-l-2 border-[#C89434] pl-3">{p.draft_body}</pre>
+                        <td colSpan={5} className="p-4 space-y-3">
+                          {p.enrichment_alternates?.length > 0 && (
+                            <div>
+                              <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558] mb-1.5">// Backup contacts Ada found</div>
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                {p.enrichment_alternates.map((a, idx) => (
+                                  <div key={idx} className="border border-[#E4DFD1] bg-white rounded-md p-2.5 text-xs">
+                                    <div className="font-semibold">{a.contact_name}</div>
+                                    <div className="text-[#6B6558]">{a.contact_title}</div>
+                                    {a.contact_email && <div className="mt-0.5"><a href={`mailto:${a.contact_email}`} className="hover:underline">{a.contact_email}</a></div>}
+                                    {a.contact_phone && <div className="text-[11px] text-[#2A2A2A]">{a.contact_phone}</div>}
+                                    <div className="mt-1 flex items-center gap-2">
+                                      <button
+                                        onClick={async () => {
+                                          try {
+                                            await api.patch(`/admin/marketplace/prospects/${p.id}`, {
+                                              contact_name: a.contact_name,
+                                              contact_title: a.contact_title,
+                                              contact_email: a.contact_email || undefined,
+                                              contact_phone: a.contact_phone || undefined,
+                                              draft_subject: null,
+                                              draft_body: null,
+                                              status: a.contact_email ? "queued" : "sourced",
+                                            });
+                                            toast.success(`Promoted ${a.contact_name} to primary`);
+                                            load();
+                                          } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+                                        }}
+                                        data-testid={`use-alternate-${p.id}-${idx}`}
+                                        className="byrd-btn byrd-btn-outline h-7 px-2 text-[10px]"
+                                      >
+                                        Use as primary
+                                      </button>
+                                      {a.source_url && (
+                                        <a href={a.source_url} target="_blank" rel="noreferrer"
+                                           className="text-[10px] text-[#C89434] hover:underline">source ↗</a>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {p.draft_body && (
+                            <div>
+                              <div className="font-mono text-[10px] uppercase tracking-widest text-[#6B6558] mb-1">// Ada's draft</div>
+                              <div className="text-sm font-semibold mb-1">Subject: {p.draft_subject}</div>
+                              <pre className="text-sm text-[#2A2A2A] whitespace-pre-wrap font-sans border-l-2 border-[#C89434] pl-3">{p.draft_body}</pre>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     )}
