@@ -17,6 +17,7 @@ import AdminQuotes from "@/byrd/AdminQuotes";
 import AdminScenarios from "@/byrd/AdminScenarios";
 import AdminScenarioDetail from "@/byrd/AdminScenarioDetail";
 import AdminLenders from "@/byrd/AdminLenders";
+import AdminLenderProspects from "@/byrd/AdminLenderProspects";
 import AdminGuide from "@/byrd/AdminGuide";
 import AdminTestimonials from "@/byrd/AdminTestimonials";
 import AdminAssistant from "@/byrd/AdminAssistant";
@@ -160,6 +161,7 @@ function App() {
               <Route path="scenarios" element={<AdminScenarios />} />
               <Route path="scenarios/:id" element={<AdminScenarioDetail />} />
               <Route path="lenders" element={<AdminLenders />} />
+              <Route path="marketplace/prospects" element={<AdminLenderProspects />} />
               <Route path="testimonials" element={<AdminTestimonials />} />
               <Route path="assistant" element={<AdminAssistant />} />
               <Route path="contacts" element={<AdminContacts />} />

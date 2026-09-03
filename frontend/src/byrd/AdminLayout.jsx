@@ -15,6 +15,7 @@ const NAV = [
   { to: "/admin/contacts", label: "Contacts", icon: Contact, testId: "admin-nav-contacts" },
   { to: "/admin/scenarios", label: "Scenarios", icon: FileText, testId: "admin-nav-scenarios" },
   { to: "/admin/lenders", label: "Lenders", icon: Building2, testId: "admin-nav-lenders" },
+  { to: "/admin/marketplace/prospects", label: "Outreach", icon: Sparkles, testId: "admin-nav-prospects" },
   { to: "/admin/quotes", label: "Quote Inbox", icon: Inbox, testId: "admin-nav-quotes" },
   { to: "/admin/testimonials", label: "Testimonials", icon: MessageSquareQuote, testId: "admin-nav-testimonials" },
   { to: "/admin/security", label: "Security", icon: ShieldCheck, testId: "admin-nav-security" },

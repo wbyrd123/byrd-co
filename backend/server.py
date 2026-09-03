@@ -2642,6 +2642,40 @@ class ConstructionBudget(BaseModel):
     contingency: Optional[float] = None
 
 
+# ---------- LENDER PROSPECTS (outreach engine) ----------
+class ProspectDiscoverBody(BaseModel):
+    state: str = Field(min_length=2, max_length=40)
+
+
+class ProspectManualBody(BaseModel):
+    institution: str = Field(min_length=1, max_length=200)
+    state: str = Field(min_length=2, max_length=40)
+    website: Optional[str] = ""
+    hq_city: Optional[str] = ""
+    contact_name: Optional[str] = ""
+    contact_title: Optional[str] = ""
+    contact_email: Optional[str] = ""
+    contact_phone: Optional[str] = ""
+    notes: Optional[str] = ""
+
+
+class ProspectUpdateBody(BaseModel):
+    status: Optional[Literal["sourced", "queued", "drafted",
+                              "approved", "sent", "replied",
+                              "converted", "opted_out", "bounced"]] = None
+    institution: Optional[str] = None
+    state: Optional[str] = None
+    website: Optional[str] = None
+    hq_city: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_title: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    notes: Optional[str] = None
+    draft_subject: Optional[str] = None
+    draft_body: Optional[str] = None
+
+
 class SUItem(BaseModel):
     label: str
     amount: float
@@ -9850,6 +9884,407 @@ async def public_quote_request_callback(qid: str, body: QuoteRequestPublicBody,
                                 None, None, body.email,
                                 [attachment] if attachment else None)
     return {"ok": True, "id": lead_id}
+
+
+# ---------- LENDER PROSPECTS: sourcing & outreach engine ----------
+# Pipeline: sourced → queued → drafted → approved → sent → replied → converted / opted_out / bounced.
+# All routes admin-only. Draft & Approve mode (Phase 1): Ada writes drafts, admin approves,
+# but nothing is actually emailed until we wire an outbound sender (Instantly.ai) later.
+
+_PROSPECT_DISCOVER_PROMPT = """You are a commercial real estate lending intelligence analyst.
+For the US state: {state}, list 8-12 REGIONAL or COMMUNITY BANKS or CREDIT UNIONS \
+(headquartered in that state or with major CRE lending offices there) that ACTIVELY \
+originate non-owner-occupied commercial real estate loans (multifamily, industrial, \
+retail, office, hotel).
+
+Return STRICT JSON in this shape, no prose, no code fences:
+
+{{"banks":[
+  {{"institution":"Bank Name","hq_city":"City","website":"https://example.com","notes":"1-line why they matter"}}
+]}}
+
+Rules:
+- Real, currently-operating US banks only. Skip subsidiaries of megabanks (JPMC, BofA, Wells, Citi).
+- Prefer banks with $500M-$25B in assets — the sweet spot for regional CRE.
+- Include the CRE-lending team page as `website` if you can find it, otherwise the bank homepage.
+- Skip anything you're not confident is real."""
+
+
+_PROSPECT_ENRICH_PROMPT = """You are a commercial real estate intelligence analyst.
+For this bank: {institution} in {state}, find the head or senior officer of \
+commercial real estate lending (or commercial lending / middle-market CRE / \
+CRE portfolio lending) whose contact info is PUBLICLY listed on the bank's \
+website, LinkedIn public profile, or in press releases.
+
+Return STRICT JSON, no prose, no code fences:
+
+{{"contact_name":"Full Name","contact_title":"Head of Commercial Real Estate",
+  "contact_email":"person@bank.com or empty string if none published",
+  "contact_phone":"formatted number or empty string",
+  "source_url":"the URL where you found this",
+  "confidence":"high|medium|low"}}
+
+Rules:
+- Only return a person you can back with a public source.
+- If you can't find ANYONE, return all fields empty and confidence="low".
+- Never fabricate an email address. If you can't find one, leave it empty."""
+
+
+def _sanitize_prospect(p: dict) -> dict:
+    p = {k: v for k, v in p.items() if k != "_id"}
+    return p
+
+
+def _parse_llm_json(content: str) -> Optional[dict]:
+    """Perplexity/Claude sometimes wraps JSON in code fences. Strip + parse."""
+    if not content:
+        return None
+    s = content.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        if s.lower().startswith("json"):
+            s = s[4:]
+        s = s.strip()
+    try:
+        return json.loads(s)
+    except Exception:
+        # Best-effort: find first { ... } block
+        try:
+            start = s.index("{")
+            depth = 0
+            for i in range(start, len(s)):
+                if s[i] == "{": depth += 1
+                elif s[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return json.loads(s[start:i + 1])
+        except Exception:
+            return None
+    return None
+
+
+@api.post("/admin/marketplace/prospects/discover")
+async def prospects_discover(body: ProspectDiscoverBody, admin=Depends(require_admin)):
+    """Ada+Perplexity discovers regional/community banks in a US state that lend CRE.
+    Inserts newly-discovered banks into `lender_prospects` as `status=sourced`.
+    De-dupes on (institution, state) case-insensitive.
+    Returns the discovered rows (new + already-existing marked)."""
+    if not PERPLEXITY_API_KEY:
+        raise HTTPException(status_code=400, detail="Perplexity API key not configured")
+    state = body.state.strip().upper()
+    prompt = _PROSPECT_DISCOVER_PROMPT.format(state=state)
+    res = await _perplexity_query(prompt, max_tokens=1400)
+    if not res:
+        raise HTTPException(status_code=502, detail="Perplexity query failed")
+    parsed = _parse_llm_json(res["content"]) or {}
+    banks = parsed.get("banks") or []
+    now = now_iso()
+    added, skipped = [], []
+    for b in banks:
+        inst = (b.get("institution") or "").strip()
+        if not inst:
+            continue
+        existing = await db.lender_prospects.find_one(
+            {"institution_lc": inst.lower(), "state": state}, {"_id": 0, "id": 1})
+        if existing:
+            skipped.append({"institution": inst, "id": existing["id"]})
+            continue
+        row = {
+            "id": str(uuid.uuid4()),
+            "institution": inst,
+            "institution_lc": inst.lower(),
+            "state": state,
+            "hq_city": (b.get("hq_city") or "").strip(),
+            "website": (b.get("website") or "").strip(),
+            "notes": (b.get("notes") or "").strip(),
+            "contact_name": "",
+            "contact_title": "",
+            "contact_email": "",
+            "contact_phone": "",
+            "status": "sourced",
+            "source": "perplexity_discover",
+            "source_citations": res.get("citations") or [],
+            "created_at": now,
+            "updated_at": now,
+            "created_by": admin["id"],
+        }
+        await db.lender_prospects.insert_one(row)
+        added.append(_sanitize_prospect(row))
+    return {"state": state, "discovered": len(banks),
+            "added": len(added), "skipped_dupes": len(skipped),
+            "prospects": added}
+
+
+@api.post("/admin/marketplace/prospects/{pid}/enrich")
+async def prospects_enrich(pid: str, admin=Depends(require_admin)):
+    """Ada+Perplexity tries to find an LO name + email at the bank on this prospect row.
+    Updates the row in place with contact_name/title/email/phone + citations."""
+    if not PERPLEXITY_API_KEY:
+        raise HTTPException(status_code=400, detail="Perplexity API key not configured")
+    p = await db.lender_prospects.find_one({"id": pid}, {"_id": 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+    prompt = _PROSPECT_ENRICH_PROMPT.format(institution=p["institution"], state=p["state"])
+    res = await _perplexity_query(prompt, max_tokens=800)
+    if not res:
+        raise HTTPException(status_code=502, detail="Perplexity query failed")
+    parsed = _parse_llm_json(res["content"]) or {}
+    contact = {
+        "contact_name": (parsed.get("contact_name") or "").strip(),
+        "contact_title": (parsed.get("contact_title") or "").strip(),
+        "contact_email": (parsed.get("contact_email") or "").strip().lower(),
+        "contact_phone": (parsed.get("contact_phone") or "").strip(),
+    }
+    # Auto-advance to `queued` when we have an email; otherwise `sourced` remains.
+    next_status = "queued" if contact["contact_email"] else p.get("status", "sourced")
+    updates = {
+        **contact,
+        "enrichment_source_url": (parsed.get("source_url") or "").strip(),
+        "enrichment_confidence": (parsed.get("confidence") or "").lower(),
+        "enrichment_citations": res.get("citations") or [],
+        "enriched_at": now_iso(),
+        "status": next_status,
+        "updated_at": now_iso(),
+    }
+    await db.lender_prospects.update_one({"id": pid}, {"$set": updates})
+    return {"id": pid, **updates, "found_contact": bool(contact["contact_email"])}
+
+
+@api.get("/admin/marketplace/prospects")
+async def prospects_list(state: Optional[str] = None, status: Optional[str] = None,
+                          admin=Depends(require_admin)):
+    q = {}
+    if state:
+        q["state"] = state.strip().upper()
+    if status:
+        q["status"] = status.strip()
+    rows = await db.lender_prospects.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return rows
+
+
+@api.get("/admin/marketplace/prospects/stats")
+async def prospects_stats(admin=Depends(require_admin)):
+    pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
+    by_status = {r["_id"]: r["count"] async for r in db.lender_prospects.aggregate(pipeline)}
+    total = sum(by_status.values())
+    return {"total": total, "by_status": by_status}
+
+
+@api.post("/admin/marketplace/prospects")
+async def prospects_create(body: ProspectManualBody, admin=Depends(require_admin)):
+    """Manually add a single prospect (used by CSV upload path + admin one-offs)."""
+    inst = body.institution.strip()
+    state = body.state.strip().upper()
+    existing = await db.lender_prospects.find_one(
+        {"institution_lc": inst.lower(), "state": state}, {"_id": 0, "id": 1})
+    if existing:
+        raise HTTPException(status_code=400,
+                            detail=f"Prospect already exists (id {existing['id']})")
+    row = {
+        "id": str(uuid.uuid4()),
+        "institution": inst, "institution_lc": inst.lower(),
+        "state": state,
+        "hq_city": body.hq_city or "", "website": body.website or "",
+        "contact_name": body.contact_name or "",
+        "contact_title": body.contact_title or "",
+        "contact_email": (body.contact_email or "").strip().lower(),
+        "contact_phone": body.contact_phone or "",
+        "notes": body.notes or "",
+        "status": "queued" if body.contact_email else "sourced",
+        "source": "manual",
+        "created_at": now_iso(), "updated_at": now_iso(),
+        "created_by": admin["id"],
+    }
+    await db.lender_prospects.insert_one(row)
+    return _sanitize_prospect(row)
+
+
+class ProspectCSVBody(BaseModel):
+    rows: List[ProspectManualBody]
+
+
+@api.post("/admin/marketplace/prospects/bulk")
+async def prospects_bulk(body: ProspectCSVBody, admin=Depends(require_admin)):
+    added, skipped = [], []
+    for r in body.rows:
+        inst = r.institution.strip()
+        state = r.state.strip().upper()
+        if not inst or not state:
+            continue
+        existing = await db.lender_prospects.find_one(
+            {"institution_lc": inst.lower(), "state": state}, {"_id": 0, "id": 1})
+        if existing:
+            skipped.append(inst)
+            continue
+        row = {
+            "id": str(uuid.uuid4()),
+            "institution": inst, "institution_lc": inst.lower(), "state": state,
+            "hq_city": r.hq_city or "", "website": r.website or "",
+            "contact_name": r.contact_name or "",
+            "contact_title": r.contact_title or "",
+            "contact_email": (r.contact_email or "").strip().lower(),
+            "contact_phone": r.contact_phone or "",
+            "notes": r.notes or "",
+            "status": "queued" if r.contact_email else "sourced",
+            "source": "csv",
+            "created_at": now_iso(), "updated_at": now_iso(),
+            "created_by": admin["id"],
+        }
+        await db.lender_prospects.insert_one(row)
+        added.append(inst)
+    return {"added": len(added), "skipped_dupes": len(skipped)}
+
+
+@api.patch("/admin/marketplace/prospects/{pid}")
+async def prospects_update(pid: str, body: ProspectUpdateBody,
+                            admin=Depends(require_admin)):
+    upd = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if not upd:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    if "institution" in upd:
+        upd["institution_lc"] = upd["institution"].lower()
+    if "state" in upd:
+        upd["state"] = upd["state"].strip().upper()
+    upd["updated_at"] = now_iso()
+    res = await db.lender_prospects.update_one({"id": pid}, {"$set": upd})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+    row = await db.lender_prospects.find_one({"id": pid}, {"_id": 0})
+    return row
+
+
+@api.delete("/admin/marketplace/prospects/{pid}")
+async def prospects_delete(pid: str, admin=Depends(require_admin)):
+    res = await db.lender_prospects.delete_one({"id": pid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+    return {"ok": True}
+
+
+class ProspectDraftBody(BaseModel):
+    tone: Optional[str] = "warm, concise, insider-to-insider"
+
+
+PROSPECT_DRAFT_SYSTEM = """You are Wayne Byrd, a commercial real estate broker at Byrd & CO \
+(byrd-co.com). You are writing a SHORT, warm, insider-to-insider cold email to a bank \
+loan officer inviting them to join your capital marketplace, where you send them non-owner-\
+occupied CRE deals from qualified borrowers in their state.
+
+Rules:
+- Under 120 words.
+- Reference their institution + state naturally.
+- If contact_name is provided, use their first name. Otherwise open with "Hi there,".
+- Never fabricate deal specifics; keep the value prop generic ("we underwrite deals before \
+sending, so you only see real, qualified opportunities").
+- Sign as "Wayne Byrd · Byrd & CO · byrd-co.com".
+- Return STRICT JSON: {"subject":"...","body":"..."} — plain text body, no HTML, no code fences.
+- Subject must be under 60 chars, not spammy, no all-caps, no exclamation points."""
+
+
+@api.post("/admin/marketplace/prospects/{pid}/draft")
+async def prospects_draft(pid: str, body: ProspectDraftBody,
+                           admin=Depends(require_admin)):
+    """Ada drafts an outreach email for this prospect using Claude via emergentintegrations.
+    Stores draft on the prospect row; does NOT send anything.
+    Advances status to `drafted`."""
+    p = await db.lender_prospects.find_one({"id": pid}, {"_id": 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+    if not p.get("contact_email"):
+        raise HTTPException(status_code=400,
+                            detail="Enrich this prospect (or paste an email) before drafting.")
+    session_id = f"prospect-draft-{pid}"
+    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id,
+                   system_message=PROSPECT_DRAFT_SYSTEM).with_model("anthropic", "claude-sonnet-4-5-20250929")
+    facts = {
+        "contact_name": p.get("contact_name") or "",
+        "contact_title": p.get("contact_title") or "",
+        "institution": p.get("institution"),
+        "state": p.get("state"),
+        "hq_city": p.get("hq_city") or "",
+        "website": p.get("website") or "",
+        "tone": body.tone or "warm, concise",
+    }
+    prompt = ("Draft the outreach email using these facts, JSON output only:\n"
+              + json.dumps(facts, indent=2))
+    try:
+        reply = await chat.send_message(UserMessage(text=prompt))
+    except Exception as e:
+        logger.exception("prospect draft failed pid=%s", pid)
+        raise HTTPException(status_code=502, detail=f"Draft generation failed: {e}")
+    parsed = _parse_llm_json(reply) or {}
+    subject = (parsed.get("subject") or "").strip()[:120]
+    body_txt = (parsed.get("body") or "").strip()
+    if not subject or not body_txt:
+        raise HTTPException(status_code=502, detail="Ada returned an empty draft — retry.")
+    now = now_iso()
+    await db.lender_prospects.update_one({"id": pid}, {"$set": {
+        "draft_subject": subject,
+        "draft_body": body_txt,
+        "drafted_at": now,
+        "status": "drafted",
+        "updated_at": now,
+    }})
+    return {"id": pid, "draft_subject": subject, "draft_body": body_txt, "status": "drafted"}
+
+
+@api.post("/admin/marketplace/prospects/{pid}/approve")
+async def prospects_approve(pid: str, admin=Depends(require_admin)):
+    """Admin taps Approve on a drafted email. Once Instantly is wired, this will hand
+    the row off to the outbound sender. Until then, we advance status to `approved` and
+    stamp `approved_at`; the outbound worker will pick it up when it starts running."""
+    p = await db.lender_prospects.find_one({"id": pid}, {"_id": 0})
+    if not p:
+        raise HTTPException(status_code=404, detail="Prospect not found")
+    if not (p.get("draft_subject") and p.get("draft_body")):
+        raise HTTPException(status_code=400, detail="No draft on this prospect yet.")
+    now = now_iso()
+    await db.lender_prospects.update_one({"id": pid}, {"$set": {
+        "status": "approved",
+        "approved_at": now,
+        "approved_by": admin["id"],
+        "updated_at": now,
+    }})
+    return {"id": pid, "status": "approved", "approved_at": now}
+
+
+# ---------- Suppression list ----------
+class SuppressionBody(BaseModel):
+    email: EmailStr
+    reason: Literal["unsubscribed", "bounced", "spam_complaint", "manual"] = "manual"
+    note: Optional[str] = ""
+
+
+@api.get("/admin/marketplace/suppressions")
+async def suppressions_list(admin=Depends(require_admin)):
+    rows = await db.lender_outreach_suppressions.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return rows
+
+
+@api.post("/admin/marketplace/suppressions")
+async def suppressions_add(body: SuppressionBody, admin=Depends(require_admin)):
+    email = body.email.lower()
+    now = now_iso()
+    await db.lender_outreach_suppressions.update_one(
+        {"email": email},
+        {"$set": {"email": email, "reason": body.reason, "note": body.note or "",
+                  "created_at": now, "created_by": admin["id"]}},
+        upsert=True,
+    )
+    # Cascade: mark any prospects with this email as opted_out so they never enter drafts again.
+    await db.lender_prospects.update_many(
+        {"contact_email": email},
+        {"$set": {"status": "opted_out", "updated_at": now}},
+    )
+    return {"ok": True, "email": email}
+
+
+@api.delete("/admin/marketplace/suppressions/{email}")
+async def suppressions_remove(email: str, admin=Depends(require_admin)):
+    res = await db.lender_outreach_suppressions.delete_one({"email": email.lower()})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not on suppression list")
+    return {"ok": True}
 
 
 class LoanQuoteEmailBody(BaseModel):

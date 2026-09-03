@@ -12,6 +12,48 @@
 - P3: Refactor `server.py` (~11k lines) into modular routes
 
 
+### Ada Lender Outreach Engine (Phase 1 groundwork) — SHIPPED 2026-02
+
+Ada-powered automated lender sourcing + Draft & Approve outreach pipeline. Phase 1 lands the entire prospect lifecycle EXCEPT actual sending — waiting on user's Instantly.ai signup + subdomain warmup.
+
+**Backend (`/app/backend/server.py`):**
+- New `lender_prospects` collection. Pipeline: `sourced → queued → drafted → approved → sent → replied → converted / opted_out / bounced`.
+- Discovery: `POST /admin/marketplace/prospects/discover` uses existing Perplexity Sonar key to seed banks by US state (strict-JSON prompt, 8-12 banks per call, dedupes on (institution, state)).
+- Enrichment: `POST /admin/marketplace/prospects/{pid}/enrich` — Ada+Perplexity tries to find LO name/title/email from public sources, auto-advances to `queued` when an email is found.
+- Manual add: `POST /admin/marketplace/prospects` + bulk `POST /.../bulk` (CSV import path).
+- Draft: `POST /admin/marketplace/prospects/{pid}/draft` — Claude Sonnet writes a <120-word insider email in Wayne's voice, stores it on the row.
+- Approve: `POST /admin/marketplace/prospects/{pid}/approve` — flips to `approved`. The outbound worker will pick these up once Instantly is wired.
+- Suppression list `lender_outreach_suppressions` — cascades to all matching prospect rows (`opted_out`), upsert semantics.
+- Stats endpoint for the sidebar/dashboard counters.
+- All routes admin-only via `require_admin`.
+
+**Frontend (`/app/frontend/src/byrd/AdminLenderProspects.jsx`):**
+- New route `/admin/marketplace/prospects` with sidebar entry ("Outreach").
+- 7-tile stat strip (Total / Sourced / Queued / Drafted / Approved / Replied / Converted).
+- State selector + Discover button that fires Ada.
+- State + status filters on the prospect table.
+- Per-row: Enrich → Draft → Approve buttons appear based on the row's state.
+- Inline expanded draft preview showing Ada's subject + body.
+- Manual "Add prospect" dialog for one-offs.
+- Suppress + Delete on every row.
+
+**Tests:**
+- `/app/backend/tests/test_lender_prospects.py` — 11 tests: manual CRUD, dedupe by (institution, state), bulk with intra-payload dedupe, stats aggregation, suppression cascade + upsert + 404 remove, RBAC (client 403 across 5 endpoints), draft-requires-email guard, approve-requires-draft guard, 404s. All green.
+
+**Deliberately deferred to Phase 1.5 (waiting on user):**
+- Instantly.ai outbound API integration + `sent` state transition
+- DKIM/SPF DNS records for `outreach.byrd-co.com`
+- Daily quota + ramp-up worker (3/day → 10/day over 4 weeks)
+- Postmark inbound routing to catch replies
+
+**Phase 2 (post-launch):**
+- Apollo enrichment fallback for banks with no public LO email
+- 3-touch drip sequences
+- A/B pitch testing
+- Auto-send mode once Approve/Skip signal is trained
+- Weekly digest email to Wayne with funnel metrics
+
+
 ### Loan Quote Studio — Agent Access + Watermark + PDF CTA + Lender Alert — SHIPPED 2026-02
 
 Massive quality-of-life pack across the quote / lender pipeline:
