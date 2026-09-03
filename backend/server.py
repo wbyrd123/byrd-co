@@ -9696,6 +9696,7 @@ async def admin_loanquote_generate(body: LoanQuoteGenerateBody, user=Depends(req
             await db.contacts.insert_one({
                 "id": contact_id, "name": la["name"], "email": la["email"].lower(),
                 "phone": la.get("phone") or "", "company": la.get("brokerage") or "",
+                "contact_type": ["email"] + (["phone"] if la.get("phone") else []),
                 "tags": ["Listing Agent"], "notes": f"Auto-added from Loan Quote for {state.get('property_info', {}).get('name') or 'property'}.",
                 "created_at": now, "updated_at": now, "created_by": user["id"],
             })

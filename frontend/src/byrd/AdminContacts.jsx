@@ -217,7 +217,20 @@ export default function AdminContacts() {
 
 function ContactDialog({ initial, onClose, onSaved }) {
   const isNew = !initial;
-  const [f, setF] = useState(initial || { name: "", email: "", phone: "", contact_type: ["email"], notes: "", tags: [] });
+  // Legacy / auto-created contacts (e.g., from Loan Quote saves) can be missing
+  // `contact_type` or `tags`. Normalize on hydration so nothing calls `.includes`
+  // or `.map` on undefined and blanks the screen.
+  const [f, setF] = useState(() => {
+    const seed = initial || {};
+    return {
+      name: seed.name || "",
+      email: seed.email || "",
+      phone: seed.phone || "",
+      contact_type: Array.isArray(seed.contact_type) ? seed.contact_type : (isNew ? ["email"] : []),
+      notes: seed.notes || "",
+      tags: Array.isArray(seed.tags) ? seed.tags : [],
+    };
+  });
   const [tagInput, setTagInput] = useState("");
   const [busy, setBusy] = useState(false);
   // Studio-access state — only meaningful when editing an existing contact.
