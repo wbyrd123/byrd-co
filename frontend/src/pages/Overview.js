@@ -6,6 +6,7 @@ import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import { ArrowRight, Plus } from "lucide-react";
+import GoogleAdsStatusPanel from "@/pages/GoogleAdsStatusPanel";
 
 export default function Overview() {
   const [data, setData] = useState(null);
@@ -36,6 +37,8 @@ export default function Overview() {
           </button>
         }
       />
+
+      <GoogleAdsStatusPanel />
 
       {empty ? (
         <div className="border-2 border-black bg-white p-10 text-center">

@@ -10687,6 +10687,88 @@ async def analytics_overview(user=Depends(get_current_user)):
     return {"summary": _summary_from_series(daily), "daily": daily, "campaigns": per_campaign}
 
 
+# ================ Google Ads API (AdsCopilot — Phase 1: read-only) ================
+# Backed by /app/backend/google_ads_service.py using the google-ads Python SDK.
+# The SDK is synchronous / blocking — every endpoint below off-loads the actual
+# call to a thread pool via `run_in_executor` so we never block FastAPI's event
+# loop. Admin-only access; the credentials in .env are Byrd's MCC-scoped.
+
+import google_ads_service as _gads
+
+
+def _validate_customer_id(cid: str) -> str:
+    """10-digit customer ID with hyphens/spaces stripped. Raises 400 on bad input."""
+    stripped = (cid or "").replace("-", "").replace(" ", "")
+    if not (stripped.isdigit() and len(stripped) == 10):
+        raise HTTPException(status_code=400,
+                            detail="customer_id must be 10 digits (dashes ok, spaces ok)")
+    return stripped
+
+
+def _validate_iso_date(s: str, name: str) -> str:
+    """YYYY-MM-DD. Raises 400 on bad input."""
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail=f"{name} must be YYYY-MM-DD")
+    return s
+
+
+@api.get("/admin/google-ads/status")
+async def google_ads_status(admin=Depends(require_admin)):
+    """Connection health check. Calls CustomerService.list_accessible_customers.
+    Returns { configured: bool, ok: bool, mcc: '<id>', accessible_customers: [...] }
+    """
+    if not _gads.is_configured():
+        return {"configured": False, "ok": False,
+                "message": "Google Ads API credentials are not fully configured on the server."}
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _gads.sync_check_connection)
+    return {"configured": True, **result}
+
+
+@api.get("/admin/google-ads/accounts")
+async def google_ads_list_accounts(admin=Depends(require_admin)):
+    """Return every account visible under the configured MCC (all levels)."""
+    if not _gads.is_configured():
+        raise HTTPException(status_code=503,
+                            detail="Google Ads API is not configured on this environment")
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _gads.sync_list_mcc_accounts)
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "Google Ads request failed")
+    return result
+
+
+@api.get("/admin/google-ads/report")
+async def google_ads_campaign_report(
+    customer_id: str,
+    start_date: str,
+    end_date: str,
+    admin=Depends(require_admin),
+):
+    """Daily campaign-level performance for a customer between two ISO dates.
+
+    Metrics: impressions, clicks, cost (USD), conversions, CTR (%), avg CPC ($).
+    A single search_stream counts as 1 op regardless of row count."""
+    if not _gads.is_configured():
+        raise HTTPException(status_code=503,
+                            detail="Google Ads API is not configured on this environment")
+    cid = _validate_customer_id(customer_id)
+    s = _validate_iso_date(start_date, "start_date")
+    e = _validate_iso_date(end_date, "end_date")
+    if s > e:
+        raise HTTPException(status_code=400, detail="start_date must be on or before end_date")
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _gads.sync_campaign_report, cid, s, e)
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "Google Ads request failed")
+    return result
+
+
+
+
+
 def _make_chat(session_id: str, system_message: str) -> LlmChat:
     return LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=system_message)\
         .with_model("anthropic", "claude-sonnet-4-5-20250929")

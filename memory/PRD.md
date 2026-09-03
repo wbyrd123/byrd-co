@@ -3,6 +3,7 @@
 ## Backlog
 - P0: Redeploy production (`byrd-co.com`) to ship Ada/Proforma/CRM-tags/Marketplace/Postmark-unlock/PortalPolish/MultiSponsor/MultiFileUploads/BulkUpload/LenderTerms live.
 - P0: **Pre-Approval Letters** — (A) Property-Specific (bound to scenario) + (B) Buy-Side Shopping (generic max purchase price / loan amount). Needs `render_pre_approval_pdf`, endpoints, UI buttons on Client + Scenario detail pages, Ada draft mode, PDF persistence, optional email-to-client, pytest coverage. Open questions: expiry default (60/90/120), signer (Byrd principal vs logged-in broker), delivery (download only vs auto-email), client-portal visibility.
+- P1: **Google Ads Phase 2** — once Basic Access lands (~5 business days from 2026-02-04), enable production customer reporting, Ada-generated ad copy suggestions, and eventually campaign creation via the API. Phase 1 (connection + MCC hierarchy + read-only report endpoints + status panel) is already live.
 - P1: Automatic reminder emails when client docs missing X days
 - P2: Postmark inbound routing → route replies back into Personal Assistant
 - P2: Tighten DMARC to p=quarantine after 2-4 weeks
