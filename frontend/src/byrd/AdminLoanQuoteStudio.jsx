@@ -57,7 +57,7 @@ export default function AdminLoanQuoteStudio() {
   const [editingId, setEditingId] = useState(null);  // when set, save() PATCHes existing quote
   const [messages, setMessages] = useState([{
     role: "ada",
-    text: "Hi — I'm Ada. Let's build a Loan Quote for your listing agent. What's the property name?\n\nTip: you can also click Edit on any saved quote below to modify it.",
+    text: "Hi — I'm Ada. Let's build a Loan Quote. What's the property name?\n\nTip: you can also click Edit on any saved quote below to modify it.",
   }]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
