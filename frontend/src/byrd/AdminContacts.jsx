@@ -220,8 +220,51 @@ function ContactDialog({ initial, onClose, onSaved }) {
   const [f, setF] = useState(initial || { name: "", email: "", phone: "", contact_type: ["email"], notes: "", tags: [] });
   const [tagInput, setTagInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // Studio-access state — only meaningful when editing an existing contact.
+  const [studioOn, setStudioOn] = useState(false);
+  const [studioBusy, setStudioBusy] = useState(false);
+  const [clientUserId, setClientUserId] = useState(initial?.client_user_id || null);
+
+  useEffect(() => {
+    if (!clientUserId) return;
+    api.get(`/admin/clients/${clientUserId}`)
+      .then((r) => setStudioOn(!!r.data?.client?.quote_studio_access))
+      .catch(() => {});
+  }, [clientUserId]);
+
   const toggleType = (t) => setF({ ...f, contact_type: f.contact_type.includes(t) ? f.contact_type.filter((x) => x !== t) : [...f.contact_type, t] });
   const addTag = () => { const t = tagInput.trim(); if (t && !f.tags.includes(t)) setF({ ...f, tags: [...f.tags, t] }); setTagInput(""); };
+
+  const toggleStudio = async () => {
+    if (!f.email && !clientUserId) {
+      toast.error("Add an email first — required to create the client account.");
+      return;
+    }
+    setStudioBusy(true);
+    try {
+      let uid = clientUserId;
+      // Promote first if this contact isn't yet a client.
+      if (!uid) {
+        const p = await api.post(`/admin/contacts/${initial.id}/promote-to-client`);
+        uid = p.data?.user?.id;
+        setClientUserId(uid);
+      }
+      const next = !studioOn;
+      await api.patch(`/admin/clients/${uid}/quote-studio-access`, { enabled: next });
+      setStudioOn(next);
+      toast.success(
+        next
+          ? (clientUserId
+              ? "Studio access granted."
+              : `${initial.name} is now a client with Studio access.`)
+          : "Studio access revoked."
+      );
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Couldn't update Studio access");
+    } finally { setStudioBusy(false); }
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     if (!f.name.trim()) { toast.error("Name required"); return; }
@@ -272,6 +315,44 @@ function ContactDialog({ initial, onClose, onSaved }) {
             </div>
           </div>
           <div><label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Notes</label><textarea rows={2} value={f.notes || ""} onChange={(e) => setF({ ...f, notes: e.target.value })} className="mt-1 w-full px-3 py-2 rounded-md border border-[#E4DFD1] text-sm resize-y" /></div>
+          {!isNew && (
+            <div className="border-t border-[#E4DFD1] pt-3">
+              <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Loan Quote Studio Access</label>
+              <div className="mt-1.5 flex items-start justify-between gap-3">
+                <div className="text-[11px] text-[#6B6558] leading-relaxed flex-1">
+                  For listing agents &amp; RE brokers who need to build Byrd-branded quotes for their own listings.
+                  {clientUserId ? (
+                    <div className="mt-1 text-[10px]">
+                      Linked to client <Link
+                        to={`/admin/clients/${clientUserId}`}
+                        onClick={onClose}
+                        className="text-[#C89434] hover:underline"
+                        data-testid="contact-open-client"
+                      >open profile →</Link>
+                    </div>
+                  ) : (
+                    <div className="mt-1 text-[10px]">
+                      Enabling promotes this contact to a client user in one tap. No invite email is sent — you send it manually when the doc list is ready.
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={toggleStudio}
+                  disabled={studioBusy || (!f.email && !clientUserId)}
+                  data-testid="contact-studio-toggle"
+                  className={`inline-flex items-center gap-2 h-9 px-4 rounded-full text-xs font-mono uppercase tracking-widest whitespace-nowrap transition-colors disabled:opacity-50 ${
+                    studioOn
+                      ? "bg-[#C89434] text-[#1A1A1A] hover:brightness-95"
+                      : "bg-white border border-[#E4DFD1] text-[#2A2A2A] hover:bg-[#F3EEE0]"
+                  }`}
+                >
+                  <span className={`inline-block w-2 h-2 rounded-full ${studioOn ? "bg-[#1A1A1A]" : "bg-[#C7C0AC]"}`} />
+                  {studioBusy ? "…" : (studioOn ? "Access on" : (clientUserId ? "Enable" : "Convert & enable"))}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
         <div className="px-6 py-4 border-t border-[#E4DFD1] flex items-center gap-2"><button type="button" onClick={onClose} className="byrd-btn byrd-btn-outline flex-1">Cancel</button><button type="submit" disabled={busy} className="byrd-btn byrd-btn-dark flex-1" data-testid="c-save">{busy ? "Saving…" : (isNew ? "Add" : "Save")}</button></div>
       </form>
