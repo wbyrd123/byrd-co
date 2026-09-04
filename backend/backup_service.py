@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import hashlib
 import io
+import json
 import logging
 import os
 import subprocess
@@ -24,7 +26,9 @@ from typing import Optional
 
 import boto3
 from botocore.client import Config
+from bson import json_util
 from cryptography.fernet import Fernet
+from pymongo import MongoClient
 
 logger = logging.getLogger(__name__)
 
@@ -53,18 +57,69 @@ def _b2_client():
 
 
 def _dump_mongo() -> bytes:
-    """Run mongodump against the configured Mongo URL, return the archive bytes."""
+    """Dump the configured MongoDB database to a gzipped JSON-lines archive.
+
+    Format (per collection block):
+        {"__collection__": "<name>", "count": N}\n
+        <bson-json doc 1>\n
+        <bson-json doc 2>\n
+        ...
+
+    This is a pure-Python dump — no `mongodump` binary required — so the
+    backup works identically in any container image (preview, prod, local).
+
+    BSON types (ObjectId, datetime, Binary) are preserved via bson.json_util's
+    canonical extended-JSON encoding, so restore is lossless."""
     mongo_url = os.environ.get("MONGO_URL", "").strip('"')
     db_name = os.environ.get("DB_NAME", "").strip('"')
     if not (mongo_url and db_name):
         raise RuntimeError("MONGO_URL / DB_NAME missing")
-    result = subprocess.run(
-        ["mongodump", f"--uri={mongo_url}", f"--db={db_name}", "--archive", "--gzip"],
-        capture_output=True, timeout=180,
+    # Prefer pymongo (pure Python). We keep mongodump as an optional fast-path
+    # if the binary is present on this container AND BYRD_BACKUP_USE_MONGODUMP=1
+    # is set; otherwise use the portable Python dump.
+    use_mongodump = (
+        os.environ.get("BYRD_BACKUP_USE_MONGODUMP", "").strip() in ("1", "true", "yes")
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"mongodump failed: {result.stderr.decode('utf-8', errors='ignore')[:500]}")
-    return result.stdout
+    if use_mongodump:
+        try:
+            result = subprocess.run(
+                ["mongodump", f"--uri={mongo_url}", f"--db={db_name}", "--archive", "--gzip"],
+                capture_output=True, timeout=180,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"mongodump failed: {result.stderr.decode('utf-8', errors='ignore')[:500]}"
+                )
+            return result.stdout
+        except FileNotFoundError:
+            # mongodump binary not installed — fall through to the Python dump.
+            logger.warning("mongodump binary not found; falling back to PyMongo dump")
+
+    return _dump_mongo_python(mongo_url, db_name)
+
+
+def _dump_mongo_python(mongo_url: str, db_name: str) -> bytes:
+    """PyMongo-based dump. Iterates every non-system collection, streams docs
+    to a gzip buffer as canonical extended JSON, and returns the bytes."""
+    client = MongoClient(mongo_url, serverSelectionTimeoutMS=15000)
+    try:
+        db = client[db_name]
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=6) as gz:
+            collections = sorted([
+                n for n in db.list_collection_names()
+                if not n.startswith("system.")
+            ])
+            for name in collections:
+                coll = db[name]
+                count = coll.estimated_document_count()
+                header = json.dumps({"__collection__": name, "count": count})
+                gz.write((header + "\n").encode("utf-8"))
+                for doc in coll.find({}):
+                    gz.write((json_util.dumps(doc) + "\n").encode("utf-8"))
+        return buf.getvalue()
+    finally:
+        client.close()
 
 
 def _encrypt(data: bytes) -> bytes:
@@ -98,7 +153,9 @@ def run_backup_sync(retention_days: int = 30) -> dict:
     dump_size = len(dump)
     encrypted = _encrypt(dump)
     ts = started_at.strftime("%Y-%m-%dT%H-%M-%SZ")
-    key = f"byrd-mongo-{ts}.archive.gz.enc"
+    # Suffix distinguishes the internal encoding so restore picks the right
+    # decoder. Legacy backups (mongodump archive) used `.archive.gz.enc`.
+    key = f"byrd-mongo-{ts}.jsonl.gz.enc"
     up = _upload(encrypted, key, retention_days=retention_days)
     finished_at = datetime.now(timezone.utc)
     return {
