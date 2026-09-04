@@ -597,9 +597,21 @@ function BackupsPanel() {
     setLastResult(null);
     try {
       const res = await api.post("/admin/security/backup/run");
-      setLastResult({ ok: true, ...res.data });
-      toast.success("Backup complete");
-      await load();
+      // The endpoint now returns immediately with { ok: true, queued: true, message }.
+      // The actual dump / encrypt / upload runs on the server in the background so
+      // Cloudflare's ~100s edge timeout can't kill it on a large database.
+      if (res.data?.queued) {
+        setLastResult({ ok: true, queued: true, message: res.data.message });
+        toast.success("Backup started — refreshing shortly");
+        // Poll the history a few times so the new row appears without user clicks.
+        for (const delay of [8000, 20000, 45000, 90000]) {
+          setTimeout(load, delay);
+        }
+      } else {
+        setLastResult({ ok: true, ...res.data });
+        toast.success("Backup complete");
+        await load();
+      }
     } catch (e) {
       setLastResult({ ok: false, error: e?.response?.data?.detail || "Backup failed" });
       toast.error(e?.response?.data?.detail || "Backup failed");
@@ -656,7 +668,9 @@ function BackupsPanel() {
         >
           {lastResult.ok ? <CheckCircle2 size={16} className="mt-0.5 shrink-0" /> : <AlertCircle size={16} className="mt-0.5 shrink-0" />}
           <div>
-            {lastResult.ok ? (
+            {lastResult.ok && lastResult.queued ? (
+              <>{lastResult.message || "Backup started in the background. Refresh shortly."}</>
+            ) : lastResult.ok ? (
               <>
                 Backup saved: <code className="font-mono text-xs">{lastResult.key}</code> · {fmtBytes(lastResult.encrypted_size)} · retained
                 until {new Date(lastResult.retain_until).toLocaleDateString()}

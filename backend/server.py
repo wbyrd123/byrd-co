@@ -3947,17 +3947,42 @@ async def scenario_pdf(sid: str, admin=Depends(require_admin)):
 
 
 # ================ Admin Backups (encrypted MongoDB dumps to Backblaze B2) ================
-@api.post("/admin/security/backup/run")
-async def admin_run_backup(admin=Depends(require_admin)):
-    """Kick off an on-demand backup. Runs off the event loop so the request returns quickly."""
+async def _run_manual_backup_and_log() -> None:
+    """Background worker for `POST /admin/security/backup/run` — must never raise
+    because it runs detached from the request. All outcomes are logged to
+    `db.backup_log` so the UI can pick them up on the next refresh."""
+    from backup_service import run_backup_async
     try:
-        from backup_service import run_backup_async
         meta = await run_backup_async(retention_days=30)
-        await db.backup_log.insert_one(dict(meta))  # copy so insert_one's _id mutation doesn't leak into response
-        return {"ok": True, **meta}
+        await db.backup_log.insert_one(dict(meta))
+        logger.info("Manual backup complete: %s (%s bytes)",
+                    meta.get("key"), meta.get("encrypted_size"))
     except Exception as e:
-        logger.exception("Manual backup failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)[:400]}")
+        logger.exception("Manual backup failed in background: %s", e)
+        try:
+            await db.backup_log.insert_one({
+                "status": "error", "error": str(e)[:500],
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
+
+
+@api.post("/admin/security/backup/run")
+async def admin_run_backup(background: BackgroundTasks, admin=Depends(require_admin)):
+    """Kick off an on-demand backup and return immediately.
+
+    The actual dump / encrypt / upload can take 30s–5min on a large database and
+    would blow past Cloudflare's ~100s edge timeout if we ran it inline. Instead
+    we schedule the work as a background task and let the client poll
+    `/admin/security/backup/list` to watch for the new row. Every outcome — OK
+    or error — is written to `db.backup_log` for the UI to display."""
+    background.add_task(_run_manual_backup_and_log)
+    return {
+        "ok": True,
+        "queued": True,
+        "message": "Backup started in the background. Refresh Recent Backups in ~30-60 seconds to see the result.",
+    }
 
 
 @api.get("/admin/security/backup/list")
