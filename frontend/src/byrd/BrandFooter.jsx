@@ -1,13 +1,13 @@
 import React from "react";
 import { Link } from "react-router-dom";
-import { LOGO_URL, CONTACT } from "@/byrd/data";
+import { LOGO_URL, CONTACT, SHOW_CALEB } from "@/byrd/data";
 import { Phone, Mail, MapPin } from "lucide-react";
 
 export default function BrandFooter() {
   return (
     <footer className="bg-[#1A1A1A] text-[#FBF8F1] mt-24">
       <div className="max-w-7xl mx-auto px-5 sm:px-8 py-14">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-10">
+        <div className={`grid grid-cols-1 gap-10 ${SHOW_CALEB ? "md:grid-cols-4" : "md:grid-cols-3"}`}>
           <div className="md:col-span-2">
             <img src={LOGO_URL} alt="Byrd & CO" className="h-14 w-auto bg-white p-2 rounded-md" />
             <p className="mt-5 text-sm text-[#C9C1AF] max-w-md leading-relaxed">
@@ -27,18 +27,20 @@ export default function BrandFooter() {
               </a>
             </div>
           </div>
-          <div>
-            <div className="font-serif text-lg font-semibold text-[#E5B968]">Caleb Byrd</div>
-            <div className="text-xs uppercase tracking-widest text-[#8F8877] mt-1">Principal</div>
-            <div className="mt-3 space-y-2 text-sm">
-              <a href={`tel:${CONTACT.caleb.phone}`} className="flex items-center gap-2 hover:text-[#E5B968]">
-                <Phone size={14} /> {CONTACT.caleb.phone}
-              </a>
-              <a href={`mailto:${CONTACT.caleb.email}`} className="flex items-center gap-2 hover:text-[#E5B968] break-all">
-                <Mail size={14} /> {CONTACT.caleb.email}
-              </a>
+          {SHOW_CALEB && (
+            <div>
+              <div className="font-serif text-lg font-semibold text-[#E5B968]">Caleb Byrd</div>
+              <div className="text-xs uppercase tracking-widest text-[#8F8877] mt-1">Principal</div>
+              <div className="mt-3 space-y-2 text-sm">
+                <a href={`tel:${CONTACT.caleb.phone}`} className="flex items-center gap-2 hover:text-[#E5B968]">
+                  <Phone size={14} /> {CONTACT.caleb.phone}
+                </a>
+                <a href={`mailto:${CONTACT.caleb.email}`} className="flex items-center gap-2 hover:text-[#E5B968] break-all">
+                  <Mail size={14} /> {CONTACT.caleb.email}
+                </a>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         <div className="border-t border-[#3A3A3A] mt-12 pt-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">

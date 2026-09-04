@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
+import { SHOW_CALEB } from "@/byrd/data";
 import { Building2, Check, ArrowRight } from "lucide-react";
 
 export default function QuoteRequestPage() {
@@ -65,7 +66,7 @@ export default function QuoteRequestPage() {
             <div className="w-14 h-14 mx-auto rounded-full bg-[#E5F1E5] grid place-items-center text-[#2F6B3A]"><Check size={22} /></div>
             <h1 className="font-serif text-3xl font-bold mt-4">We've got it.</h1>
             <p className="text-[#6B6558] mt-3 max-w-md mx-auto">
-              Wayne or Caleb will reach out shortly with live terms. If you need us
+              {SHOW_CALEB ? "Wayne or Caleb" : "Wayne"} will reach out shortly with live terms. If you need us
               faster, call <b>832-813-9802</b> — that goes to Wayne directly.
             </p>
             <Link to="/" className="byrd-btn byrd-btn-outline mt-6 inline-flex" data-testid="quote-request-home">
@@ -114,7 +115,7 @@ export default function QuoteRequestPage() {
                   {busy ? "Sending…" : "Send Request"} <ArrowRight size={13} />
                 </button>
                 <p className="text-[11px] text-[#6B6558] mt-3">
-                  Your info goes directly to Wayne &amp; Caleb Byrd — never shared, sold, or added to a list.
+                  Your info goes directly to {SHOW_CALEB ? "Wayne & Caleb Byrd" : "Wayne Byrd"} — never shared, sold, or added to a list.
                 </p>
               </div>
             </form>

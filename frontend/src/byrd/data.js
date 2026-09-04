@@ -8,6 +8,11 @@ export const CONTACT = {
   caleb: { name: "Caleb Byrd", phone: "832-661-4390", email: "caleb@byrd-co.com" },
 };
 
+// Public-site visibility toggle. Flip to `true` when Caleb rejoins the public
+// marketing site — every public surface (Home hero, principals grid, footer,
+// portal welcome, quote page, thank-you copy) reads this flag.
+export const SHOW_CALEB = false;
+
 export const LOAN_PROGRAMS = [
   {
     key: "purchase",
@@ -75,8 +80,7 @@ export const PROCESS_STEPS = [
 ];
 
 export const PRINCIPAL_PHOTOS = {
-  wayne:
-    "https://images.unsplash.com/photo-1560250097-0b93528c311a?w=600&h=700&fit=crop",
+  wayne: "/team/wayne.jpg",
   caleb:
     "https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=600&h=700&fit=crop",
 };

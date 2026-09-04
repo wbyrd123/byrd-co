@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { api, API_BASE } from "@/lib/api";
-import { LOGO_URL, CONTACT } from "@/byrd/data";
+import { LOGO_URL, CONTACT, SHOW_CALEB } from "@/byrd/data";
 import { StatusChip, readFileAsBase64, fmtSize } from "@/byrd/docHelpers";
 import { toast } from "sonner";
 import AdaChatPanel from "@/byrd/AdaChatPanel";
@@ -186,7 +186,7 @@ export default function ClientPortal() {
                 </div>
                 <h3 className="font-serif text-2xl font-bold mt-4">You&apos;re all set up.</h3>
                 <p className="text-[#6B6558] mt-2 max-w-md mx-auto">
-                  When Wayne or Caleb starts a loan scenario for you, it&apos;ll show up here with its own
+                  When {SHOW_CALEB ? "Wayne or Caleb" : "Wayne"} starts a loan scenario for you, it&apos;ll show up here with its own
                   document checklist to complete.
                 </p>
               </div>
@@ -418,9 +418,9 @@ export default function ClientPortal() {
           {/* Sidebar */}
           <aside className="space-y-6">
             <div className="byrd-card p-6" data-testid="client-help">
-              <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Your Loan Officers</div>
+              <div className="font-mono text-[11px] uppercase text-[#6B6558] tracking-widest">// Your Loan {SHOW_CALEB ? "Officers" : "Officer"}</div>
               <div className="mt-4 space-y-4">
-                {[CONTACT.wayne, CONTACT.caleb].map((p) => (
+                {(SHOW_CALEB ? [CONTACT.wayne, CONTACT.caleb] : [CONTACT.wayne]).map((p) => (
                   <div key={p.email}>
                     <div className="font-serif text-lg font-semibold">{p.name}</div>
                     <div className="mt-1 flex flex-col gap-1 text-sm">

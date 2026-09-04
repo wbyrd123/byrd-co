@@ -11,6 +11,7 @@ import {
   LOAN_TYPES_FLAT,
   PROPERTY_TYPES_FLAT,
   PRINCIPAL_PHOTOS,
+  SHOW_CALEB,
 } from "@/byrd/data";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
@@ -77,16 +78,20 @@ const QuoteForm = () => {
         </div>
         <h3 className="font-serif text-3xl font-bold mt-5">Request received.</h3>
         <p className="text-[#6B6558] mt-3 max-w-md mx-auto">
-          Wayne and Caleb have been notified. Expect a call within one business day.
-          If it&apos;s urgent, ring us directly — numbers below.
+          {SHOW_CALEB
+            ? "Wayne and Caleb have been notified. Expect a call within one business day."
+            : "Wayne has been notified. Expect a call within one business day."}
+          {" "}If it&apos;s urgent, ring us directly — numbers below.
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-4 font-mono text-sm">
           <a href={`tel:${CONTACT.wayne.phone}`} className="byrd-btn byrd-btn-outline">
             <Phone size={14} /> {CONTACT.wayne.phone}
           </a>
-          <a href={`tel:${CONTACT.caleb.phone}`} className="byrd-btn byrd-btn-outline">
-            <Phone size={14} /> {CONTACT.caleb.phone}
-          </a>
+          {SHOW_CALEB && (
+            <a href={`tel:${CONTACT.caleb.phone}`} className="byrd-btn byrd-btn-outline">
+              <Phone size={14} /> {CONTACT.caleb.phone}
+            </a>
+          )}
         </div>
       </div>
     );
@@ -403,10 +408,10 @@ export default function Home() {
               The people behind the placements.
             </h2>
           </div>
-          <div className="mt-12 grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div className={`mt-12 grid grid-cols-1 gap-8 ${SHOW_CALEB ? "md:grid-cols-2" : "md:max-w-2xl md:mx-auto"}`}>
             {[
               { key: "wayne", ...CONTACT.wayne, bio: "Two decades structuring commercial real estate debt across multifamily, hospitality and mixed-use." },
-              { key: "caleb", ...CONTACT.caleb, bio: "Focuses on portfolio, construction and value-add loans for owner-operators and developers." },
+              ...(SHOW_CALEB ? [{ key: "caleb", ...CONTACT.caleb, bio: "Focuses on portfolio, construction and value-add loans for owner-operators and developers." }] : []),
             ].map((p) => (
               <div key={p.key} className="byrd-card overflow-hidden" data-testid={`principal-${p.key}`}>
                 <div className="aspect-[5/3] overflow-hidden">
