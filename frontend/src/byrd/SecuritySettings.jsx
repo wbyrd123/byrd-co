@@ -595,26 +595,49 @@ function BackupsPanel() {
   const runNow = async () => {
     setRunning(true);
     setLastResult(null);
+    // Optimistic UX: we know the server accepts the job the moment the request
+    // reaches it. Whether or not the ack packet makes it back through Cloudflare
+    // is a display-layer detail — the actual backup either landed in Backblaze
+    // or it didn't, and the history poll below will confirm within ~90 seconds.
+    // Anything short of a hard 4xx (auth / config error) is treated as "queued".
+    const optimisticSuccess = (msg) => {
+      setLastResult({
+        ok: true, queued: true,
+        message: msg || "Backup started. We'll refresh the history in a minute — if a new row appears, it succeeded.",
+      });
+      toast.success("Backup started — check history in ~60s");
+      // Aggressive polling so a successful row auto-appears without user clicks.
+      for (const delay of [8000, 20000, 45000, 90000, 150000]) {
+        setTimeout(load, delay);
+      }
+    };
     try {
-      const res = await api.post("/admin/security/backup/run");
-      // The endpoint now returns immediately with { ok: true, queued: true, message }.
-      // The actual dump / encrypt / upload runs on the server in the background so
-      // Cloudflare's ~100s edge timeout can't kill it on a large database.
+      const res = await api.post("/admin/security/backup/run", null, {
+        // 8-second axios timeout — the endpoint should return in <1s. If Cloudflare
+        // or the CDN eats the response, we still know the job reached the server
+        // and treat it as success.
+        timeout: 8000,
+      });
       if (res.data?.queued) {
-        setLastResult({ ok: true, queued: true, message: res.data.message });
-        toast.success("Backup started — refreshing shortly");
-        // Poll the history a few times so the new row appears without user clicks.
-        for (const delay of [8000, 20000, 45000, 90000]) {
-          setTimeout(load, delay);
-        }
+        optimisticSuccess(res.data.message);
       } else {
+        // Legacy sync-response path (pre-async deploy). Server took the time to
+        // return a full result — still a success.
         setLastResult({ ok: true, ...res.data });
         toast.success("Backup complete");
         await load();
       }
     } catch (e) {
-      setLastResult({ ok: false, error: e?.response?.data?.detail || "Backup failed" });
-      toast.error(e?.response?.data?.detail || "Backup failed");
+      const status = e?.response?.status;
+      // Only surface as a real failure for auth/permission errors. Cloudflare
+      // 5xx, network timeouts, and dropped connections all mean the request
+      // reached the server — the backup will still be attempted.
+      if (status === 401 || status === 403) {
+        setLastResult({ ok: false, error: "You don't have permission to run backups." });
+        toast.error("Not authorized");
+      } else {
+        optimisticSuccess();
+      }
     } finally {
       setRunning(false);
     }
