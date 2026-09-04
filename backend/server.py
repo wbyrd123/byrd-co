@@ -3985,6 +3985,18 @@ async def admin_run_backup(background: BackgroundTasks, admin=Depends(require_ad
     }
 
 
+@api.get("/admin/security/backup/version")
+async def admin_backup_version(admin=Depends(require_admin)):
+    """Diagnostic — returns whether the backup service has the async-background
+    fix. Hitting this on prod tells you if the redeploy actually landed."""
+    from backup_service import _dump_mongo_python  # only exists in the new code
+    return {
+        "async_run_shipped": True,
+        "python_dump_shipped": callable(_dump_mongo_python),
+        "server_time": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @api.get("/admin/security/backup/list")
 async def admin_list_backups(admin=Depends(require_admin), from_b2: bool = False):
     """List recent backups. `from_b2=true` reads directly from Backblaze (source of truth)."""
