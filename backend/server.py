@@ -699,6 +699,7 @@ class ContactCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     email: Optional[EmailStr] = None
     phone: Optional[str] = ""
+    company: Optional[str] = ""
     contact_type: List[Literal["email", "phone", "text"]] = Field(default_factory=list)
     notes: Optional[str] = ""
     tags: List[str] = Field(default_factory=list)
@@ -708,6 +709,7 @@ class ContactUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
+    company: Optional[str] = None
     contact_type: Optional[List[Literal["email", "phone", "text"]]] = None
     notes: Optional[str] = None
     tags: Optional[List[str]] = None
@@ -899,7 +901,7 @@ async def contacts_promote_to_client(cid: str, request: Request, admin=Depends(r
 @api.post("/admin/contacts/import-csv")
 async def contacts_import_csv(body: ContactCSVImport, admin=Depends(require_admin)):
     """Import contacts from a CSV. Expected headers (any subset, any order):
-    name, email, phone, contact_type, tags, notes.
+    name, email, phone, company, contact_type, tags, notes.
     contact_type + tags can be comma-or-pipe-separated within their cell."""
     import csv, io
     reader = csv.DictReader(io.StringIO(body.csv_text))
@@ -918,6 +920,7 @@ async def contacts_import_csv(body: ContactCSVImport, admin=Depends(require_admi
             continue
         email_val = norm.get("email") or None
         phone_val = norm.get("phone") or ""
+        company_val = norm.get("company") or norm.get("organization") or norm.get("employer") or ""
         raw_types = norm.get("contact_type") or norm.get("preferred contact") or ""
         types = [t.strip().lower() for t in re.split(r"[|,]", raw_types) if t.strip()]
         types = [t for t in types if t in ("email", "phone", "text")]
@@ -929,6 +932,7 @@ async def contacts_import_csv(body: ContactCSVImport, admin=Depends(require_admi
             "name": name,
             "email": email_val,
             "phone": phone_val,
+            "company": company_val,
             "contact_type": types,
             "tags": tags,
             "notes": notes,

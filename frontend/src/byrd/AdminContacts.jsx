@@ -80,7 +80,7 @@ export default function AdminContacts() {
     const term = q.trim().toLowerCase();
     if (!term) return contacts;
     return contacts.filter((c) =>
-      [c.name, c.email, c.phone, (c.tags || []).join(" ")].join(" ").toLowerCase().includes(term)
+      [c.name, c.email, c.phone, c.company, (c.tags || []).join(" ")].join(" ").toLowerCase().includes(term)
     );
   }, [contacts, q]);
 
@@ -148,12 +148,12 @@ export default function AdminContacts() {
           </div>
         ) : (
           <div className="border border-[#E4DFD1] rounded-md overflow-hidden">
-            <div className="hidden md:grid grid-cols-[24px_1.4fr_1.4fr_1fr_1fr_120px_60px] gap-2 px-3 py-2 bg-[#FBF8F1] border-b border-[#E4DFD1] text-[10px] uppercase font-mono tracking-widest text-[#6B6558]">
+            <div className="hidden md:grid grid-cols-[24px_1.4fr_1.4fr_1fr_1fr_1fr_120px_60px] gap-2 px-3 py-2 bg-[#FBF8F1] border-b border-[#E4DFD1] text-[10px] uppercase font-mono tracking-widest text-[#6B6558]">
               <input type="checkbox" checked={selected.size === filtered.length && filtered.length > 0} onChange={toggleAll} data-testid="select-all" />
-              <div>Name</div><div>Email</div><div>Phone</div><div>Tags</div><div>Last Contact</div><div></div>
+              <div>Name</div><div>Email</div><div>Phone</div><div>Company</div><div>Tags</div><div>Last Contact</div><div></div>
             </div>
             {filtered.map((c) => (
-              <div key={c.id} className="grid grid-cols-[24px_1.4fr_1.4fr_1fr_1fr_120px_60px] gap-2 px-3 py-2 border-b border-[#E4DFD1] last:border-b-0 items-center hover:bg-[#FBF8F1]" data-testid={`contact-row-${c.id}`}>
+              <div key={c.id} className="grid grid-cols-[24px_1.4fr_1.4fr_1fr_1fr_1fr_120px_60px] gap-2 px-3 py-2 border-b border-[#E4DFD1] last:border-b-0 items-center hover:bg-[#FBF8F1]" data-testid={`contact-row-${c.id}`}>
                 <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSel(c.id)} data-testid={`contact-select-${c.id}`} />
                 <div className="min-w-0">
                   <div className="font-semibold text-sm truncate">{c.name}</div>
@@ -177,6 +177,7 @@ export default function AdminContacts() {
                 </div>
                 <div className="text-xs text-[#2A2A2A] truncate">{c.email || "—"}</div>
                 <div className="text-xs text-[#2A2A2A] truncate">{c.phone || "—"}</div>
+                <div className="text-xs text-[#2A2A2A] truncate" title={c.company || ""}>{c.company || "—"}</div>
                 <div className="flex flex-wrap gap-1">
                   {(c.tags || []).slice(0, 3).map((t) => (
                     <span key={t} className="byrd-chip"><Tag size={9} /> {t}</span>
@@ -226,6 +227,7 @@ function ContactDialog({ initial, onClose, onSaved }) {
       name: seed.name || "",
       email: seed.email || "",
       phone: seed.phone || "",
+      company: seed.company || "",
       contact_type: Array.isArray(seed.contact_type) ? seed.contact_type : (isNew ? ["email"] : []),
       notes: seed.notes || "",
       tags: Array.isArray(seed.tags) ? seed.tags : [],
@@ -304,6 +306,16 @@ function ContactDialog({ initial, onClose, onSaved }) {
           <div className="grid grid-cols-2 gap-3">
             <div><label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Email</label><input type="email" value={f.email || ""} onChange={(e) => setF({ ...f, email: e.target.value })} className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1]" data-testid="c-email" /></div>
             <div><label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Phone</label><input value={f.phone || ""} onChange={(e) => setF({ ...f, phone: e.target.value })} className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1]" data-testid="c-phone" /></div>
+          </div>
+          <div>
+            <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Company</label>
+            <input
+              value={f.company || ""}
+              onChange={(e) => setF({ ...f, company: e.target.value })}
+              className="mt-1 w-full h-11 px-3 rounded-md border border-[#E4DFD1]"
+              placeholder="Frost Bank · Marcus & Millichap · Byrd Rep Agency"
+              data-testid="c-company"
+            />
           </div>
           <div>
             <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">Preferred Contact</label>
