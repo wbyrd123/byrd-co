@@ -111,6 +111,20 @@ def check_pw(pw: str, hashed: str) -> bool:
     return bcrypt.checkpw(pw.encode("utf-8"), hashed.encode("utf-8"))
 
 
+# Async wrappers — bcrypt is CPU-bound (~200-300ms per call at cost=12) and would
+# block the entire event loop if awaited directly from an async endpoint. Under
+# any concurrency (multiple users logging in, brute-force probes, retry storms)
+# this queues requests behind CPU work, which is what causes Cloudflare's
+# "origin could not parse" 520/524 errors on prod. Running in a thread lets
+# other requests proceed while bcrypt crunches.
+async def check_pw_async(pw: str, hashed: str) -> bool:
+    return await asyncio.to_thread(check_pw, pw, hashed)
+
+
+async def hash_pw_async(pw: str) -> str:
+    return await asyncio.to_thread(hash_pw, pw)
+
+
 async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
     if not creds:
         raise HTTPException(status_code=401, detail="Missing token")
@@ -1151,7 +1165,7 @@ async def login(body: LoginInput, request: Request):
                         actor_email=email, metadata={"reason": "locked"}, result="failure")
         raise HTTPException(status_code=429, detail=locked)
     user = await db.users.find_one({"email": email})
-    if not user or not check_pw(body.password, user["password_hash"]):
+    if not user or not await check_pw_async(body.password, user["password_hash"]):
         await _record_login_attempt(email, success=False)
         await audit_log(db, event_type="auth.login.failure", request=request,
                         actor_email=email,
@@ -1359,7 +1373,7 @@ async def two_fa_disable(body: TwoFADisableBody, request: Request, user=Depends(
     full = await db.users.find_one({"id": user["id"]})
     if not full or not full.get("totp_enabled"):
         raise HTTPException(status_code=400, detail="2FA is not enabled on this account.")
-    if not check_pw(body.password, full["password_hash"]):
+    if not await check_pw_async(body.password, full["password_hash"]):
         raise HTTPException(status_code=401, detail="Password is incorrect.")
     secret = full.get("totp_secret")
     code_ok = (
@@ -1593,7 +1607,7 @@ async def accept_invite(token: str, body: InviteAccept, request: Request):
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {
-            "password_hash": hash_pw(body.password),
+            "password_hash": await hash_pw_async(body.password),
             "pending": False,
             "activated_at": now_iso(),
         }},
@@ -1815,7 +1829,7 @@ async def password_reset_confirm(token: str, body: PasswordResetConfirm, request
         raise HTTPException(status_code=404, detail="User not found")
     await db.users.update_one(
         {"id": user["id"]},
-        {"$set": {"password_hash": hash_pw(body.password), "password_updated_at": now_iso()}},
+        {"$set": {"password_hash": await hash_pw_async(body.password), "password_updated_at": now_iso()}},
     )
     await db.password_reset_tokens.update_one({"id": tok["id"]},
                                               {"$set": {"used_at": now_iso()}})
@@ -6754,7 +6768,7 @@ async def lender_activate(token: str, body: LenderActivateBody):
         raise HTTPException(status_code=404, detail="User not found")
     await db.users.update_one(
         {"id": user["id"]},
-        {"$set": {"password_hash": hash_pw(body.password), "pending": False,
+        {"$set": {"password_hash": await hash_pw_async(body.password), "pending": False,
                   "activated_at": now_iso()}},
     )
     await db.lender_activation_tokens.update_one({"id": tok["id"]},
