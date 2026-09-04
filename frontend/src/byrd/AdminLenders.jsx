@@ -22,6 +22,8 @@ const emptyLender = () => ({
   decision_speed_days: null,
   typical_fees: "",
   notes: "",
+  deposit_relationship_required: null,
+  borrower_in_state_required: null,
   status: "active",
 });
 
@@ -41,6 +43,33 @@ const Sel = ({ children, ...props }) => (
 const TA = (props) => (
   <textarea {...props} className={`w-full px-3 py-2 rounded-md border border-[#E4DFD1] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[#C89434]/40 focus:border-[#C89434] ${props.className || ""}`} />
 );
+
+// Compact tri-state Yes / No toggle for the admin lender editor. Matches the
+// public apply form's YesNoField but sized to fit the two-column grid layout.
+function AdminYesNo({ label, value, onChange, testId }) {
+  const pill = (active) =>
+    `h-9 px-4 rounded-md border text-xs font-medium transition-colors ${
+      active
+        ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
+        : "bg-white text-[#1A1A1A] border-[#E4DFD1] hover:bg-[#F3EEE0]"
+    }`;
+  return (
+    <div data-testid={testId}>
+      <label className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558]">{label}</label>
+      <div className="mt-1 flex gap-2 items-center">
+        <button type="button" onClick={() => onChange(value === true ? null : true)}
+          className={pill(value === true)} data-testid={`${testId}-yes`}>Yes</button>
+        <button type="button" onClick={() => onChange(value === false ? null : false)}
+          className={pill(value === false)} data-testid={`${testId}-no`}>No</button>
+        {value !== null && value !== undefined && (
+          <button type="button" onClick={() => onChange(null)}
+            className="text-[10px] font-mono uppercase tracking-widest text-[#6B6558] hover:text-[#1A1A1A]"
+            data-testid={`${testId}-clear`}>Clear</button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function LenderEditor({ open, initial, onClose, onSaved }) {
   const [form, setForm] = useState(initial || emptyLender());
@@ -201,6 +230,20 @@ function LenderEditor({ open, initial, onClose, onSaved }) {
             <h3 className="font-serif text-lg font-semibold mb-3">Notes &amp; Fees</h3>
             <div className="space-y-3">
               <Field label="Typical Fees"><Inp value={form.typical_fees || ""} onChange={(e) => set("typical_fees", e.target.value)} placeholder="1% origination + $x processing" /></Field>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <AdminYesNo
+                  label="Deposit relationship required?"
+                  value={form.deposit_relationship_required}
+                  onChange={(v) => set("deposit_relationship_required", v)}
+                  testId="l-deposit-required"
+                />
+                <AdminYesNo
+                  label="Borrower must be in bank state?"
+                  value={form.borrower_in_state_required}
+                  onChange={(v) => set("borrower_in_state_required", v)}
+                  testId="l-borrower-in-state"
+                />
+              </div>
               <Field label="Notes"><TA rows={3} value={form.notes || ""} onChange={(e) => set("notes", e.target.value)} placeholder="Prefers stabilized deals · hates hotels in Q4 · fast on refis" /></Field>
             </div>
           </section>

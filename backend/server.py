@@ -2790,6 +2790,10 @@ class LenderCreate(BaseModel):
     typical_fees: Optional[str] = ""
     notes: Optional[str] = ""
     status: Optional[Literal["active", "passive", "dormant"]] = "active"
+    # Underwriting constraints — Y/N flags surfaced on the apply form + admin
+    # editor so we can match/filter deals against them.
+    deposit_relationship_required: Optional[bool] = None
+    borrower_in_state_required: Optional[bool] = None
 
 
 class LenderUpdate(LenderCreate):
@@ -6432,6 +6436,9 @@ class LenderApplyBody(BaseModel):
     decision_speed_days: Optional[int] = None
     typical_fees: str = ""
     notes: str = ""
+    # Underwriting constraints (Y/N). None = "not specified".
+    deposit_relationship_required: Optional[bool] = None
+    borrower_in_state_required: Optional[bool] = None
     # Kept for optional forward-compatibility if we ever bring the full agreement back.
     # No longer required or enforced at registration time.
     terms_accepted: Optional[bool] = None
@@ -6589,6 +6596,8 @@ async def lender_apply(body: LenderApplyBody, background: BackgroundTasks, reque
         "typical_fees": body.typical_fees,
         "notes": body.notes,
         "website": body.website,
+        "deposit_relationship_required": body.deposit_relationship_required,
+        "borrower_in_state_required": body.borrower_in_state_required,
         "status": "active",              # match filter status
         "approval_status": "pending",    # NEW: pending / approved / rejected
         "self_registered": True,

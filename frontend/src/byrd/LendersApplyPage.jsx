@@ -40,6 +40,50 @@ const Textarea = (p) => (
   <textarea {...p} className={`w-full min-h-[80px] px-3 py-2 border border-[#E4DFD1] bg-white rounded-md text-sm focus:outline-none focus:border-[#C89434] ${p.className || ""}`} />
 );
 
+// Tri-state Yes / No pill group. `value === null` means unanswered.
+function YesNoField({ label, value, onChange, testId }) {
+  const opts = [
+    { v: true,  label: "Yes" },
+    { v: false, label: "No" },
+  ];
+  return (
+    <div data-testid={testId}>
+      <div className="text-xs font-mono uppercase tracking-widest text-[#6B6558] mb-1">{label}</div>
+      <div className="flex gap-2">
+        {opts.map((o) => {
+          const active = value === o.v;
+          return (
+            <button
+              key={String(o.v)}
+              type="button"
+              onClick={() => onChange(active ? null : o.v)}
+              className={`h-11 px-5 rounded-md border text-sm font-medium transition-colors ${
+                active
+                  ? "bg-[#1A1A1A] text-white border-[#1A1A1A]"
+                  : "bg-white text-[#1A1A1A] border-[#E4DFD1] hover:bg-[#F3EEE0]"
+              }`}
+              data-testid={`${testId}-${o.label.toLowerCase()}`}
+              aria-pressed={active}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+        {value !== null && (
+          <button
+            type="button"
+            onClick={() => onChange(null)}
+            className="h-11 px-3 text-xs font-mono uppercase tracking-widest text-[#6B6558] hover:text-[#1A1A1A]"
+            data-testid={`${testId}-clear`}
+          >
+            Clear
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function LendersApplyPage() {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
@@ -52,6 +96,9 @@ export default function LendersApplyPage() {
     min_dscr: "", min_debt_yield: "", rate_min: "", rate_max: "",
     typical_term_months: "", recourse_preference: "",
     decision_speed_days: "", typical_fees: "", notes: "",
+    // Y/N constraints — tri-state: null = unspecified, true = yes, false = no.
+    deposit_relationship_required: null,
+    borrower_in_state_required: null,
   });
 
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
@@ -87,6 +134,8 @@ export default function LendersApplyPage() {
         recourse_preference: f.recourse_preference,
         decision_speed_days: num(f.decision_speed_days),
         typical_fees: f.typical_fees, notes: f.notes,
+        deposit_relationship_required: f.deposit_relationship_required,
+        borrower_in_state_required: f.borrower_in_state_required,
       };
       await api.post("/public/lender/apply", payload);
       setDone(true);
@@ -241,6 +290,22 @@ export default function LendersApplyPage() {
             <div className="mt-4">
               <Field label="Typical Fees"><Input value={f.typical_fees} onChange={set("typical_fees")} placeholder="e.g. 1% origination, $2,500 processing" /></Field>
             </div>
+
+            <div className="mt-4 grid sm:grid-cols-2 gap-4">
+              <YesNoField
+                label="Is a deposit relationship required?"
+                value={f.deposit_relationship_required}
+                onChange={(v) => setF({ ...f, deposit_relationship_required: v })}
+                testId="deposit-required"
+              />
+              <YesNoField
+                label="Must the borrower reside in the bank's location state?"
+                value={f.borrower_in_state_required}
+                onChange={(v) => setF({ ...f, borrower_in_state_required: v })}
+                testId="borrower-in-state"
+              />
+            </div>
+
             <div className="mt-4">
               <Field label="Anything else we should know?">
                 <Textarea value={f.notes} onChange={set("notes")} placeholder="Sweet spots, deals you love, deal-breakers…" />
