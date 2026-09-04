@@ -578,13 +578,23 @@ function BackupsPanel() {
   const [running, setRunning] = React.useState(false);
   const [lastResult, setLastResult] = React.useState(null);
 
+  // Source of truth is Backblaze itself — files that exist there ARE the successful
+  // backups. This sidesteps the historical error rows in db.backup_log left over
+  // from the pre-fix era ([Errno 2] mongodump / stale timestamps).
   const load = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/admin/security/backup/list");
+      const res = await api.get("/admin/security/backup/list?from_b2=true");
       setBackups(res.data.backups || []);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Couldn't load backup history");
+      // Fall back to the mongo log if B2 listing fails (creds issue, network),
+      // so at least the user sees something.
+      try {
+        const fb = await api.get("/admin/security/backup/list");
+        setBackups(fb.data.backups || []);
+      } catch (_) {
+        toast.error(e?.response?.data?.detail || "Couldn't load backup history");
+      }
     } finally {
       setLoading(false);
     }
@@ -735,7 +745,7 @@ function BackupsPanel() {
               <tbody>
                 {backups.slice(0, 15).map((b, i) => (
                   <tr key={i} className="border-t border-[#E4DFD1]">
-                    <td className="py-2 pr-3 whitespace-nowrap">{fmtDate(b.finished_at || b.started_at)}</td>
+                    <td className="py-2 pr-3 whitespace-nowrap">{fmtDate(b.finished_at || b.started_at || b.last_modified)}</td>
                     <td className="py-2 pr-3">
                       {b.status === "error" ? (
                         <span className="inline-flex items-center gap-1 text-[#8B2A2A]"><AlertCircle size={12} /> Error</span>
@@ -743,7 +753,7 @@ function BackupsPanel() {
                         <span className="inline-flex items-center gap-1 text-[#2A5D2A]"><CheckCircle2 size={12} /> OK</span>
                       )}
                     </td>
-                    <td className="py-2 pr-3 whitespace-nowrap">{fmtBytes(b.encrypted_size)}</td>
+                    <td className="py-2 pr-3 whitespace-nowrap">{fmtBytes(b.encrypted_size ?? b.size)}</td>
                     <td className="py-2 pr-3 whitespace-nowrap">{b.retain_until ? new Date(b.retain_until).toLocaleDateString() : "—"}</td>
                     <td className="py-2 font-mono text-xs text-[#6B6558] truncate max-w-[280px]" title={b.key || b.error}>
                       {b.key || b.error || "—"}
@@ -756,7 +766,7 @@ function BackupsPanel() {
         )}
         {lastBackup && (
           <div className="text-xs text-[#6B6558] mt-3">
-            Last successful backup: <b>{fmtDate(lastBackup.finished_at || lastBackup.started_at)}</b>
+            Last successful backup: <b>{fmtDate(lastBackup.finished_at || lastBackup.started_at || lastBackup.last_modified)}</b>
           </div>
         )}
       </div>

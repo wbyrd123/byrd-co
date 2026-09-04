@@ -197,13 +197,20 @@ async def scheduled_backup_loop(db):
         await asyncio.sleep(6 * 60 * 60)  # 6 hours
 
 
-def list_recent_backups_b2(limit: int = 20) -> list:
-    """Direct list from B2 (source of truth). Returns [{key, size, last_modified, retain_until_iso}]."""
+def list_recent_backups_b2(limit: int = 30) -> list:
+    """Direct list from B2 (source of truth). Returns [{key, size, last_modified, retain_until}]."""
     client = _b2_client()
     bucket = os.environ.get("B2_BUCKET_NAME", "").strip()
-    resp = client.list_objects_v2(Bucket=bucket, MaxKeys=limit)
+    # B2 list is unbounded — cap at `limit` after sorting because we want the
+    # newest files, which by our ISO-key naming come last alphabetically.
+    resp = client.list_objects_v2(Bucket=bucket, MaxKeys=1000)
+    files = list(resp.get("Contents", []))
+    # Newest first — filename is `byrd-mongo-YYYY-MM-DDTHH-MM-SSZ...` so key
+    # sort DESC = time sort DESC.
+    files.sort(key=lambda o: o["Key"], reverse=True)
+    files = files[:limit]
     out = []
-    for obj in resp.get("Contents", []):
+    for obj in files:
         # Fetch retention on each file (best-effort — permission may vary)
         retain_until = None
         try:
@@ -218,7 +225,6 @@ def list_recent_backups_b2(limit: int = 20) -> list:
             "last_modified": obj["LastModified"].isoformat() if hasattr(obj["LastModified"], "isoformat") else str(obj["LastModified"]),
             "retain_until": retain_until,
         })
-    out.sort(key=lambda x: x["key"], reverse=True)
     return out
 
 
