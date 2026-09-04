@@ -2565,6 +2565,9 @@ class Sponsor(BaseModel):
     id: Optional[str] = None                    # server-assigned uuid on save
     name: str = ""
     entity: Optional[str] = ""
+    state: Optional[str] = ""                   # US state of residence (2-letter); used
+                                                # by lender matching when a bank requires
+                                                # the borrower to live in the bank's state
     credit_score: Optional[int] = None
     liquidity: Optional[float] = None
     net_worth: Optional[float] = None
@@ -3067,13 +3070,37 @@ def match_lenders(scen: dict, lenders: List[dict]) -> List[dict]:
                 reasons_fit.append(f"DY {dy}% ≥ {l['min_debt_yield']}%")
             else:
                 reasons_miss.append(f"DY {dy}% < {l['min_debt_yield']}%")
-        # geography
+        # geography — where the LENDER lends (property jurisdiction)
         geo = [g.upper() for g in (l.get("geography") or [])]
         if geo and state:
             if state in geo or "NATIONWIDE" in geo:
                 reasons_fit.append(f"lends in {state}")
             else:
                 reasons_miss.append(f"not in {state}")
+        # borrower-in-state requirement — some banks (community banks especially)
+        # require the borrower to reside in the same state the bank lends in. We
+        # take the first sponsor with a `state` set as the borrower state and fall
+        # back to the property state when no sponsor state is captured yet.
+        if l.get("borrower_in_state_required"):
+            borrower_state = ""
+            for sp in (scen.get("sponsors") or []):
+                s2 = (sp.get("state") or "").strip().upper()
+                if s2:
+                    borrower_state = s2
+                    break
+            if not borrower_state:
+                borrower_state = state  # fall back to property state
+            if borrower_state and geo:
+                if borrower_state in geo or "NATIONWIDE" in geo:
+                    reasons_fit.append(f"borrower in {borrower_state} — bank state OK")
+                else:
+                    reasons_miss.append(
+                        f"requires borrower in {'/'.join(geo)} (borrower in {borrower_state})"
+                    )
+            elif not borrower_state:
+                # We simply don't have a borrower state to check against — surface
+                # this as a soft miss so the broker knows to capture it.
+                reasons_miss.append("borrower state required — capture it on the sponsor")
 
         score = len(reasons_fit) - len(reasons_miss) * 2
         results.append({

@@ -599,7 +599,7 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
             onClick={() => {
               const next = [...sponsors, {
                 id: (crypto?.randomUUID?.() || Math.random().toString(36).slice(2)),
-                name: "", entity: "", credit_score: null, liquidity: null, net_worth: null,
+                name: "", entity: "", state: "", credit_score: null, liquidity: null, net_worth: null,
                 ownership_pct: null,
                 role: sponsors.length === 0 ? "managing" : "guarantor",
                 is_guarantor: true,
@@ -656,6 +656,15 @@ function PackageTab({ scen, clients, patch, patchSection, setScen }) {
                   </Field>
                   <Field label="Entity / Borrower">
                     <Inp defaultValue={sp.entity || ""} onBlur={(e) => updateSp({ entity: e.target.value })} />
+                  </Field>
+                  <Field label="State (residence)">
+                    <Inp
+                      defaultValue={sp.state || ""}
+                      placeholder="TX"
+                      maxLength={2}
+                      onBlur={(e) => updateSp({ state: e.target.value.toUpperCase() })}
+                      data-testid={`sp-state-${idx}`}
+                    />
                   </Field>
                   <Field label="Ownership %">
                     <Inp
