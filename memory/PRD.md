@@ -11,6 +11,7 @@
 - P2: Automated weekly Postmark lender-activity summary emails
 - P2: Postmark notification to borrower when broker uploads a doc on their behalf
 - P3: Contacts on the Deal Package PDF (one printable page with everyone on the deal)
+- P3: **Voice chat with Ada (Option C — Realtime API)** — parked. Revisit when OpenAI cuts pricing below current $0.06/min; user prefers true bidirectional real-time (no push-to-talk). Would live on Loan Quote Studio + Personal Assistant. Requires user's own OpenAI API key.
 - P3: Refactor `server.py` (~11k lines) into modular routes
 
 
