@@ -700,6 +700,7 @@ class ContactCreate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = ""
     company: Optional[str] = ""
+    state: Optional[str] = Field(default="", max_length=40)
     contact_type: List[Literal["email", "phone", "text"]] = Field(default_factory=list)
     notes: Optional[str] = ""
     tags: List[str] = Field(default_factory=list)
@@ -710,6 +711,7 @@ class ContactUpdate(BaseModel):
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     company: Optional[str] = None
+    state: Optional[str] = None
     contact_type: Optional[List[Literal["email", "phone", "text"]]] = None
     notes: Optional[str] = None
     tags: Optional[List[str]] = None
@@ -921,6 +923,8 @@ async def contacts_import_csv(body: ContactCSVImport, admin=Depends(require_admi
         email_val = norm.get("email") or None
         phone_val = norm.get("phone") or ""
         company_val = norm.get("company") or norm.get("organization") or norm.get("employer") or ""
+        state_val = norm.get("state") or norm.get("st") or norm.get("province") or ""
+        state_val = state_val.strip().upper() if len(state_val.strip()) == 2 else state_val.strip()
         raw_types = norm.get("contact_type") or norm.get("preferred contact") or ""
         types = [t.strip().lower() for t in re.split(r"[|,]", raw_types) if t.strip()]
         types = [t for t in types if t in ("email", "phone", "text")]
@@ -933,6 +937,7 @@ async def contacts_import_csv(body: ContactCSVImport, admin=Depends(require_admi
             "email": email_val,
             "phone": phone_val,
             "company": company_val,
+            "state": state_val,
             "contact_type": types,
             "tags": tags,
             "notes": notes,
@@ -7908,6 +7913,9 @@ At the top of every turn you receive:
     - Include `company` when the broker mentions where the person works ("John from Unity Bank",
       "Sarah at Marcus & Millichap", "he works for Frost"). Extract the company name into the
       `company` field — DO NOT bury it in `notes` and DO NOT skip it. Never invent a company.
+    - Include `state` when the broker mentions where the person is located ("in Texas", "based
+      in TX", "Dallas office" → TX, "our LA office" → CA). Use the 2-letter US postal code
+      when unambiguous. This is used for regional lender outreach. Never invent a state.
     - Pick sensible `tags` from what's already in `contacts_stats.tag_counts` when they fit
       (e.g. `["referral"]`, `["lender"]`, `["past sponsor"]`). If the broker says the person is a
       "borrower", "client", "referral", etc., use that as a tag. Otherwise leave `tags` empty.
@@ -7918,9 +7926,9 @@ At the top of every turn you receive:
     contact by their `id` from `contacts_index` (preferred) or by exact `name`/`email` match.
     `add_tags` is additive — existing tags are preserved. Use `set_tags` if the broker asks to
     REPLACE the tag set entirely. `set_notes` overwrites notes; `append_notes` appends with a
-    newline. Contact info fields (`set_phone`, `set_email`, `set_company`) overwrite the value —
-    only emit them when the broker EXPLICITLY provides a new value ("update his phone to X",
-    "his company is Frost Bank now"). Rules:
+    newline. Contact info fields (`set_phone`, `set_email`, `set_company`, `set_state`) overwrite
+    the value — only emit them when the broker EXPLICITLY provides a new value ("update his
+    phone to X", "his company is Frost Bank now", "she moved to Colorado"). Rules:
     - NEVER emit `contact_updates` for a person who is not in `contacts_index`. If they're only in
       `clients`, add them to the CRM first via `new_contacts`.
     - If the broker says something like "tag Rod, Jose, and Breona as borrower", first check each
@@ -7930,8 +7938,8 @@ At the top of every turn you receive:
     - Confirm in visible chat what was tagged/updated.
     - The `notes` field and the `company` field are SEPARATE. If the broker says "he works for
       X" or "his company is X", you MUST emit `set_company: "X"` — never assume the company
-      is captured just because it appears somewhere in `notes`. Same for phone and email:
-      if the broker gives a new one, emit `set_phone` / `set_email` explicitly.
+      is captured just because it appears somewhere in `notes`. Same for phone, email, and state:
+      if the broker gives a new one, emit `set_phone` / `set_email` / `set_state` explicitly.
 
 # Response format
 Write your natural-language reply first. Then, ONLY IF you have structured actions to take,
@@ -7992,6 +8000,7 @@ append fenced blocks at the end of your message:
     "email": "sarah@wellsfargo.com",
     "phone": "555-123-4567",
     "company": "Wells Fargo",
+    "state": "TX",
     "tags": ["lender"],
     "notes": "Wells Fargo commercial banker — hotel and multifamily focus."
   }
@@ -8008,7 +8017,8 @@ append fenced blocks at the end of your message:
     "set_notes": null,
     "set_phone": null,
     "set_email": null,
-    "set_company": null
+    "set_company": null,
+    "set_state": null
   }
 ]
 ```
@@ -8214,6 +8224,8 @@ def _split_assistant_response(full_text: str) -> dict:
                         "name": str(x["name"]).strip()[:200],
                         "email": (str(x.get("email") or "").strip().lower() or None),
                         "phone": (str(x.get("phone") or "").strip() or ""),
+                        "company": (str(x.get("company") or "").strip())[:200],
+                        "state": (str(x.get("state") or "").strip())[:40],
                         "tags": [str(t).strip() for t in tags if str(t).strip()][:8],
                         "notes": (str(x.get("notes") or "").strip())[:1000],
                     })
@@ -8243,6 +8255,14 @@ def _split_assistant_response(full_text: str) -> dict:
                         add_tags = []
                     if set_tags is not None and not isinstance(set_tags, list):
                         set_tags = None
+                    # Info-field overwrites — pass through to the applier, which decides
+                    # whether the value actually differs from the current contact record.
+                    def _info(key: str):
+                        v = x.get(key)
+                        if v is None:
+                            return None
+                        return str(v).strip()[:200] or None
+
                     contact_updates.append({
                         "id": ident_id or None,
                         "name": ident_name or None,
@@ -8252,6 +8272,10 @@ def _split_assistant_response(full_text: str) -> dict:
                                     if isinstance(set_tags, list) else None),
                         "append_notes": (str(x.get("append_notes") or "").strip() or None),
                         "set_notes": (str(x.get("set_notes") or "").strip() or None),
+                        "set_phone": _info("set_phone"),
+                        "set_email": _info("set_email"),
+                        "set_company": _info("set_company"),
+                        "set_state": _info("set_state"),
                     })
                 if not contact_updates:
                     contact_updates = None
@@ -8408,11 +8432,13 @@ async def _apply_contact_updates(parsed_updates: list[dict], admin_id: str) -> l
         # Empty string is treated as "clear the field"; None means "leave untouched".
         updates_set: dict = {"tags": new_tags, "notes": new_notes, "updated_at": now}
         info_changed = False
-        for field, key in (("phone", "set_phone"), ("email", "set_email"), ("company", "set_company")):
+        for field, key in (("phone", "set_phone"), ("email", "set_email"), ("company", "set_company"), ("state", "set_state")):
             if key in u and u[key] is not None:
                 val = (u[key] or "").strip()
                 if field == "email":
                     val = val.lower() or None   # allow clearing to null
+                if field == "state" and len(val) == 2:
+                    val = val.upper()
                 if (contact.get(field) or "") != (val or ""):
                     updates_set[field] = val
                     info_changed = True
@@ -8473,6 +8499,7 @@ async def _apply_new_contacts(parsed_contacts: list[dict], admin_id: str) -> lis
             "email": email,
             "phone": nc.get("phone") or "",
             "company": (nc.get("company") or "").strip(),
+            "state": (nc.get("state") or "").strip().upper()[:2] if len((nc.get("state") or "").strip()) == 2 else (nc.get("state") or "").strip(),
             "contact_type": channels,
             "tags": nc.get("tags") or [],
             "notes": nc.get("notes") or "",
