@@ -7905,6 +7905,9 @@ At the top of every turn you receive:
       `contacts_index`, DO NOT re-add — say "already in the CRM" instead.
     - Always include `name`. Include `email` and `phone` only if the broker gave them or they're
       obviously derivable (e.g. from the `clients` roster) — never fabricate.
+    - Include `company` when the broker mentions where the person works ("John from Unity Bank",
+      "Sarah at Marcus & Millichap", "he works for Frost"). Extract the company name into the
+      `company` field — DO NOT bury it in `notes` and DO NOT skip it. Never invent a company.
     - Pick sensible `tags` from what's already in `contacts_stats.tag_counts` when they fit
       (e.g. `["referral"]`, `["lender"]`, `["past sponsor"]`). If the broker says the person is a
       "borrower", "client", "referral", etc., use that as a tag. Otherwise leave `tags` empty.
@@ -7915,7 +7918,9 @@ At the top of every turn you receive:
     contact by their `id` from `contacts_index` (preferred) or by exact `name`/`email` match.
     `add_tags` is additive — existing tags are preserved. Use `set_tags` if the broker asks to
     REPLACE the tag set entirely. `set_notes` overwrites notes; `append_notes` appends with a
-    newline. Rules:
+    newline. Contact info fields (`set_phone`, `set_email`, `set_company`) overwrite the value —
+    only emit them when the broker EXPLICITLY provides a new value ("update his phone to X",
+    "his company is Frost Bank now"). Rules:
     - NEVER emit `contact_updates` for a person who is not in `contacts_index`. If they're only in
       `clients`, add them to the CRM first via `new_contacts`.
     - If the broker says something like "tag Rod, Jose, and Breona as borrower", first check each
@@ -7923,6 +7928,10 @@ At the top of every turn you receive:
       that are NOT, emit `new_contacts` for them (with the tag set) in the SAME response. Explain
       both in your chat reply.
     - Confirm in visible chat what was tagged/updated.
+    - The `notes` field and the `company` field are SEPARATE. If the broker says "he works for
+      X" or "his company is X", you MUST emit `set_company: "X"` — never assume the company
+      is captured just because it appears somewhere in `notes`. Same for phone and email:
+      if the broker gives a new one, emit `set_phone` / `set_email` explicitly.
 
 # Response format
 Write your natural-language reply first. Then, ONLY IF you have structured actions to take,
@@ -7982,6 +7991,7 @@ append fenced blocks at the end of your message:
     "name": "Sarah Chen",
     "email": "sarah@wellsfargo.com",
     "phone": "555-123-4567",
+    "company": "Wells Fargo",
     "tags": ["lender"],
     "notes": "Wells Fargo commercial banker — hotel and multifamily focus."
   }
@@ -7995,7 +8005,10 @@ append fenced blocks at the end of your message:
     "add_tags": ["borrower"],
     "set_tags": null,
     "append_notes": null,
-    "set_notes": null
+    "set_notes": null,
+    "set_phone": null,
+    "set_email": null,
+    "set_company": null
   }
 ]
 ```
@@ -8391,21 +8404,34 @@ async def _apply_contact_updates(parsed_updates: list[dict], admin_id: str) -> l
             new_notes = (current_notes + ("\n" if current_notes else "") + u["append_notes"]).strip()
         else:
             new_notes = current_notes
+        # Contact-info fields — only overwrite when Ada explicitly sends a non-null value.
+        # Empty string is treated as "clear the field"; None means "leave untouched".
+        updates_set: dict = {"tags": new_tags, "notes": new_notes, "updated_at": now}
+        info_changed = False
+        for field, key in (("phone", "set_phone"), ("email", "set_email"), ("company", "set_company")):
+            if key in u and u[key] is not None:
+                val = (u[key] or "").strip()
+                if field == "email":
+                    val = val.lower() or None   # allow clearing to null
+                if (contact.get(field) or "") != (val or ""):
+                    updates_set[field] = val
+                    info_changed = True
         # Only write if something actually changed
-        changed = (new_tags != current_tags) or (new_notes != current_notes)
+        changed = (new_tags != current_tags) or (new_notes != current_notes) or info_changed
         if not changed:
             continue
         await db.contacts.update_one(
             {"id": contact["id"]},
-            {"$set": {"tags": new_tags, "notes": new_notes, "updated_at": now}},
+            {"$set": updates_set},
         )
         updated.append({
             "contact_id": contact["id"],
             "name": contact.get("name"),
-            "email": contact.get("email"),
+            "email": updates_set.get("email", contact.get("email")),
             "tags": new_tags,
             "added_tags": added,
             "notes_updated": (new_notes != current_notes),
+            "info_updated": info_changed,
         })
     return updated
 
@@ -8446,6 +8472,7 @@ async def _apply_new_contacts(parsed_contacts: list[dict], admin_id: str) -> lis
             "name": name,
             "email": email,
             "phone": nc.get("phone") or "",
+            "company": (nc.get("company") or "").strip(),
             "contact_type": channels,
             "tags": nc.get("tags") or [],
             "notes": nc.get("notes") or "",
